@@ -1,9 +1,10 @@
 // strata::group's apply off the loop and its calls against apply (quest group-core A5, A10).
 //
 // held: two lone voters on one loop, each with its own chore, on threads (the loop and each
-// chore a blocking_scheduler on its own thread). Group A's apply blocks inside an entry; group B
-// on the same loop still proposes, commits, applies, answers `quorum`, reads and checkpoints, and
-// A answers once released. Then B takes a burst of writes while read_applied, checkpoints and
+// chore a blocking_scheduler on its own thread). Group A's apply blocks inside an entry, at its
+// strata write; group B on the same loop still proposes, commits, applies, answers `quorum`,
+// reads and checkpoints, and A answers once released. Meanwhile the host sees A's applied
+// position below the held entry: it is published only after strata's write (A4). Then B takes a burst of writes while read_applied, checkpoints and
 // loop-side observers run against its apply, so TSan sees every crossing of loop and chore.
 //
 // points: one lone voter on inline schedulers, its journal IO held so each completion is an event.
@@ -12,12 +13,14 @@
 // apply). Oracle: the capture's bundle equals a replay through its P_b; a close ends with its
 // last bundle at applied, which a restarted process recovers from alone, every acknowledged entry
 // with it; a read sees exactly a replay through the applied position it ran at, at or past the
-// commit index when it started.
+// commit index when it started. Late calls: a close at every event k, and a checkpoint and a
+// read at each event after it until one past the close's end; each answers a value or `closed`,
+// and `closed` once the close finished.
 //
 // reopen: a lone voter closed and reopened in the same process, then after a restart. A closed
-// group is closed in the host's table with no live turn-log record (A5); a reopen's term record
-// and its first write share one turn: as many barriers as a write to an open group (A7, checked
-// by `reopen-turn` alone until consensus reopens without an election).
+// group is closed in the host's table with no live turn-log record (A5); reopened with its close's
+// closed state it resumes its term, no election, and with `reopen-turn` a reopen and the write
+// issued with it share one turn: as many barriers as a write to an open group (A7).
 //
 // failed-open: a reopen over a lost directory fails closed (P_b > P_H) and closes its row; the
 // same process then reopens the group over its directory and reads every acknowledged entry.
@@ -156,10 +159,13 @@ void held() {
 	ff::filesystem host_disk, dir_a, dir_b;
 	strata::byte_budget budget_a{std::uint64_t(1) << 30}, budget_b{std::uint64_t(1) << 30};
 	blob::app app_a, app_b;
-	// A's apply blocks inside its "P|held|x" entry, between file effects and strata, until released.
+	// A's apply blocks inside its "P|held|x" entry, past its file effects at its strata write,
+	// until released.
 	std::atomic<bool> a_inside{false}, a_release{false};
-	app_a.after_effects = [&](const sg::entry& e) {
-		if (e.command != "P|held|x") { return; }
+	std::atomic<std::uint64_t> held_at{0};
+	app_a.before_write = [&](const sg::entry& e) {
+		if (e.command != "P|held|x" || a_release.load()) { return; }
+		held_at.store(e.index);
 		a_inside.store(true);
 		while (!a_release.load()) { std::this_thread::sleep_for(std::chrono::microseconds(200)); }
 	};
@@ -202,7 +208,8 @@ void held() {
 	check(until([&] { return r->done.load(); }) && !r->error && r->value == std::uint64_t(5), "B's read answers version 5 while A's apply is held");
 	auto k = start(L, b->checkpoint());
 	check(until([&] { return k->done.load(); }) && !k->error, "B checkpoints while A's apply is held: " + what(k->error));
-	check(!wa->done.load() && a->applied() < 2, "A's write waits on its held apply");
+	check(!wa->done.load(), "A's write waits on its held apply");
+	check(a->applied() < held_at.load(), "the host sees A's applied position below the entry whose strata write is held (A4): " + std::to_string(a->applied()) + " at entry " + std::to_string(held_at.load()));
 	std::printf("held: B answered %zu writes, a read and a checkpoint while A's apply held at applied %llu\n", answered, (unsigned long long)a->applied());
 
 	a_release.store(true);
@@ -330,9 +337,25 @@ struct process {
 	}
 };
 
-// `both`: a checkpoint and a close started together.
-enum class call { checkpoint, close, read, both };
-const char* name(call c) { return c == call::checkpoint ? "checkpoint" : c == call::close ? "close" : c == call::read ? "read" : "checkpoint and close"; }
+// `both`: a checkpoint and a close started together; `late`: a close, then a checkpoint and a read.
+enum class call { checkpoint, close, read, both, late };
+const char* name(call c) {
+	switch (c) {
+	case call::checkpoint: return "checkpoint";
+	case call::close: return "close";
+	case call::read: return "read";
+	case call::both: return "checkpoint and close";
+	default: return "close, then a checkpoint and a read";
+	}
+}
+bool is_closed(std::exception_ptr e) {
+	try {
+		if (e) { std::rethrow_exception(e); }
+	} catch (const cs::closed&) {
+		return true;
+	} catch (...) {}
+	return false;
+}
 
 // Puts, an upload consumed into a volume, a delete and a volume rotation.
 const std::vector<std::string> writes = {"P|b|bb", "P|c|cccc", "U|1|0|up", "P|b|b2", "F|1|d", "D|c", "P|e|eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "P|f|ff"};
@@ -347,9 +370,13 @@ constexpr std::uint64_t never = ~std::uint64_t(0);
 // Runs where the call met apply mid-flight: entries applied after it started.
 std::map<std::string, std::uint64_t> crossings;
 
+// A late run's: the close had finished when its checkpoint and read started.
+bool late_after_close = false;
+
 // One run: the writes start at event 0 and `c` at event `at` (never: the writes alone, the run's
-// event count returned); `io_first` lets commits run ahead of apply.
-std::uint64_t run(call c, std::uint64_t at, bool io_first) {
+// event count returned); `io_first` lets commits run ahead of apply. `late` starts its
+// checkpoint and read `later` events after its close.
+std::uint64_t run(call c, std::uint64_t at, bool io_first, std::uint64_t later = 0) {
 	disks d;
 	std::map<std::uint64_t, blob::app::seen_entry> log;
 	blob::app app;
@@ -368,26 +395,34 @@ std::uint64_t run(call c, std::uint64_t at, bool io_first) {
 	std::shared_ptr<started<bool>> cl;
 	std::shared_ptr<started<versions>> r;
 	cs::Index committed_at_read = 0, applied_at_start = 0;
+	const auto read_versions = [&] {
+		const auto s = p->lp->driver().state(gid);
+		committed_at_read = s ? s->committed : 0;
+		r = start(p->ref(), p->g->read_applied([g = p->g.get()](blob::index_type& ix) {
+			versions out;
+			out.applied = g->applied();
+			for (const auto& key : group_test::keys) {
+				if (auto f = ix.find_key(key)) { out.of[key] = f->second; }
+			}
+			return out;
+		}));
+	};
 	const auto settled = [&] { return all_done(ws) && (!k || k->done) && (!cl || cl->done) && (!r || r->done); };
 	std::uint64_t events = 0;
 	for (; events < 100000; ++events) {
 		if (events == at) {
 			applied_at_start = p->g->applied();
 			if (c == call::checkpoint || c == call::both) { k = start(p->ref(), p->g->checkpoint()); }
-			if (c == call::close || c == call::both) { cl = start(p->ref(), p->g->close()); }
-			if (c == call::read) {
-				committed_at_read = p->lp->driver().state(gid)->committed;
-				r = start(p->ref(), p->g->read_applied([g = p->g.get()](blob::index_type& ix) {
-					versions out;
-					out.applied = g->applied();
-					for (const auto& key : group_test::keys) {
-						if (auto f = ix.find_key(key)) { out.of[key] = f->second; }
-					}
-					return out;
-				}));
-			}
+			if (c == call::close || c == call::both || c == call::late) { cl = start(p->ref(), p->g->close()); }
+			if (c == call::read) { read_versions(); }
 		}
-		if (settled() && (at == never || events >= at)) { break; }
+		if (c == call::late && at != never && events == at + later) {
+			late_after_close = cl->done.load();
+			crossings[late_after_close ? "a late call started after the close finished" : "a late call started while the close ran"]++;
+			k = start(p->ref(), p->g->checkpoint());
+			read_versions();
+		}
+		if (settled() && (at == never || events >= at + (c == call::late ? later : 0))) { break; }
 		if (!p->event()) { p->loop_s.advance(5'000'000); }
 	}
 	p->pump([] { return false; }, 2000);
@@ -402,6 +437,16 @@ std::uint64_t run(call c, std::uint64_t at, bool io_first) {
 		if (!ws[i]->error && ws[i]->value) { acked.emplace_back(ws[i]->value->placement, writes[i]); }
 	}
 	cs::Index published = 0, closed_at = 0;
+	if (c == call::late) {
+		// A value or `closed`; `closed` once the close finished. A value is checked as any.
+		check(!k->error || is_closed(k->error), "the late checkpoint answers a value or closed: " + what(k->error));
+		check(!r->error || is_closed(r->error), "the late read answers a value or closed: " + what(r->error));
+		if (late_after_close) { check(is_closed(k->error) && is_closed(r->error), "after the close both answer closed: " + what(k->error) + ", " + what(r->error)); }
+		crossings["a late checkpoint answered closed"] += is_closed(k->error);
+		crossings["a late read answered closed"] += is_closed(r->error);
+		if (r->error) { r.reset(); }
+		k.reset();
+	}
 	if (k) {
 		check(!k->error, "the checkpoint: " + what(k->error));
 		if (k->value) { published = k->value->through; }
@@ -456,14 +501,20 @@ std::uint64_t run(call c, std::uint64_t at, bool io_first) {
 void points() {
 	for (const bool io_first : {false, true}) {
 		const std::string order = io_first ? ", commits first" : ", apply first";
-		for (const auto c : {call::checkpoint, call::close, call::read, call::both}) {
+		for (const auto c : {call::checkpoint, call::close, call::read, call::both, call::late}) {
 			context = std::string(name(c)) + order + ", writes alone";
 			const auto total = run(c, never, io_first);
+			std::uint64_t runs = 0;
 			for (std::uint64_t at = 0; at <= total; ++at) {
-				context = std::string(name(c)) + order + " at event " + std::to_string(at);
-				run(c, at, io_first);
+				// `late`: each event after the close until one past its end.
+				late_after_close = false;
+				for (std::uint64_t later = 0; later == 0 || (c == call::late && !late_after_close && later < 1000); ++later) {
+					context = std::string(name(c)) + order + " at event " + std::to_string(at) + (c == call::late ? ", late at +" + std::to_string(later) : "");
+					run(c, at, io_first, later);
+					++runs;
+				}
 			}
-			std::printf("points: %s%s started at each of %llu events\n", name(c), order.c_str(), (unsigned long long)total + 1);
+			std::printf("points: %s%s started at each of %llu events, %llu runs\n", name(c), order.c_str(), (unsigned long long)total + 1, (unsigned long long)runs);
 		}
 	}
 	// Each crossing happens at some point, or the enumeration proves nothing.
@@ -472,20 +523,17 @@ void points() {
 		context = what;
 		check(n > 0, "the crossing happens");
 	}
-	check(crossings.size() == 4, "every crossing counted");
+	check(crossings.size() == 8, "every crossing counted");
 }
 
 // --- reopen: in-process, barriers counted (A5, A7) -------------------------------------------
 
-// A write's turn-log barriers, through its answer and the IO it leaves behind; `before` (a
-// reopen) counts with it.
-std::uint64_t write_barriers(process& p, const std::string& command, const std::function<void()>& before = {}) {
+// A write's turn-log barriers, through its answer and the IO it leaves behind; `with` (a reopen
+// it is issued with) counts with it.
+std::uint64_t write_barriers(process& p, const std::string& command, const std::function<void()>& with = {}) {
 	const auto barriers = [&] { return p.host->driver(0).log().stats().barriers; };
 	const auto b0 = barriers();
-	if (before) {
-		before();
-		std::printf("reopen: %llu barriers in the open\n", (unsigned long long)(barriers() - b0));
-	}
+	if (with) { with(); }
 	auto w = start(p.ref(), p.g->propose(command));
 	p.pump([&] { return w->done.load(); });
 	check(!w->error && w->value, command + ": " + what(w->error));
@@ -506,34 +554,57 @@ void reopen(bool turn) {
 		p->pump([&] { return o->done.load(); });
 		check(!o->error, "open: " + what(o->error));
 	};
+	cs::Term term = 0;
+	std::optional<std::string> record;  // the host's keeping of the close's closed state
 	const auto close_group = [&] {
+		term = p->lp->driver().state(gid)->term;
 		auto c = start(p->ref(), p->g->close());
 		p->pump([&] { return c->done.load(); });
 		check(!c->error, "close: " + what(c->error));
 		// A5: the journal group closed into the host's table, none of its records live.
 		check(p->host->status(gid) == j::GroupStatus::closed, "the closed group is closed in the host's table");
 		check(p->host->driver(0).log().live(gid).empty(), "the turn log holds no live record of the closed group");
+		record = p->g->closed_record();
+		check(record.has_value(), "a lone voter at rest closes with its closed state");
+	};
+	// A new group on the same loop and host, handed the record.
+	const auto regroup = [&] {
+		auto c = config(gid, d.storage);
+		c.closed = record;
+		p->g.reset();
+		p->g = std::make_unique<group_type>(*p->lp, std::move(c), std::make_unique<ff::io>(d.dir), app, task::scheduler_ref::of(p->chore_s));
+	};
+	const auto same_term = [&](const std::string& how) {
+		const auto s = p->lp->driver().state(gid);
+		check(s && s->role == cs::Role::Leader && s->term == term, how + " leads in its closed term, no election: term " + std::to_string(s ? s->term : 0) + ", closed at " + std::to_string(term));
 	};
 	open_group();
 	write_barriers(*p, "P|a|aa");
 	const auto open_write = write_barriers(*p, "P|b|bb");
 	close_group();
 
-	// The same process reopens it: a new group on the same loop and host (A7).
-	p->g.reset();
-	p->g = std::make_unique<group_type>(*p->lp, config(gid, d.storage), std::make_unique<ff::io>(d.dir), app, task::scheduler_ref::of(p->chore_s));
-	const auto reopen_write = write_barriers(*p, "P|c|cc", open_group);
-	std::printf("reopen: a write to an open group %llu barriers; a reopen and its first write %llu\n", (unsigned long long)open_write, (unsigned long long)reopen_write);
+	// The same process reopens it on a request: the reopen and the write issued together (A7).
+	regroup();
+	std::shared_ptr<started<bool>> reopening;
+	const auto reopen_write = write_barriers(*p, "P|c|cc", [&] {
+		reopening = start(p->ref(), p->g->open());
+	});
+	p->pump([&] { return reopening->done.load(); });
+	check(!reopening->error, "the reopen: " + what(reopening->error));
+	std::printf("reopen: a write to an open group %llu barriers; a reopen and the write issued with it %llu\n", (unsigned long long)open_write, (unsigned long long)reopen_write);
 	check(open_write > 0, "a write takes a barrier");
+	same_term("the reopened group");
 	if (turn) { check(reopen_write == open_write, "a reopen's term record shares its first write's turn: " + std::to_string(reopen_write) + " barriers, an open group's write " + std::to_string(open_write)); }
 	close_group();
 
 	// A restarted host recovers its log through TurnLog::read: still no live record of the
-	// group, and a reopen recovers every acknowledged entry from the bundle.
+	// group, and a reopen with the record recovers every acknowledged entry from the bundle.
 	p->shut();
 	p = std::make_unique<process>(d, app);
 	check(p->host->status(gid) == j::GroupStatus::closed && p->host->driver(0).log().live(gid).empty(), "a restarted host holds no live record of the closed group");
+	regroup();
 	open_group();
+	same_term("the group reopened after a restart");
 	auto r = start(p->ref(), p->g->read_applied([](blob::index_type& ix) {
 		std::map<std::string, std::uint64_t> of;
 		for (const auto& key : group_test::keys) {

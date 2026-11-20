@@ -79,6 +79,8 @@ struct app {
 	bool diverged = false;
 	// Called after an entry's file effects, before its strata write: a test starts work there.
 	std::function<void(const strata::group::entry&)> after_effects;
+	// Called as apply asks for an entry's strata write, at each attempt: a test holds apply there.
+	std::function<void(const strata::group::entry&)> before_write;
 
 	// The bytes a put or final pushes, from the starting state.
 	template <class Files>
@@ -122,6 +124,7 @@ struct app {
 
 	// Qualified: the member's own name would change the unqualified one's meaning (GCC).
 	std::optional<blob::transaction> transaction(const state& s, const strata::group::entry& e) const {
+		if (before_write) { before_write(e); }
 		if (e.kind != kronuz::consensus::EntryKind::Command) { return std::nullopt; }
 		auto f = fields(e.command);
 		operation o;

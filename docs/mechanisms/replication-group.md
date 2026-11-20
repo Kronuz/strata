@@ -40,10 +40,12 @@ transaction and its own state.
   4. The applied position, published after strata's write is visible.
   5. The `quorum` waiter at that index: the verdict when the term matches, `superseded` otherwise.
 - **A stalled group** (`no_space`, ENOSPC) applies nothing until the host calls `resume()`;
-  its `quorum` answers wait with it. A stalled leader arms a loop timer for one election
-  timeout; at it, it asks the loop's `applied_past` hook (the host's view of its followers) for
-  one applied past the stalled entry and `transfer_leadership`s to it, looking again each
-  timeout while the stall lasts. Without the hook, or as a lone voter, it hands off to no one.
+  its `quorum` answers wait with it. A stalled group arms a loop timer for one election
+  timeout and re-arms it each timeout while the stall lasts, whatever its role; at each, a
+  leader asks the loop's `applied_past` hook (the host's view of its followers) for one applied
+  past the stalled entry and `transfer_leadership`s to it. So a replica stalled as a follower
+  and later elected hands off within one timeout of leading. Without the hook, or as a lone
+  voter, it hands off to no one.
 - **`propose`** at `ack::none` answers at `ProposalPlaced`; at `ack::quorum` it answers when this
   replica applies the placement, with apply's verdict (Q10's lead default, `answer.hh`). A proposal
   whose placement is not yet known registers late, so apply keeps the outcomes of entries above the
@@ -62,6 +64,13 @@ transaction and its own state.
 - **A fence or a close refuses every `quorum` waiter** from then on, linked or not yet: a fence
   answers `fenced`, a close `closed` for a placement this replica never applied (a leader cut off
   from its followers closes with one). journal's `group_closed` maps to `closed` too.
+- **A close's teardown** (its last chore item) marks the group closed: every chore item after it
+  is refused, so a `checkpoint()` or `read_applied()` racing the close answers a value or
+  `closed`, and `closed` once the close finished. The close holds the checkpoints' serializer
+  from its first checkpoint through the teardown. At rest it keeps consensus's closed state
+  (`closed_record()`, RFTCLOS1); handed to a reopen's `config.closed`, the reopened replica
+  resumes its term with no election (consensus `docs/mechanisms/quiescence.md`). Keeping it
+  across a restart is the host's choice: without it a reopen elects.
 - **Lifetime**: a group is destroyed with its chore idle, after `close()` or once fenced and the
   chore drained (a stopped process). Its `applied(through)` posts hold the loop and the id, not
   the group.
@@ -114,8 +123,9 @@ again with a new group object.
 1. Open strata at P_H; fail closed if P_b > P_H. With no index there, create it deferred (D112):
    nothing is written until the first checkpoint commits it, and a crash before that finds no
    index again and recreates it from the log.
-2. Truncate each named file to its length (missing or short fails closed); delete every other
-   name under the set's prefix; sync the directory.
+2. Truncate each named file to its length (missing or short fails closed), and check each sealed
+   one against its CRC32C (a mismatch fails closed); delete every other name under the set's
+   prefix; sync the directory.
 3. Load the application state. Core then delivers every committed entry above P_b: file effects
    re-run, strata skips at or below P_H.
 4. `readable()` stays false until applied reaches P_H, since strata's documents in (P_b, P_H] may
@@ -158,22 +168,26 @@ their third placement. An election that replaces a cut-off leader's placed reque
 `superseded`, never forwarded or placed again; a follower forwards a request once, to the leader,
 which answers it, or to a replica that does not lead, which answers 503; a leader stalled on
 `no_space` hands leadership to a follower applied past it, which answers writes while the old
-leader's waits. A replica cut off while every other one checkpoints past it is named in
+leader's waits, and so does a follower stalled on `no_space` and then elected by transfer
+(`stalled_follower_elected`). A replica cut off while every other one checkpoints past it is named in
 `installs_needed()` and stays behind (no install yet).
 
 `test/group/lifetime_test.cc` (ctest `group_lifetime`, A5 and A10): two groups on one loop with
-their chores on threads; one group's apply blocks inside an entry while the other proposes,
-commits, answers `quorum`, reads and checkpoints, then takes a burst of writes against reads,
+their chores on threads; one group's apply blocks at an entry's strata write while the other
+proposes, commits, answers `quorum`, reads and checkpoints, and the host sees the held group's
+applied position below that entry (A4); the other group then takes a burst of writes against reads,
 checkpoints and loop-side observers (run under TSan). On inline schedulers, a checkpoint, a close
 and `read_applied` start at every event of a run, with apply ahead of commits and behind them:
 the bundle equals a replay through its P_b, a close's last bundle is at applied and a restarted
 process recovers from it alone with every acknowledged entry, and a read sees a replay through
-the position it ran at, at or past the commit index when it started. A lone voter closed and
-reopened in one process, then after a restart (A5, A7): a closed group is closed in the host's
-table with no live turn-log record. `reopen-turn` also requires a reopen's term record to share
-its first write's turn, as many barriers as a write to an open group (the turn log's
-`stats().barriers`); at consensus 1c08c9f a reopened lone voter elects first, and its first write
-takes 5 barriers against an open group's 2, which detent:consensus-quiescence removes. `failed-open`:
+the position it ran at, at or past the commit index when it started. A close also starts at every
+event with a checkpoint and a read at each event after it until one past its end: each answers
+a value or `closed`, `closed` once the close finished. A lone voter closed and reopened in one
+process, then after a restart (A5, A7): a closed group is closed in the host's table with no live
+turn-log record, and reopened with its closed state it leads in its closed term. `reopen-turn`
+(ctest `group_lifetime_reopen_turn`) also requires a reopen and the write issued with it to share
+one turn, as many barriers as a write to an open group (the turn log's `stats().barriers`).
+`failed-open`:
 a reopen over a directory that lost strata's index fails closed (P_b > P_H) and leaves no row;
 the same process then reopens the group over its directory and reads every acknowledged entry.
 

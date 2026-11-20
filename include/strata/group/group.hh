@@ -153,6 +153,7 @@ public:
 		jn::Identity identity{};          // the journal group's, at create
 		std::array<char, 16> uuid{};      // the strata index's, at create
 		typename index_type::options strata{};
+		std::optional<std::string> closed;  // the last close's closed_record(), if the host kept it
 	};
 
 	// `directory` is the index's, which the file set shares under its prefix; the group holds it
@@ -179,8 +180,10 @@ public:
 
 	// Opens the group: recovers it when the host's table holds it, else creates it. On the loop.
 	// A failed open fences the group and closes its row, so the id opens again on this Driver.
+	// Started on the loop, its Driver call enters before a request started after it, which so
+	// rides the reopen's turn (consensus quiescence.md).
 	task::task<void> open() {
-		co_await task::schedule_on{loop_->scheduler()};
+		if (task::current() != loop_->scheduler()) { co_await task::schedule_on{loop_->scheduler()}; }
 		if (!opening_) { throw std::logic_error("strata::group: the group was opened"); }
 		auto& driver = loop_->driver();
 		driver.open(id_, std::move(opening_->options));
@@ -190,14 +193,18 @@ public:
 			hold_.store(true);
 			std::optional<bundle> restored;
 			if (const auto status = loop_->host().status(id_); status == jn::GroupStatus::stored || status == jn::GroupStatus::closed) {
-				co_await driver.recover(id_, [&](jn::ArtifactReader& r) {
-					std::string bytes(std::size_t(r.descriptor().length), '\0');
-					for (std::size_t at = 0; at < bytes.size();) {
-						const auto n = std::min<std::size_t>(bytes.size() - at, 65536);
-						at += r.read_at(at, std::span<char>(bytes.data() + at, n));
-					}
-					restored = decode(bytes);
-				});
+				// With the last close's record, a matching one resumes its term with no election.
+				co_await driver.recover(
+					id_,
+					[&](jn::ArtifactReader& r) {
+						std::string bytes(std::size_t(r.descriptor().length), '\0');
+						for (std::size_t at = 0; at < bytes.size();) {
+							const auto n = std::min<std::size_t>(bytes.size() - at, 65536);
+							at += r.read_at(at, std::span<char>(bytes.data() + at, n));
+						}
+						restored = decode(bytes);
+					},
+					std::move(opening_->closed));
 			} else {
 				co_await driver.create(id_, opening_->identity);
 			}
@@ -263,58 +270,33 @@ public:
 	// A checkpoint (D16): capture on the chore between two entries, sync the named files and
 	// the directory, commit strata, publish, then unlink what the bundle omits. One at a time:
 	// consensus refuses a second while one is pending, which would fail a close racing it.
+	// Once the close tore down, it answers `closed`.
 	task::task<cs::CheckpointPublished> checkpoint(task::cancel_token token = {}) {
 		auto serial = co_await checkpoints_.lock();
-		bundle b;
-		co_await on_chore_step(capture_work(b));
-		// Nothing applied past the last bundle: it is this checkpoint (consensus refuses a
-		// capture at or below its base).
-		if (b.position <= published_.load()) { co_return cs::CheckpointPublished{0, published_.load()}; }
-		try {
-			co_await on_chore([&] { sync_and_commit(b); });
-		} catch (...) {
-			fence(error_text(std::current_exception()));
-			throw;
-		}
-		struct source {
-			std::string bytes;
-			std::size_t at = 0;
-			cs::Index through;
-			cs::Term term;
-			cs::CaptureMetadata metadata() const { return {0, through, term, 0}; }
-			std::size_t read(std::span<char> out) {
-				const auto n = std::min(out.size(), bytes.size() - at);
-				std::copy_n(bytes.data() + at, n, out.data());
-				at += n;
-				return n;
-			}
-		};
-		auto bytes = encode(b);
-		const auto cap = bytes.size();
-		// The admission reserves at least the bundle and the log's bound from its replacement
-		// pool: one that cannot hold them would wait forever, so it fails here.
-		if (log_bound_ + cap > replacement_pool_) {
-			throw std::length_error("strata::group: a checkpoint cannot fit the admission's replacement pool (size it to the group's limits)");
-		}
-		auto published = co_await loop_->driver().checkpoint(id_, cap, source{std::move(bytes), 0, b.position, b.term}, std::move(token));
-		published_.store(std::max(published_.load(), published.through));
-		co_await on_chore([&] { files_.unlink_retired(b.position); });
-		co_return published;
+		co_return co_await checkpoint_held(std::move(token));
 	}
 
 	// Closes the group once a checkpoint covers everything committed (D11): proposals are
 	// refused from here, then checkpoints repeat until one covers the commit index. A `quorum`
-	// waiter whose placement this replica never applied answers `closed`: not acknowledged.
+	// waiter whose placement this replica never applied answers `closed`: not acknowledged. It
+	// holds the checkpoints through the teardown, so a checkpoint racing it answers `closed`.
+	// At rest, it keeps consensus's closed state (closed_record) for a reopen without election.
 	task::task<void> close() {
 		closing_.store(true);
+		auto serial = co_await checkpoints_.lock();
 		for (;;) {
-			auto published = co_await checkpoint();
+			auto published = co_await checkpoint_held();
 			co_await task::schedule_on{loop_->scheduler()};
 			auto s = loop_->driver().state(id_);
 			if (!s || published.through >= s->committed) { break; }
 		}
+		closed_record_ = loop_->driver().closed_state(id_);
 		co_await loop_->driver().close(id_);
 		co_await on_chore([this] {
+			{
+				std::lock_guard lock(mu_);
+				closed_ = true;
+			}
 			fail_waiters(std::make_exception_ptr(cs::closed{}));
 			if (ix_) { ix_->close(); ix_.reset(); }
 			files_.close();
@@ -357,6 +339,9 @@ public:
 	file_set& files() noexcept { return files_; }
 	const state_type& state() const noexcept { return state_; }
 	const bundle& recovered() const noexcept { return recovered_; }
+	// consensus's closed state (RFTCLOS1) at the close, if it rested: the host hands it to the
+	// reopen's config.closed, so the reopened replica resumes its term (quiescence.md).
+	const std::optional<std::string>& closed_record() const noexcept { return closed_record_; }
 	files::position durable_head() const noexcept { return head_; }
 
 	// --- the loop's notices ---------------------------------------------------------------
@@ -489,9 +474,11 @@ private:
 	}
 
 	void push(work* w, bool front = false) {
+		bool closed = false;
 		{
 			std::lock_guard lock(mu_);
-			if (!fenced_.load()) {
+			closed = closed_;
+			if (!fenced_.load() && !closed) {
 				if (front) {
 					queue_.push_front(w);
 					hold_.store(false);
@@ -501,12 +488,16 @@ private:
 				w = nullptr;
 			}
 		}
-		if (w) { drop(w); }
+		if (w) { drop(w, closed); }
 		kick();
 	}
-	static void drop(work* w) {
+	// A refused item: a range is freed; a call answers `closed` once the close tore down, else
+	// group_fenced.
+	static void drop(work* w, bool closed) {
 		if (w->queued_owns) {
 			delete w;
+		} else if (closed) {
+			w->abort(std::make_exception_ptr(cs::closed{}));
 		} else {
 			w->abort(std::make_exception_ptr(group_fenced("strata::group: the replica fenced")));
 		}
@@ -522,10 +513,12 @@ private:
 	task::task<void> drain() {
 		for (;;) {
 			work* w = nullptr;
-			work_queue left;  // a fence kept the running item: it goes now
+			work_queue left;  // a fence kept the running item, or the close tore down: they go now
+			bool closed = false;
 			{
 				std::lock_guard lock(mu_);
-				if (fenced_.load()) { left = queue_.take(false); }
+				closed = closed_ && !fenced_.load();
+				if (fenced_.load() || closed_) { left = queue_.take(false); }
 				if (queue_.empty() || stalled_ || hold_.load()) {
 					running_ = false;
 				} else {
@@ -533,7 +526,7 @@ private:
 				}
 			}
 			if (!w) {
-				while (!left.empty()) { drop(left.pop_front()); }
+				while (!left.empty()) { drop(left.pop_front(), closed); }
 				co_return;
 			}
 			step r;
@@ -786,6 +779,45 @@ private:
 			return step::done;
 		};
 	}
+	// A checkpoint, its serializer held. The close tears down under it, so a checkpoint after the
+	// teardown is refused at its capture (`closed`) and none is torn down mid-way.
+	task::task<cs::CheckpointPublished> checkpoint_held(task::cancel_token token = {}) {
+		bundle b;
+		co_await on_chore_step(capture_work(b));
+		// Nothing applied past the last bundle: it is this checkpoint (consensus refuses a
+		// capture at or below its base).
+		if (b.position <= published_.load()) { co_return cs::CheckpointPublished{0, published_.load()}; }
+		struct source {
+			std::string bytes;
+			std::size_t at = 0;
+			cs::Index through;
+			cs::Term term;
+			cs::CaptureMetadata metadata() const { return {0, through, term, 0}; }
+			std::size_t read(std::span<char> out) {
+				const auto n = std::min(out.size(), bytes.size() - at);
+				std::copy_n(bytes.data() + at, n, out.data());
+				at += n;
+				return n;
+			}
+		};
+		auto bytes = encode(b);
+		const auto cap = bytes.size();
+		// The admission reserves at least the bundle and the log's bound from its replacement
+		// pool: one that cannot hold them would wait forever, so it fails here, before any sync.
+		if (log_bound_ + cap > replacement_pool_) {
+			throw std::length_error("strata::group: a checkpoint cannot fit the admission's replacement pool (size it to the group's limits)");
+		}
+		try {
+			co_await on_chore([&] { sync_and_commit(b); });
+		} catch (...) {
+			fence(error_text(std::current_exception()));
+			throw;
+		}
+		auto published = co_await loop_->driver().checkpoint(id_, cap, source{std::move(bytes), 0, b.position, b.term}, std::move(token));
+		published_.store(std::max(published_.load(), published.through));
+		co_await on_chore([&] { files_.unlink_retired(b.position); });
+		co_return published;
+	}
 	// Steps 2 and 3: the named files and the directory synced, then strata committed (P_H >= P_b).
 	void sync_and_commit(const bundle& b) {
 		files_.sync(b.files);
@@ -846,7 +878,7 @@ private:
 			dropped = queue_.take(running_);
 		}
 		fail_waiters(std::make_exception_ptr(cs::fenced(reason)));
-		while (!dropped.empty()) { drop(dropped.pop_front()); }
+		while (!dropped.empty()) { drop(dropped.pop_front(), false); }
 	}
 	// Every `quorum` waiter, linked now or later, resumes with the first such error.
 	void fail_waiters(std::exception_ptr error) {
@@ -917,6 +949,7 @@ private:
 	std::uint64_t handoff_after_;      // one election timeout, ns: a stalled leader's hand-off
 	handoff_timer handoff_;            // armed on the loop only while stalled
 	std::unique_ptr<config> opening_;  // what open() needs, freed once it returns
+	std::optional<std::string> closed_record_;  // the loop's: taken at close
 	std::unique_ptr<jn::IO> dir_;
 	file_set files_;
 	App* app_;
@@ -934,7 +967,7 @@ private:
 	// Shared, under mu_ or atomic.
 	mutable std::mutex mu_;
 	work_queue queue_;
-	bool running_ = false, stalled_ = false;
+	bool running_ = false, stalled_ = false, closed_ = false;  // closed_: torn down, chore items refused
 	std::atomic<bool> hold_{false}, fenced_{false}, closing_{false};
 	task::async_mutex checkpoints_;
 	std::string fence_reason_;

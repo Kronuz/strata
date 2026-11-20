@@ -34,7 +34,7 @@ FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.gi
 # Background work's threaded executor: one WorkPool per node, a WorkGroup per index.
 FetchContent_Declare(workpool GIT_REPOSITORY https://github.com/Kronuz/workpool.git GIT_TAG 640c66bfebccae811377670a265b62f4878ede8a)
 # strata::group's replication: consensus's Driver (docs/DRIVER.md, contract consensus:driver).
-FetchContent_Declare(consensus GIT_REPOSITORY https://github.com/Kronuz/consensus.git GIT_TAG 1c08c9fc40620c0be445069bb3b1e319aa4a28f1)
+FetchContent_Declare(consensus GIT_REPOSITORY https://github.com/Kronuz/consensus.git GIT_TAG b8de3b81064405e4fa9a384cf3670a679f484b48)
 # fst is termdict's; strata pins it so the dictionary's bytes do not drift.
 FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict compressors fusefilter completion workpool journal consensus)
 
@@ -131,6 +131,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(group_lifetime_test PRIVATE strata::group)
   add_test(NAME group_lifetime COMMAND group_lifetime_test)
   set_tests_properties(group_lifetime PROPERTIES TIMEOUT 1500)
+  add_test(NAME group_lifetime_reopen_turn COMMAND group_lifetime_test reopen-turn)
   add_executable(core_kv_test test/core_kv_test.cc)
   target_link_libraries(core_kv_test PRIVATE strata::core)
   add_test(NAME core_kv COMMAND core_kv_test)

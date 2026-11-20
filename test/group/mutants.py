@@ -70,6 +70,11 @@ MUTANTS = {
     "sync-retry": [(GROUP,
         "\t\tfiles_.sync(b.files);\n\t\tix_->commit();\n",
         "\t\ttry { files_.sync(b.files); } catch (...) { files_.sync(b.files); }\n\t\tix_->commit();\n")],
+    # Recovery takes a sealed file at its length without its CRC32C: a damaged rotated volume
+    # recovers silently (N4; --target=group_file_set_test).
+    "sealed-unchecked": [(FILES,
+        "\t\t\tif (f.crc && crc32c_of(*file, f.length) != *f.crc) {",
+        "\t\t\tif (false) {")],
     # The close leaves a waiter whose placement never applied here linked (journal group_closed).
     "close-keeps-waiters": [(GROUP,
         "\t\t\tfail_waiters(std::make_exception_ptr(cs::closed{}));\n",
@@ -163,7 +168,12 @@ MUTANTS = {
         "while (capture_work(b)() != step::done) {}")],
     # Checkpoints overlap: consensus refuses the second (Busy), failing a close racing one (A5).
     "checkpoints-overlap": [(GROUP,
-        "\t\tauto serial = co_await checkpoints_.lock();\n",
+        "\t\tauto serial = co_await checkpoints_.lock();\n\t\tco_return co_await checkpoint_held(std::move(token));\n",
+        "\t\tco_return co_await checkpoint_held(std::move(token));\n")],
+    # The close's teardown leaves no closed mark: a checkpoint or read after it runs against
+    # the index and file set it destroyed (C2; --target=group_lifetime_test points).
+    "no-closed-mark": [(GROUP,
+        "\t\t\t{\n\t\t\t\tstd::lock_guard lock(mu_);\n\t\t\t\tclosed_ = true;\n\t\t\t}\n",
         "")],
     # The close stops after one checkpoint, whatever committed since (A5).
     "close-uncovered": [(GROUP,
@@ -201,6 +211,11 @@ MUTANTS = {
     "forward-twice": [(SUBMIT,
         "\t\t\t\tif (forwarded) {",
         "\t\t\t\tif (false) {")],
+    # Apply publishes the applied position before strata's write: a host sees an entry applied
+    # whose write is not visible (A4; --target=group_lifetime_test held).
+    "applied-before-write": [(GROUP,
+        "\t\tverdict v;\n\t\tif (phase_ == phase::strata) {\n",
+        "\t\tverdict v;\n\t\tapplied_.store(e.index, std::memory_order_release);\n\t\tif (phase_ == phase::strata) {\n")],
     # read_applied reads this replica's state without the Driver's quorum probe (A4).
     "read-skips-probe": [(GROUP,
         "\t\tconst auto ready = co_await loop_->driver().read(id_, std::move(token));\n\t\tco_await applied_at(ready.index);\n",
