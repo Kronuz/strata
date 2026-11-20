@@ -57,12 +57,6 @@
 #endif
 #endif
 
-#ifndef FOOTPRINT_SANITIZED
-// Live heap, requested bytes: every plain new in this program; live blocks by requested size too
-// (the last slot holds the larger ones), for GROUP_FOOTPRINT_SIZES.
-static std::atomic<std::int64_t> live_bytes{0};
-constexpr std::size_t size_slots = 16384;
-static std::atomic<std::int32_t> live_sizes[size_slots + 1];
 // GROUP_FOOTPRINT_TRACE=SIZE: the stacks of live blocks of that size, by the window they came in.
 struct traced {
 	void* at = nullptr;
@@ -70,6 +64,12 @@ struct traced {
 	void* frames[32];
 };
 static traced traces[256];
+#ifndef FOOTPRINT_SANITIZED
+// Live heap, requested bytes: every plain new in this program; live blocks by requested size too
+// (the last slot holds the larger ones), for GROUP_FOOTPRINT_SIZES.
+static std::atomic<std::int64_t> live_bytes{0};
+constexpr std::size_t size_slots = 16384;
+static std::atomic<std::int32_t> live_sizes[size_slots + 1];
 static int trace_window = 0;
 static std::size_t trace_size() {
 	static const std::size_t size = std::getenv("GROUP_FOOTPRINT_TRACE") ? std::strtoull(std::getenv("GROUP_FOOTPRINT_TRACE"), nullptr, 10) : 0;
