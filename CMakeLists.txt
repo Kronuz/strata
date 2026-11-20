@@ -8,7 +8,7 @@ include(FetchContent)
 set(TASK_ASIO OFF CACHE BOOL "" FORCE)
 # Each building block is pinned to the commit its Phase 1 gate numbers were measured at.
 FetchContent_Declare(fst GIT_REPOSITORY https://github.com/Kronuz/fst.git GIT_TAG 7338f564f7c1c6c67e9f0cc8040d68e466592fb3)
-FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG bdafa5f1ca96a2d34b1c5eb0bbb04e4b3ddb88c0)
+FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG 95798a02f68c86f070401329a05c78d326ac2579)
 FetchContent_Declare(hashes GIT_REPOSITORY https://github.com/Kronuz/hashes.git GIT_TAG e3bf5b6167775f26dd14f89f210f687b0253241b)
 FetchContent_Declare(crc32c GIT_REPOSITORY https://github.com/Kronuz/crc32c.git GIT_TAG 0d5460d277170e92f33ffc148746f1a7c03eabe1)
 FetchContent_Declare(termdict GIT_REPOSITORY https://github.com/Kronuz/termdict.git GIT_TAG d7f5954ae84177c1587cc69a16a18d7911ee0501)
@@ -23,10 +23,14 @@ FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compre
 set(COMPRESSORS_ZSTD_PINNED ON CACHE BOOL "" FORCE)
 set(COMPRESSORS_LZ4_PINNED ON CACHE BOOL "" FORCE)
 FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG 0665ee0ea6aa8727f7f9bbc2bdbeb6dd2e180435)
-# Index I/O goes through kronuz::journal::IO, from the completion library.
-FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG e49f288fb1438a96d9a21b59cf0eeaa770fc690d)
-# The manifest log's block framing (manifest-log D2): journal/framing.h, shared with the turn log.
-FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.git GIT_TAG 5bbeedc017fcf18f8df9aae0b04d47a26f7165aa)
+# Index I/O goes through kronuz::journal::IO, from the completion library; completion::task, its
+# coroutine seam, is what journal's turn driver runs on (no Asio).
+set(COMPLETION_TASK ON CACHE BOOL "" FORCE)
+set(COMPLETION_ASIO OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG 7731315d0660a953f7b3bf956df3127d5a525a03)
+# The manifest log's block framing (manifest-log D2), and the turn log, its driver and host that a
+# logged index writes through (standalone-turn-log D1).
+FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.git GIT_TAG cc95ba636dee73b494daef7bbd8d341505aea9a1)
 # Background work's threaded executor: one WorkPool per node, a WorkGroup per index.
 FetchContent_Declare(workpool GIT_REPOSITORY https://github.com/Kronuz/workpool.git GIT_TAG 640c66bfebccae811377670a265b62f4878ede8a)
 # fst is termdict's; strata pins it so the dictionary's bytes do not drift.
@@ -169,6 +173,17 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_test(NAME reclaim_bg_mapped COMMAND reclaim_bg_test)
   set_tests_properties(reclaim_bg_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
   # apply() leaves no partial state when a stage-1 segment read throws (CT-R5).
+  # Standalone durability through the turn log (docs/design/standalone-turn-log.md): the command
+  # codec's fixtures, the open record and its seal, V at the barrier, and crash cases.
+  add_executable(standalone_turn_log_test test/standalone_turn_log_test.cc)
+  target_link_libraries(standalone_turn_log_test PRIVATE strata::core)
+  target_compile_definitions(standalone_turn_log_test PRIVATE STRATA_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
+  add_test(NAME standalone_turn_log COMMAND standalone_turn_log_test)
+  # kv_strata's sync batch: one transaction, one record and one barrier (bench/kv/kv_strata.hh).
+  add_executable(kv_strata_batch_test test/kv_strata_batch_test.cc)
+  target_include_directories(kv_strata_batch_test PRIVATE bench/kv)
+  target_link_libraries(kv_strata_batch_test PRIVATE strata::core)
+  add_test(NAME kv_strata_batch COMMAND kv_strata_batch_test)
   add_executable(apply_atomic_test test/apply_atomic_test.cc)
   target_link_libraries(apply_atomic_test PRIVATE strata::core)
   add_test(NAME apply_atomic COMMAND apply_atomic_test)
@@ -278,6 +293,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(catalog_teardown_test test/catalog_teardown_test.cc)
   target_link_libraries(catalog_teardown_test PRIVATE strata::core)
   add_test(NAME catalog_teardown COMMAND catalog_teardown_test)
+  # A delivery never touches a scheduler torn down after its waiter's frame was destroyed.
+  add_executable(catalog_post_lifetime_test test/catalog_post_lifetime_test.cc)
+  target_link_libraries(catalog_post_lifetime_test PRIVATE strata::core)
+  add_test(NAME catalog_post_lifetime COMMAND catalog_post_lifetime_test)
   add_executable(shared_read_test test/shared_read_test.cc)
   target_link_libraries(shared_read_test PRIVATE strata::core)
   add_test(NAME shared_read COMMAND shared_read_test)
@@ -312,7 +331,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   # Fuzz targets: each target's checked-in corpus replays as a test in every build; with
   # STRATA_FUZZ (Clang) the libFuzzer binaries build too.
   option(STRATA_FUZZ "Build the libFuzzer targets (Clang)" OFF)
-  foreach(target stored manifest_log manifest_log_file)
+  foreach(target stored manifest_log manifest_log_file command)
     add_executable(fuzz_${target}_replay fuzz/fuzz_${target}.cc fuzz/replay.cc)
     target_link_libraries(fuzz_${target}_replay PRIVATE strata::core)
     add_test(NAME fuzz_${target}_replay COMMAND fuzz_${target}_replay "${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/${target}")

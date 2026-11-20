@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """The key-value quick tier: strata's core against RocksDB (docs/perf/core-vs-rocksdb.md).
 
-  run.py calibrate OUT [SIZES]  RocksDB's variants per value size (default 100,1024; the ladder is 400,4096,65536), one thread, one trial each
+  run.py calibrate OUT [SIZES [TRIALS]]  RocksDB's variants per value size (default 100,1024; the ladder is 400,4096,65536), one thread,
+                 interleaved trials (default 1), scored by the geomean of medians; fails if a set KV_VARIANT_<size> trails by over 3%
   run.py rows OUT SET [TRIALS]  interleaved trials of a row set (see SETS), results appended to OUT/raw.jsonl
-  run.py aa OUT                 A/A: each engine against itself on a few rows
+  run.py aa OUT [TRIALS [LABEL [SET]]]  A/A: each engine against itself on a few rows (fits1's, or SET's)
   run.py dry OUT SET [RECORDS]  every row of SET once per engine on RECORDS (default 2000) records, with the checks a tiny run can make
   run.py report OUT             the tables
 
@@ -15,6 +16,7 @@ The coverage sets (docs/perf/benchmark-coverage.md, "Add this week"), each a few
   delete1        deleterandom of half the records, then readall over the result (every key once; the
                  driver checks the misses equal the deletes); disk is after the settle. Fits and 2x
   big1           10x memory: 1M records at 12 MiB (1 KiB values: 200k records at 24 MiB)
+  tenx1          fits1's every workload at big1's 10x memory
   multiget1      multireadrandom, batch 10: strata loops gets, RocksDB calls MultiGet. `ops` counts keys,
                  the latency percentiles are per batch
   bulk1          bulkload: fillrandom with automatic merges off (RocksDB: its bulkload preset, vector
@@ -86,6 +88,8 @@ def sets() -> dict[str, list[dict[str, Any]]]:
     s["sync1"] += [dict(w=w, value=1024, mb=FITS_MB, threads=1, dur="sync", batch=1) for w in ["ycsb_a", "ycsb_f"]]
     s["sync1"] += [dict(w="fillrandom", value=100, mb=FITS_MB, threads=1, dur="sync", batch=1)]
     s["sync1"] += [dict(w="fillrandom", value=100, mb=FITS_MB, threads=1, dur="sync", batch=10)]
+    # The durable A/A's rows: sync1's batch 100 and batch 1 on both value sizes.
+    s["syncaa"] = [s["sync1"][0], s["sync1"][2], s["sync1"][4]]
     s["wal1"] = [dict(w=w, value=100, mb=FITS_MB, threads=1, dur="wal", batch=1) for w in ["fillseq", "fillrandom", "overwrite"]]
     s["fits4"] = [dict(r, threads=4) for r in fits if r["w"] != "readseq"]
     s["twox4"] = [dict(r, mb=two_x_mb(r["value"])) for r in s["fits4"]]
@@ -94,6 +98,8 @@ def sets() -> dict[str, list[dict[str, Any]]]:
     s["delete1"] = [dict(one, w="deleterandom", after="readall"), dict(one, w="deleterandom", after="readall", mb=two_x_mb(100))]
     s["big1"] = [dict(one, w=w, records=1_000_000, mb=12) for w in ["fillrandom", "readrandom", "seekrandom"]]
     s["big1"] += [dict(one, w="ycsb_a", value=1024, records=200_000, mb=24)]
+    # fits1's every row at big1's 10x scale.
+    s["tenx1"] = [dict(r, records=1_000_000, mb=12) if r["value"] == 100 else dict(r, records=200_000, mb=24) for r in fits]
     s["multiget1"] = [dict(one, w="multireadrandom", batch=10), dict(one, w="multireadrandom", batch=10, mb=two_x_mb(100))]
     s["bulk1"] = [dict(one, w="bulkload"), dict(one, w="bulkload", mb=two_x_mb(100))]
     s["rww1"] = [dict(one, w="readwhilewriting", write_mb_s=2), dict(one, w="readwhilewriting", write_mb_s=2, mb=two_x_mb(100))]
@@ -144,7 +150,11 @@ def phase(out: Path, name: str, seconds: float, **kw: Any) -> None:
     append(out, "phases.jsonl", dict(phase=name, seconds=round(seconds, 3), at=time.strftime("%H:%M:%S"), **kw))
 
 
-def cmd_calibrate(out: Path, sizes: list[int]) -> None:
+# A pinned variant (KV_VARIANT_<size>) passes calibration within this fraction of the fastest's score.
+CALIBRATE_TIE = 0.03
+
+
+def cmd_calibrate(out: Path, sizes: list[int], trials: int) -> None:
     t0 = time.time()
     for value in sizes:
         # Large values add a block as big as a record; the smaller ladder files carry their own record count.
@@ -153,29 +163,42 @@ def cmd_calibrate(out: Path, sizes: list[int]) -> None:
             row = dict(w=w, value=value, mb=FITS_MB, threads=1, dur="none", batch=1)
             if value in LADDER:
                 row.update(records=LADDER[value], ops=min(100_000, 10 * LADDER[value]))
-            for v in variants:
-                r = run_one("rocksdb", row, out, 0, v)
+            for t in range(trials):
+                for v in variants:
+                    r = run_one("rocksdb", row, out, t, v)
+                    append(out, "calibration.jsonl", r)
+                    print(f"calibrate {value} {w} {v} t{t}: {run_phase(r)['ops_per_sec']:.0f} ops/s", flush=True)
+                r = run_one("strata", row, out, t)
                 append(out, "calibration.jsonl", r)
-                print(f"calibrate {value} {w} {v}: {run_phase(r)['ops_per_sec']:.0f} ops/s", flush=True)
-            r = run_one("strata", row, out, 0)
-            append(out, "calibration.jsonl", r)
-            print(f"calibrate {value} {w} strata: {run_phase(r)['ops_per_sec']:.0f} ops/s", flush=True)
-    phase(out, "calibrate", time.time() - t0)
-    best = pick_variants(out, sizes)
-    print(json.dumps(best))
+                print(f"calibrate {value} {w} strata t{t}: {run_phase(r)['ops_per_sec']:.0f} ops/s", flush=True)
+    phase(out, "calibrate", time.time() - t0, trials=trials)
+    scores = calibration_scores(out, sizes)
+    best = {value: max(sc, key=lambda v: sc[v]) for value, sc in scores.items()}
+    print(json.dumps({value: {v: round(x / sc[best[value]], 4) for v, x in sorted(sc.items(), key=lambda kv: -kv[1])} for value, sc in scores.items()}))
     print(" ".join(f"KV_VARIANT_{v}={n}" for v, n in best.items()))
+    missed = []
+    for value, sc in scores.items():
+        pin = os.environ.get(f"KV_VARIANT_{value}")
+        if pin:
+            share = sc[pin] / sc[best[value]]
+            print(f"pin {value} {pin}: {share:.4f} of the fastest ({best[value]})")
+            if share < 1 - CALIBRATE_TIE:
+                missed.append(value)
+    if missed:
+        sys.exit(f"pinned variants slower than the fastest by more than {CALIBRATE_TIE:.0%}: {missed}")
 
 
-def pick_variants(out: Path, sizes: list[int]) -> dict[int, str]:
+def calibration_scores(out: Path, sizes: list[int]) -> dict[int, dict[str, float]]:
+    """Per value size, each variant's geometric mean over the workloads of its median ops/s."""
     rs = [json.loads(x) for x in open(out / "calibration.jsonl")]
-    best: dict[int, str] = {}
+    scores: dict[int, dict[str, float]] = {}
     for value in sizes:
-        score: dict[str, list[float]] = {}
+        runs: dict[str, dict[str, list[float]]] = {}
         for r in rs:
             if r["engine"] == "rocksdb" and r["value_size"] == value:
-                score.setdefault(r["variant"], []).append(run_phase(r)["ops_per_sec"])
-        best[value] = max(score, key=lambda v: geomean(score[v]))
-    return best
+                runs.setdefault(r["variant"], {}).setdefault(r["workload"], []).append(run_phase(r)["ops_per_sec"])
+        scores[value] = {v: geomean([statistics.median(x) for x in ws.values()]) for v, ws in runs.items()}
+    return scores
 
 
 def geomean(xs: list[float]) -> float:
@@ -202,8 +225,8 @@ def cmd_rows(out: Path, name: str, trials: int) -> None:
     phase(out, f"rows:{name}", time.time() - t0, trials=trials, rows=len(rows))
 
 
-def cmd_aa(out: Path, trials: int, label: str = "aa") -> None:
-    rows = [r for r in sets()["fits1"] if r["w"] in ("fillrandom", "readrandom", "ycsb_a", "ycsb_e")]
+def cmd_aa(out: Path, trials: int, label: str = "aa", name: str | None = None) -> None:
+    rows = sets()[name] if name else [r for r in sets()["fits1"] if r["w"] in ("fillrandom", "readrandom", "ycsb_a", "ycsb_e")]
     t0 = time.time()
     for row in rows:
         for engine in ("strata", "rocksdb"):
@@ -449,7 +472,9 @@ def cmd_report(out: Path) -> None:
         print("|---|---|---|---|---|")
         by: dict[tuple[str, str], dict[str, list[float]]] = {}
         for r in aa:
-            by.setdefault((r["set"], r["engine"], r["row"]["w"]), {}).setdefault(r["side"], []).append(run_phase(r)["ops_per_sec"])
+            row = r["row"]
+            w = row["w"] + (f" {row['dur']}/{row['batch']}" if row["dur"] == "sync" else "")
+            by.setdefault((r["set"], r["engine"], w), {}).setdefault(r["side"], []).append(run_phase(r)["ops_per_sec"])
         for (st, e, w), sides in by.items():
             ratio, lo, hi = boot_ratio(sides["b"], sides["a"])
             allv = sides["a"] + sides["b"]
@@ -462,13 +487,14 @@ def main() -> None:
     cmd, out = sys.argv[1], Path(sys.argv[2])
     out.mkdir(parents=True, exist_ok=True)
     if cmd == "calibrate":
-        cmd_calibrate(out, [int(x) for x in sys.argv[3].split(",")] if len(sys.argv) > 3 else [100, 1024])
+        sizes = [int(x) for x in sys.argv[3].split(",")] if len(sys.argv) > 3 else [100, 1024]
+        cmd_calibrate(out, sizes, int(sys.argv[4]) if len(sys.argv) > 4 else 1)
     elif cmd == "dry":
         cmd_dry(out, sys.argv[3], int(sys.argv[4]) if len(sys.argv) > 4 else 2000)
     elif cmd == "rows":
         cmd_rows(out, sys.argv[3], int(sys.argv[4]) if len(sys.argv) > 4 else 5)
     elif cmd == "aa":
-        cmd_aa(out, int(sys.argv[3]) if len(sys.argv) > 3 else 3, sys.argv[4] if len(sys.argv) > 4 else "aa")
+        cmd_aa(out, int(sys.argv[3]) if len(sys.argv) > 3 else 3, sys.argv[4] if len(sys.argv) > 4 else "aa", sys.argv[5] if len(sys.argv) > 5 else None)
     elif cmd == "report":
         cmd_report(out)
     elif cmd == "one":

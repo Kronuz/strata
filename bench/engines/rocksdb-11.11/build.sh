@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Builds the pinned RocksDB (11.11.1: release branch 11.11.fb at ec933778, untagged upstream;
 # tags stop at v11.8.1) and kv_rocksdb against it, Release, with zstd and LZ4, the system
-# allocator, and no -march, as strata's engine builds. The driver builds without RTTI, as
-# a Release RocksDB does (its audit listener derives from a RocksDB class).
+# allocator, no io_uring (absent on macOS and FreeBSD), and no -march, as strata's engine
+# builds. The driver builds without RTTI, as a Release RocksDB does (its audit listener derives from a RocksDB class).
 #   bench/engines/rocksdb-11.11/build.sh            sources in $ROCKSDB_SRC, build in $ROCKSDB_BUILD
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -20,7 +20,7 @@ fi
 gflags=OFF
 if [[ -e /usr/local/include/gflags/gflags.h || -e /usr/include/gflags/gflags.h ]]; then gflags=ON; fi
 cmake -S "$src" -B "$out" -G Ninja -DCMAKE_BUILD_TYPE=Release -DPORTABLE=1 \
-	-DWITH_ZSTD=ON -DWITH_LZ4=ON -DWITH_SNAPPY=OFF -DWITH_ZLIB=OFF -DWITH_BZ2=OFF -DWITH_JEMALLOC=OFF \
+	-DWITH_ZSTD=ON -DWITH_LZ4=ON -DWITH_SNAPPY=OFF -DWITH_ZLIB=OFF -DWITH_BZ2=OFF -DWITH_JEMALLOC=OFF -DWITH_LIBURING=OFF \
 	-DWITH_GFLAGS=$gflags -DWITH_TESTS=OFF -DWITH_BENCHMARK_TOOLS=$gflags -DWITH_TOOLS=OFF -DWITH_CORE_TOOLS=OFF \
 	-DROCKSDB_BUILD_SHARED=OFF -DFAIL_ON_WARNINGS=OFF >/dev/null
 targets=(rocksdb)
