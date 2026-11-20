@@ -1040,6 +1040,59 @@ void stalled_leader(unsigned voters) {
 	same_digests(w);
 }
 
+// A follower stalls on `no_space`, stays a follower past several election timeouts, then takes
+// leadership by transfer while still stalled: within a few timeouts of leading it hands
+// leadership to a replica applied past it, which answers a `quorum` write.
+void stalled_follower_elected(unsigned voters) {
+	context = std::to_string(voters) + " voters, a follower stalled on no_space, then elected";
+	world w(voters, 163, true);
+	if (!check(w.settle(), "the cluster settles")) { return; }
+	auto& l = *w.leader();
+	node* f = nullptr;
+	for (auto& [id, x] : w.nodes) {
+		if (x.get() != &l && x->open()) {
+			f = x.get();
+			break;
+		}
+	}
+	std::optional<strata::byte_budget::permit> hog = f->storage.open();
+	check(hog->try_grow(f->storage.capacity() - f->storage.used() - 16), "the follower's budget is nearly spent");
+	auto s = start(l.p->loop_ref(), l.p->g->propose("P|a|" + std::string(64, 'x')));
+	l.run();
+	for (int i = 0; i < 40000 && !(s->done && f->p->g->stalled()); ++i) { w.step(); }
+	check(s->done && !s->error, "the leader answers its write: " + what(s->error));
+	if (!check(f->p->g->stalled(), "the follower stalls on no_space")) { return; }
+	// Three election timeouts as a follower: its hand-off timer fires and finds no leadership.
+	const auto t0 = w.now;
+	while (w.now < t0 + 360) { w.step(); }
+	check(f->p->g->stalled() && w.leader() == &l, "still stalled, the leader unchanged");
+	const auto term = l.p->lp->driver().state(gid)->term;
+	start(l.p->loop_ref(), l.p->lp->driver().transfer_leadership(gid, f->id));
+	l.run();
+	node* fl = nullptr;
+	for (int i = 0; i < 40000 && fl != f; ++i) {
+		w.step();
+		fl = leader_above(w, term, nullptr);
+	}
+	if (!check(fl == f, "the stalled follower takes leadership by transfer")) { return; }
+	const auto fterm = f->p->lp->driver().state(gid)->term;
+	node* next = nullptr;
+	const auto t1 = w.now;
+	for (int i = 0; i < 200000 && !next && w.now < t1 + 2000; ++i) {
+		w.step();
+		next = leader_above(w, fterm, f);
+	}
+	if (!check(next, "the replica elected while stalled hands leadership on within 2 s (16 election timeouts)")) { return; }
+	check(next->p->g->applied() > f->p->g->applied(), "to a replica applied past its stalled entry");
+	auto q = start(next->p->loop_ref(), next->p->g->propose("P|b|after"));
+	for (int i = 0; i < 40000 && !q->done; ++i) { w.step(); }
+	check(q->done && !q->error && q->value && q->value->applied && q->value->applied->result == strata::verdict::accepted, "the new leader answers a `quorum` write while that replica is stalled: " + what(q->error));
+	hog.reset();
+	f->p->g->resume();
+	if (!check(w.settle(), "the cluster settles once space frees")) { return; }
+	same_digests(w);
+}
+
 void write_paths(unsigned voters, std::uint64_t schedules) {
 	a3_totals plain, stale;
 	for (std::uint64_t seed = 1; seed <= schedules; ++seed) {
@@ -1075,6 +1128,8 @@ int main(int argc, char** argv) {
 	forward_once(5);
 	stalled_leader(3);
 	stalled_leader(5);
+	stalled_follower_elected(3);
+	stalled_follower_elected(5);
 	// D109: the schedules whose ungated checkpoints left a replica behind (group-install's A8).
 	for (std::uint64_t seed : {8, 12, 16, 18, 23, 24, 27}) { schedule(3, seed, seed % 2 == 0, false); }
 	std::uint64_t acked = 0, applied = 0, stalls = 0, crashes = 0, runs = 0, short_of_space = 0;
