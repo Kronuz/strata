@@ -22,7 +22,7 @@ probes and models, named by job:
 | D | re-homing groups at another loop count, 10k to 300k groups | 261120-074846-356a48 |
 | E | a file per thread, one shared file, and files per thread with one shared flush, with and without the cohort wait, as a C floor (`devbarrier.c`) | 261120-074947-257624 |
 | F | handing records from L loops to one log's owner: under each group's mutex, through per-loop rings, or asked of each loop, against one loop holding every group (`handoff.cc`) | 261120-083804-ec1239 |
-| G | journal's `seal_turn` with D7's repeated calls: a per-group bound against one bound per log, the resume rule, and a large transaction's chunks (`d7_model.py`) | 261120-083208-36162a; row 6: 261120-133248-df88a3 |
+| G | journal's `seal_turn` with D7's repeated calls: a per-group bound against one bound per log, the resume rule, and a large transaction's chunks (`d7_model.py`) | 261120-133248-df88a3 |
 | B2 | probe B again with phase marks that reach `wbytes.c`: syncs per operation in the run phase alone | 261120-083211-0cbbce |
 | H | D4's checkpoint, close and leave: every event sequence of one logged group to depth 11, a power cut after each prefix (`d4_covers_model.py`, extended from the design review's) | 261120-133243-d4f975 |
 | I | D4 with two builds in flight: install order and the log wait, depth 12 (`d4_install_order_model.py`, extended from the design review's) | 261120-133244-e59453 |
