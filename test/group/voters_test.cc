@@ -437,7 +437,12 @@ outcome schedule(unsigned voters, std::uint64_t seed, bool storage, bool gated =
 				std::string c;
 				const auto key = group_test::keys[gen() % group_test::keys.size()];
 				switch (gen() % 8) {
-				case 0: c = "C|" + key + "|" + text(gen, 1 + gen() % 12) + "|" + std::to_string(1 + gen() % 3); break;
+				case 0: {
+					// Drawn in order: a + chain's operands are unsequenced (gcc on x86_64 evaluates the right first).
+					const auto body = text(gen, 1 + gen() % 12);
+					c = "C|" + key + "|" + body + "|" + std::to_string(1 + gen() % 3);
+					break;
+				}
 				case 1: c = "D|" + key; break;
 				case 2:
 					if (!uploading) {
