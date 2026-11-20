@@ -105,8 +105,9 @@ that pin (turn-log recovery: double damage, dropped tail turns). Same scripts as
 
 | Row | Platform | Result | Status | Job |
 |---|---|---|---|---|
-| `journal` build, rows, `jpower 200`, `no-sync-data`, `no-barrier-wait` | macOS | Queued | Queued | `261120-151850-4592f2` (build), `261120-151852-86e99e`, `261120-151854-18b807`, `261120-151857-83dd88`, `261120-151859-75f543` |
-| `consensus` build and rows (Workers, cluster, simulation, wave_open, driver, worker) | macOS | Queued | Queued | `261120-151902-b711ce` (build), `261120-151904-2b2fc3` |
+| `journal` build and rows | macOS | Builds. Turn log on faultfs now at four block sizes: 512 B 2,040 crash points (677 with a second loss), 312 corrupted blocks, 295 doubly damaged boundaries; 4 KiB 1,150; 2 KiB 1,156; 256 B 2,262 (827 corrupted blocks); 40,913 checks, 0 failures; `turn_log` 64 checks; shared Store 4,366 crash points, 734,100 checks, 0 failures (the counts at `d90797c`); seal, bound, placement 43 of 43; host, driver, framing, CRC 4 of 4; replay 2 of 2 | Pass on macOS | `261120-151850-4592f2` (build), `261120-151852-86e99e` |
+| `jpower 200`, `no-sync-data`, `no-barrier-wait` | macOS | Queued | Queued | `261120-151854-18b807`, `261120-151857-83dd88`, `261120-151859-75f543` |
+| `consensus` build and rows (Workers, cluster, simulation, wave_open, driver, worker) | macOS | Builds at its own pins. Workers 896 crash points, 11,729 checks, 0 failures; cluster 24 seeds, 453 power cuts, 150,052 checks, 0 failures (45 catch-ups left to installs); core simulation 200 x 10,000 ok (1,754 elections, 2,108 restarts, 1,100 repairs, 442 committed memberships); Driver 20 x 3,000 plus 1 regression seed ok, hosts booted with 2, 3 and 4 loops (18 re-partitions), 1,529 elections, 116 crashes, 6,423 proposals; wave_open, driver (153 checks) and worker (96,196 checks) 5 of 5 | Pass on macOS | `261120-151902-b711ce` (build), `261120-151904-2b2fc3` |
 | T2's budget: 10,000 seeds x 3,000 steps, core and Driver | macOS | Queued | Queued | `261120-151907-369f91` |
 | Driver seeds 399 and 727 replayed | macOS | Queued | Queued | `261120-151910-c43dad`, `261120-151912-4175b8` |
 | Cluster at 10 times its seeds (240 x 3,000) | macOS | Queued | Queued | `261120-151915-b0da39` |
