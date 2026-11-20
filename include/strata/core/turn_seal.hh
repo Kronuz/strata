@@ -3,12 +3,15 @@
 // blocking owner thread what run() and durable() give a coroutine loop. Its turn mutex is the
 // driver's loop context: every driver and group-table call but unseal() and wake() runs under it.
 // After each turn it tells each group's watcher how far the log is durable, the step a watcher
-// coroutine on durable() takes.
+// coroutine on durable() takes. Its loop holds each turn for the writers the last one released
+// (rocksdb-parity D5's cohort wait), so a closed loop of writers rides one barrier each.
 #pragma once
 
 #include "journal/host.h"
 #include "journal/turn_driver.h"
 
+#include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <exception>
@@ -157,6 +160,7 @@ public:
 		turns_.wake();
 		const std::lock_guard lock(mu_);
 		woken_ = true;
+		++arrivals_;
 		cv_.notify_all();
 	}
 	// Writes one turn of what the groups hold, if anything: false when there is nothing. A failed
@@ -171,6 +175,7 @@ public:
 			groups.assign(groups_.begin(), groups_.end());
 		}
 		const std::uint64_t before = turns_.log().last_turn();
+		const auto start = std::chrono::steady_clock::now();
 		try {
 			if (turns_.idle()) { turns_.wake(); }  // asks the sealers: commit() then writes nothing when none seals
 			turns_.commit();
@@ -181,6 +186,7 @@ public:
 			throw;
 		}
 		if (turns_.log().last_turn() == before) { return false; }
+		const auto barrier = std::chrono::steady_clock::now() - start;
 		// The watchers first, then the durable sequences a wait reads: a wait returns after V moved.
 		for (auto& [group, e] : groups) {
 			const std::uint64_t s = turns_.sequence(group);
@@ -191,6 +197,10 @@ public:
 		for (const auto& [group, e] : groups) {
 			if (auto it = groups_.find(group); it != groups_.end() && it->second.done == e.done) { it->second.durable = e.durable; }
 		}
+		last_barrier_ = barrier;
+		cohort_ = released_groups();
+		arrivals_ = 0;
+		++turns_written_;
 		cv_.notify_all();
 		return true;
 	}
@@ -210,12 +220,11 @@ public:
 				}
 				if (it->second.durable >= sequence) { return; }
 				if (served_) {
-					++waiting_;
+					const parked p(*this, {group, sequence});
 					cv_.wait(lock, [&] {
 						const auto at = groups_.find(group);
 						return failure_ || !served_ || at == groups_.end() || sequence <= retired_locked(group) || at->second.durable >= sequence;
 					});
-					--waiting_;
 					continue;
 				}
 			}
@@ -242,9 +251,8 @@ public:
 				if (!groups_.contains(group)) { throw kronuz::journal::group_closed(group, 0); }
 				if (ready()) { return; }
 				if (served_) {
-					++waiting_;
+					const parked p(*this, {group, 0, [](const void* r) { return (*static_cast<const Ready*>(r))(); }, &ready});
 					cv_.wait(lock, [&] { return failure_ || !served_ || !groups_.contains(group) || ready(); });
-					--waiting_;
 					continue;
 				}
 			}
@@ -278,7 +286,12 @@ public:
 			~end() { s.served(false); }
 		} ended{*this};
 		for (;;) {
-			while (turn()) {}
+			while (turn()) {
+				// D5: the next turn waits for the records of the writers this one released, at
+				// most 1/16 of its barrier, so they ride it rather than the one after.
+				std::unique_lock lock(mu_);
+				cv_.wait_for(lock, last_barrier_ / 16, [&] { return stopping_ || arrivals_ >= cohort_; });
+			}
 			std::unique_lock lock(mu_);
 			cv_.wait(lock, [&] { return woken_ || stopping_; });
 			if (stopping_) { return; }
@@ -289,14 +302,44 @@ public:
 		stopping_ = true;
 		cv_.notify_all();
 	}
-	// Writers blocked in await() (tests).
+	// Writers blocked in await() or await_sealed(), and the turns written (tests).
 	std::size_t waiting() const {
 		const std::lock_guard lock(mu_);
-		return waiting_;
+		return waiters_.size();
+	}
+	std::uint64_t turns_written() const {
+		const std::lock_guard lock(mu_);
+		return turns_written_;
 	}
 	std::uint32_t block_bytes() const noexcept { return block_; }
 
 private:
+	// A writer blocked in await() (its sequence) or await_sealed() (its predicate), listed under mu_.
+	struct waiter {
+		std::uint64_t group, sequence;
+		bool (*ready)(const void*) = nullptr;
+		const void* arg = nullptr;
+	};
+	struct parked {
+		turn_sealer& s;
+		const waiter w;
+		parked(turn_sealer& to, waiter of) : s(to), w(of) { s.waiters_.push_back(&w); }
+		~parked() { std::erase(s.waiters_, &w); }
+		parked(const parked&) = delete;
+		parked& operator=(const parked&) = delete;
+	};
+	// Under mu_, at a turn's end: the groups whose waiting writers it released. Each opens one
+	// record when its writer returns (wake()); a writer in await_sealed() counts once its record
+	// sealed.
+	std::size_t released_groups() {
+		released_.clear();
+		for (const waiter* w : waiters_) {
+			const auto it = groups_.find(w->group);
+			if (w->ready ? w->ready(w->arg) : it != groups_.end() && it->second.durable >= w->sequence) { released_.push_back(w->group); }
+		}
+		std::sort(released_.begin(), released_.end());
+		return std::size_t(std::unique(released_.begin(), released_.end()) - released_.begin());
+	}
 	std::uint64_t retired_locked(std::uint64_t group) const {
 		const auto it = closed_.find(group);
 		return it == closed_.end() ? 0 : it->second;
@@ -328,7 +371,11 @@ private:
 	std::map<std::uint64_t, entry> groups_;
 	std::map<std::uint64_t, std::uint64_t> closed_;  // groups closed here, and what each retired
 	std::exception_ptr failure_;
-	std::size_t waiting_ = 0;
+	std::vector<const waiter*> waiters_;
+	std::vector<std::uint64_t> released_;  // released_groups()'s scratch
+	std::chrono::steady_clock::duration last_barrier_{};
+	std::size_t cohort_ = 0, arrivals_ = 0;  // D5: records the last turn's writers owe, and opened since
+	std::uint64_t turns_written_ = 0;
 	bool woken_ = false, served_ = false, stopping_ = false;
 };
 
