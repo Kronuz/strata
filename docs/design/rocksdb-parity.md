@@ -14,76 +14,15 @@ from this note's light probes, named by job:
 | Probe | What | Job |
 |---|---|---|
 | A | memory map (`vmmap`, `heap`), bytes written per file class and zero-filled, disk per file; sync1, wal1 and YCSB A rows at small scale | 261120-071503-0c741b |
-| B | K writers on 1 to 8 logs, syncs per second, and a cohort-wait prototype | PROBE_B |
-| C | `sample` profiles of the rows that spend more CPU | PROBE_C |
-| D | re-homing groups at another loop count, 10k to 1M groups | The owner asked whether logs survive a different loop count: a disk moved to a server with another
-CPU count, or a changed configuration. They do today, by a mechanism that lives in journal, not in
-strata's docs: journal `docs/design/host-layout.md`, "Placement and re-partition", and
-`include/journal/host.h`.
-
-**What happens today** (journal `cc95ba6`; `main` is the same):
-
-1. **Placement.** A group's slot is its id through splitmix64's finalizer into 4,096 slots, and its
-   loop is `(slot × L) >> 12` (`host.h:81-87`): each loop owns a contiguous run of slots. Nothing
-   stores a group's loop. The group table is sharded by slot (`groups-<slot>`), not by loop, so it
-   never moves.
-2. **Open.** The `layout` file holds L and the log generation; a host directory with groups or logs
-   and no layout refuses to open (`host.h:424-436`). Logs of any other generation are leftovers of an
-   unfinished re-partition and are removed (`:438-446`).
-3. **Another L re-partitions before serving** (`host.h:447-448`, `:481-520`): it reads every log of
-   the stored generation, all `L_old` of them, so a log whose loop no longer exists is replayed;
-   marks the ids recovery calls lost; writes each group's live records into its new loop's log of
-   generation + 1 in turns of at most a quarter segment, each synced; replaces `layout`; removes the
-   old logs. A crash before the layout's replace leaves the old generation authoritative, and the next
-   open starts over. Journal's `placement_test` re-partitions one host through 3, 2, 5 and 4 loops, cuts power at every
-   operation of each, and checks every record comes back (`test/placement_test.cc:169-205` at `main`).
-4. **strata's side.** An index stores its host identity and group in its `turn_group` attribute
-   (`index.hh:582-605`), never a loop; the host's `loop(group)` routes it (`turn_seal.hh` `mine()`
-   checks it), so a re-partitioned group reopens on its new loop.
-
-**Gaps found:**
-
-1. Re-partition holds every group's live records of every log in one map
-   (`std::map<group, vector<TurnRecord>>`, `host.h:482`) until it has written them all: memory and
-   open time grow with the live bytes of all logs. PROBE_D_GAP
-2. Every open group keeps its latest checkpoint record live in the log until it closes
-   (`turn_log.h` `note()`: a checkpoint supersedes only the group's earlier records), so the live
-   bytes, the forward copies (D2) and the re-partition's copy all grow with the number of open
-   indexes, not with what was written.
-3. A log file of the current generation whose loop is L or more is neither read nor removed: open
-   creates drivers for loops below L only (`host.h:450-454`) and removes other generations only.
-   Reachable only by copying files by hand, but silent; it should refuse as corruption.
-4. No strata test reopens a logged index at another loop count, and `kv_strata` derives its group
-   ids from L (`bench/kv/kv_strata.hh:288-290`), so its data reopened under another `KV_LOOPS` names
-   other groups than its indexes recorded. Production must never derive a group id from L.
-
-**D10. Logs recoverable under any loop count; idle groups cost nothing to re-home.**
-
-1. Keep journal's protocol (hash placement, one copy into the next generation, the layout as the
-   commit point). It is crash-tested and costs one copy of the live bytes; its alternatives lose:
-   - *Adopting the old logs read-only* until each group checkpoints in the new generation writes
-     nothing at open, but every later recovery reads two generations and must stitch each group's
-     sequence across them, and an idle group never checkpoints, so the old logs never go.
-   - *One log per host* (no re-partition at all) is D6's question, decided on numbers.
-2. Stream the copy: read one old log, append each record to its new loop's open turn, and sync a turn
-   when it reaches a quarter segment; memory is then L_new turns, not every live record.
-3. Park idle groups in the table: once a group's last record is a checkpoint and a retention window
-   has passed without a write, the host moves that record into the group's table entry (its `base`
-   and payload, as `close_group` does, `host.h:324-336`) and the log forgets it; its next write
-   starts from `base`. Re-homing then copies only groups with records since their last checkpoint,
-   at most the logs' retention windows, whatever the number of open indexes.
-4. A strata test reopens logged indexes at L = 1 → 3 → 2 with a power cut during the re-partition, and
-   the kv harness keeps each index's group id in its directory.
-
-Class: mechanism in journal (items 2-3, coordinated with Detent's lead), tests and harness in strata
-(item 4). Items 2-3 are not needed for A6's rows; they are needed before a host holds millions of
-indexes (many-indexes workload), so they go to the owner as Q3 with a recommendation.
-
-**The cost of re-homing.** PROBE_D |
+| B | K writers on 1 to 8 logs, syncs per second, and a cohort-wait prototype | 261120-072003-b88d0c |
+| C | `sample` profiles of the rows that spend more CPU | 261120-072004-d21c38 |
+| D | re-homing groups at another loop count, 10k to 1M groups | 261120-072006-46c758 |
+| E | a file per thread, one shared file, and files per thread with one shared flush, with and without the cohort wait, as a C floor (`devbarrier.c`) | 261120-074947-257624 |
 
 The probes ran under light holds on a shared host, so their latencies are not row numbers; their
-counts (bytes, syncs, records, pages) are host-independent. Scripts and outputs:
-`~/.scratch/xapiand/turn-log-parity-design/` (`wbytes.c`, `probe-*.sh`, `cohort.py`, `rehome.cc`).
+counts (bytes, syncs, records, pages) are host-independent. The scripts are in
+`bench/kv/probes/rocksdb-parity/` (`wbytes.c`, `nosync.c`, `probe-*.sh`, `cohort.py`, `rehome.cc`,
+`devbarrier.c`).
 
 ## Summary
 
@@ -93,11 +32,28 @@ counts (bytes, syncs, records, pages) are host-independent. Scripts and outputs:
 | Bytes written 36% to 3.2× | zero-fill of every new segment, on the turn; forward copies of live records past `retain_segments`; merges rewriting disjoint runs (`tenx1` fillseq) | D2, D9 | mechanism (journal), tuning, mechanism (merge policy) |
 | Peak RSS 2.1-3.4× | freed megabyte buffers that macOS's medium malloc zone keeps resident; then a write buffer that flushes at 79% of the budget, inline | D3, D4 | mechanism (turn path), mechanism (background flush) |
 | Group commit 1.39× at K=4, one log | a turn starts on the first writer back; the rest of the cohort waits a whole extra barrier | D5: cohort wait | mechanism |
-| Group commit 1.9-2.1× on K logs | one barrier per log per turn | D6 | architecture: owner (Q1) |
+| Group commit 1.9-2.1× on K logs | one flush per log per turn; the device coalesces them only partly | D6: one log, one flush per device | architecture: owner (Q1) |
 | `wal` p99.99 130-193× | one record per group per turn caps `ack=none` at one command per barrier (D107, D108); segment preallocation inline on the turn | D7 | mechanism (journal packing), D1 |
 | p99 tier none, 1 KiB fillrandom 0.78× | flushes inline on the writer | D4 | mechanism |
-| CPU per op | see D8 | D8 | mechanism |
+| CPU per op: `wal` and the VM rows 1.4-1.6×, `tenx1` fillseq 1.97×, overwrite 1.42× | copies and `madvise` on the turn path (75% of `wal`'s busy CPU); merges rewriting key-disjoint runs; the read before every upsert | D3, D9, D11 | mechanism; D11 adds a public operation (Q4) |
 | `wal1` slower in the VMs | the same `ack=none` cap, at the VMs' slower barriers; CPU in copies and zero-fill (not profiled in the VMs) | D7, D2, D3 | as above |
+
+The lead's five suspicions, against the measurements:
+
+1. **The write buffer grows to the whole budget.** Partly: it flushes at 79% of the index's share
+   (50.8 of 64 MiB) against RocksDB's 32 MiB memtable, and builds the segment inline. But the larger
+   part of the RSS loss is freed turn-path buffers that macOS keeps resident (Peak memory).
+2. **The log and the segment duplicate data, with no compression.** The log holds each command
+   until a checkpoint, as RocksDB's WAL does (neither compresses: the bench leaves RocksDB's
+   `wal_compression` off). The excess is inside the log: forward copies (2.1× the commands) and
+   zero-fill. Index segments are LZ4-compressed and smaller than RocksDB's SSTs (Disk).
+3. **Group commit loses at K=4 on one log and on four logs.** Confirmed, with two causes: on one log
+   the next turn starts on the first writer back (D5); on four logs each log pays its own barrier
+   (D6).
+4. **The `wal` p99.99 and the 1 KiB 0.78× come from inline flush.** Refuted for `wal` (no flush
+   runs; it is the one-record cap, D7) and confirmed for 1 KiB (D4).
+5. **VM CPU 1.4-1.6×, unexplained.** On the host 75% of `wal`'s busy CPU is copies and `madvise`
+   (D3); the VM profile is task 12.
 
 Two owner sections follow the losses: how many logs (D6, measured), and what a changed loop count
 does today and must do (D10).
@@ -211,8 +167,8 @@ body is encoded once into its group's buffer with room for the batch header, so 
 over without a copy; the emitter frames header and payload straight into the turn buffer instead of
 building `logical()` first; forward copies go (D2). Beats RocksDB, whose WAL writer builds each
 `WriteBatch` and copies it into its log buffer: strata copies each logged byte once. It also cuts
-the turn's CPU (D8). Class: mechanism (`index.hh` `log_state`, `turn_seal.hh`, journal
-`framing.h` and `turn_log.h`).
+the turn's CPU (see "CPU per operation"). Class: mechanism (`index.hh` `log_state`,
+`turn_seal.hh`, journal `framing.h` and `turn_log.h`).
 
 **D4. Background flush with a smaller active buffer.** A flush freezes the active buffer (O(1),
 `freeze()`, `index.hh:5056`) and hands the frozen buffer to the host's executor, which builds the
@@ -253,8 +209,8 @@ at K=8 (327 against 175), a tie at K=1 and K=2, with RocksDB's p50 or better. Th
 mechanism is a fraction of the last barrier (1/16: 1.3 ms at 21 ms, a few µs on a fast NVMe flush),
 so a writer that does not come back costs the others at most 6% of a barrier. Writers that wait in
 `await_sealed` count as released only when their record sealed. Class: mechanism
-(`turn_seal.hh` `turn()`, `serve()`, `wake()`), A4's test (per-writer barrier count) with a mutant
-that drops the wait. Alternatives that lose: a fixed group-commit timer (RocksDB's
+(`turn_seal.hh` `turn()`, `serve()`, `wake()`), tested by a per-writer barrier count with a
+mutant that drops the wait. Alternatives that lose: a fixed group-commit timer (RocksDB's
 `WriteOptions::sync` has none; a timer delays K=1 by its length) and several turns in flight
 (`RFTW0002`, parked; it does not help a device that takes one flush at a time).
 
@@ -280,27 +236,43 @@ are the same configuration: there is one device. D104 chose a log per core on th
 numbers (46 calls/s on one log against 185 on eight); those calls carried one record each, which
 the table shows is the wrong currency: commits per second, not syncs per second, is the axis.
 
-PROBE_E
+The same three shapes without strata, as a C floor (probe E, job 261120-074947-257624, `devbarrier.c`):
+T threads each commit 4 KiB records in a closed loop, 5 s per cell, with D5's cohort wait (1 ms)
+on the shared flushes. Commits/s, with commits per flush:
 
-**D6. One barrier per device, appends per loop.** Each loop keeps its own turn log, so appends stay
-on their core with no cross-core lock (Track C D11's reason for per-core logs), but the barrier is the
-device's: a loop writes its turn and pushes it to the device without a cache flush
-(`F_BARRIERFSYNC` on macOS, `sync_file_range(WRITE | WAIT_AFTER)` on Linux over a preallocated,
-already-written extent, so no metadata is in flight), then joins the device's group flush, one
-`F_FULLFSYNC` or `fdatasync` that the first loop to arrive issues and every loop whose push returned
-before it started rides. The loop's turn completes at that flush. With D5 inside each loop, every
-writer on the device shares one flush. Beats RocksDB, whose one WAL serializes every writer's append
-through one leader; here appends run in parallel and only the flush is shared. Class: architecture
-(the barrier leaves the loop; journal's `TurnBarrier` and host), so it is the owner's: Q1.
+| T | one file per thread, own `F_FULLFSYNC` | one shared file, one flush per cohort | file per thread, `F_BARRIERFSYNC`, one shared `F_FULLFSYNC` |
+|---|---|---|---|
+| 1 | 45 (1.00) | 46 (1.00) | 87 (1.00) |
+| 2 | 49 (1.00) | 92 (2.00) | 100 (2.00) |
+| 4 | 78 (1.00) | 183 (4.00) | 184 (3.72) |
+| 8 | 111 (1.00) | 369 (8.00) | 253 (5.31) |
+
+Without the cohort wait, the shared file carries half the cohort per flush (T=8: 187 commits/s,
+4.05 per flush), the same loss as strata's loop today. The device coalesces concurrent flushes on
+separate files only partly (T=8: 111 against 45 at T=1), so each extra log is a fraction of a
+flush, never free. The barrier-then-flush column's T=1 cell flushes in 5 ms against 21 ms, which
+suggests `F_FULLFSYNC` returns early when `F_BARRIERFSYNC` left nothing dirty; that is a durability
+question, not a speedup, and it is not taken as one.
+
+**D6. One flush per device, carried by one log per device.** All of a device's loops append to one
+turn log, owned by one loop; a loop hands its sealed records to the owner's open turn, and D5's
+cohort wait makes every writer on the device ride one flush. Measured on this host it is the fastest
+shape in both probes (strata K=8: 327 ops/s against 124 for a log per loop, 2.6×; the C floor:
+369 against 111, 3.3×), and it beats RocksDB's one WAL by 1.23-1.87× at K=4-8 (Group commit). It
+also removes the loop count from the files: groups are placed on loops in memory, and a changed
+loop count re-homes them with no copy (D10). Class: architecture (Track C D11's per-core logs and
+D104 change), so it is the owner's: Q1.
 
 Alternatives:
 
-- *One log per device, shared by every loop* (probe B's L=1): fastest measured today, but every
-  loop's append crosses to the log's owner, a cross-core hand-off per turn, and a host with several
-  devices needs one per device anyway. It is the fallback if the device barrier measures no better.
-- *One log per loop, as today*: loses 2.5× at K=4 on macOS; on Linux with NVMe, concurrent
-  `fdatasync` calls on several files may run in parallel, unmeasured here (no bare-metal Linux,
-  D105). The VM's virtio flush is not a device's.
+- *Per-loop appends with one device flush* (the third column): at par with one log at T≤4, 31%
+  slower at T=8, because every loop still pays its own `F_BARRIERFSYNC`; on Linux the equivalent,
+  `sync_file_range` before one `fdatasync`, gives no ordering guarantee across files without the
+  flush. It keeps appends on their cores, which matters only if one log's append becomes the
+  bottleneck; at 100 B `ack=none` one log already runs 97.7k ops/s, RocksDB's rate.
+- *One log per loop, as today*: 2.5-3.3× slower at K=4-8 on macOS. On Linux with NVMe, concurrent
+  `fdatasync` calls on separate files may overlap better; unmeasured here (no bare-metal Linux, D105;
+  a VM's virtio flush is not a device's). Task 10 measures the Linux floor before D6 lands.
 
 ## Tails
 
@@ -329,7 +301,7 @@ fillrandom 0.78×.** The writer flushes inline: at 12 MiB the budget is 3 MiB, s
 every few thousand puts on the writer's thread (`index.hh:992-993` calls `flush_point()` inside
 `apply`), and every put due during the flush waits; `docs/research/no-stalls.md` measured the same
 stall at 80 µs per document. The 1 KiB row's profile (`8c6f59`, document-gate journal) shows it.
-D4's background flush removes it from the writer. PROBE_C_P99
+D4's background flush removes it from the writer.
 
 **p99 sync/100 (1.13-1.30×).** A sync/100 batch is applied at `durable()` as one transaction, so
 the put that waits is the batch's last, and both engines wait one barrier there. The gate's own
@@ -343,16 +315,214 @@ buffer by the settle.
 
 ## CPU per operation
 
-PROBE_C
+**Measured (probe C, job 261120-072004-d21c38, `sample` over the run phase, 1M operations;
+shares are of the samples not blocked in a wait or a barrier).**
+
+| Row | strata CPU/op | RocksDB CPU/op | where strata's busy CPU goes |
+|---|---|---|---|
+| `wal` fillrandom 100 B | 4.29 µs | 10.59 µs | copies (`memmove`) 45%, `madvise` 21%, malloc and free 8%, `pwrite` 9% |
+| `tenx1`-scale fillseq | 3.51 µs | 1.63 µs | building segments: `pwrite` 24%, LZ4 21%, filters 7.5%, CRC 7.5% |
+| `tenx1`-scale overwrite | 9.42 µs | 7.85 µs | key lookups before the write 12.6% (`keys::may_hold` per segment, `fst` floor, term dictionary), LZ4 8.7%, term dictionary build 6%, copies and `madvise` 8.3% |
+
+1. **`ack=none` and the VM rows (1.4-1.6× there).** On the host strata already spends 2.5× less
+   than RocksDB, but three quarters of what it spends is the turn path's copies and the allocator
+   returning their megabyte buffers (`madvise`), which D3 removes. In a VM both cost more (a
+   `madvise` is a trap to the hypervisor's page tables, and `wal1` wrote 1.9-2.9× RocksDB's bytes in
+   the VMs). The VM profile itself is not taken (light probes only); task 12 takes it.
+2. **fillseq at 10× (1.97×).** RocksDB's leveled compaction moves non-overlapping SSTs down without
+   rewriting them; strata's tiered policy merges by size alone (`merge_policy.hh:16-60`, Lucene's
+   TieredMergePolicy), so sequential keys are rewritten at every tier: 156.5 against 70.2 MiB written
+   in the run. **D9. Sorted runs in the merge policy.** A segment whose key range overlaps no other
+   segment of its tier joins the next tier as it is, as RocksDB's trivial move does; the policy
+   counts overlapping runs, not segments. Reads lose nothing: scans skip a segment by its key
+   range (`index.hh:2506`) and so do point gets (`keys.hh:211`). Beats RocksDB:
+   strata's keys section and filter are per segment, so a moved segment needs no rewrite at all,
+   and random keys still merge by size. Class: mechanism (`merge_policy.hh`, `index.hh`'s merge
+   scheduling and `lookup_key`). It closes `tenx1` and `twox1` fillseq's bytes written (3.2× and
+   2.5×) too.
+3. **overwrite at 10× (1.42×).** strata reads before it writes: a replace looks up the key's live
+   copy in every buffer and segment, newest first (`index.hh:4567-4585`), because the operation
+   returns the document's version and keeps its docid; RocksDB writes blindly and resolves at
+   compaction. The rest is segment building, which D4 moves off the writer and D9 reduces.
+   **D11. Resolve unversioned upserts at flush.** An upsert whose caller asks for no version and
+   no condition records only the key in the buffer; the flush resolves every such key against the
+   segments in one sorted pass (the buffer's keys are ordered, and so are each segment's), setting
+   the delete bits the per-operation lookup sets today. Reads already see the buffer first. Beats
+   RocksDB: the delete is resolved once, at flush, and compaction never carries the old value
+   forward. Class: mechanism and a public API addition (an unversioned upsert operation), so the
+   owner's: Q4. Without it, D4 and D9 still take overwrite's CPU to about 1.1× by this profile's
+   shares; that is a loss A6 would report.
+4. **sync/1 fillrandom (1.15×).** Not reproduced: probe B's K=1 rows spent 228-275 µs per
+   operation against RocksDB's 274, with the same throughput and p50. Most of either engine's CPU
+   there is the kernel's flush path. A6's exclusive rerun decides the row; no mechanism here.
 
 ## A changed loop count (owner, 2026-11-20)
 
-PROBE_D
+The owner asked whether logs survive a different loop count: a disk moved to a server with another
+CPU count, or a changed configuration. They do today, by a mechanism that lives in journal, not in
+strata's docs: journal `docs/design/host-layout.md`, "Placement and re-partition", and
+`include/journal/host.h`.
+
+**What happens today** (journal `cc95ba6`; `main` is the same):
+
+1. **Placement.** A group's slot is its id through splitmix64's finalizer into 4,096 slots, and its
+   loop is `(slot × L) >> 12` (`host.h:81-87`): each loop owns a contiguous run of slots. Nothing
+   stores a group's loop. The group table is sharded by slot (`groups-<slot>`), not by loop, so it
+   never moves.
+2. **Open.** The `layout` file holds L and the log generation; a host directory with groups or logs
+   and no layout refuses to open (`host.h:424-436`). Logs of any other generation are leftovers of an
+   unfinished re-partition and are removed (`:438-446`).
+3. **Another L re-partitions before serving** (`host.h:447-448`, `:481-520`): it reads every log of
+   the stored generation, all `L_old` of them, so a log whose loop no longer exists is replayed;
+   marks the ids recovery calls lost; writes each group's live records into its new loop's log of
+   generation + 1 in turns of at most a quarter segment, each synced; replaces `layout`; removes the
+   old logs. A crash before the layout's replace leaves the old generation authoritative, and the next
+   open starts over. Journal's `placement_test` re-partitions one host through 3, 2, 5 and 4 loops,
+   cuts power at every operation of each, and checks every record comes back
+   (`test/placement_test.cc:169-205` at `main`).
+4. **strata's side.** An index stores its host identity and group in its `turn_group` attribute
+   (`index.hh:582-605`), never a loop; the host's `loop(group)` routes it (`turn_seal.hh` `mine()`
+   checks it), so a re-partitioned group reopens on its new loop.
+
+**Gaps found:**
+
+1. Re-partition holds every group's live records of every log in one map
+   (`std::map<group, vector<TurnRecord>>`, `host.h:482`) until it has written them all: memory and
+   open time grow with the live bytes of all logs: +30 MiB for 100k idle groups (probe D).
+2. Every open group keeps its latest checkpoint record live in the log until it closes
+   (`turn_log.h` `note()`: a checkpoint supersedes only the group's earlier records), so the live
+   bytes, the forward copies (D2) and the re-partition's copy all grow with the number of open
+   indexes, not with what was written.
+3. A log file of the current generation whose loop is L or more is neither read nor removed: open
+   creates drivers for loops below L only (`host.h:450-454`) and removes other generations only.
+   Reachable only by copying files by hand, but silent; it should refuse as corruption.
+4. No strata test reopens a logged index at another loop count, and `kv_strata` derives its group
+   ids from L (`bench/kv/kv_strata.hh:288-290`), so its data reopened under another `KV_LOOPS` names
+   other groups than its indexes recorded. Production must never derive a group id from L.
+5. Creating a group rewrites its slot's whole table shard and pays two barriers, the shard file's
+   and the directory's (`host.h:307-314`, `:377-381`, `replace_file` at `:141-147`; probe D counted
+   three sync calls per create, 30,023 for 10k). At 20 ms a barrier, a million indexes take 11 hours
+   to create one at a time.
+6. Every open starts a new segment per loop, and the old ones stay: idle groups' checkpoints keep
+   them live and nothing forwards without turns. Probe D's directory grew by L segments per open at
+   the same L (16.5 → 32.5 MiB at L=4, 64.5 → 96.5 MiB at L=8, 4 MiB segments); at the default
+   64 MiB and 32 loops that is 2 GiB per restart.
+
+**D10. Logs recoverable under any loop count; idle groups cost nothing to re-home.**
+
+1. With D6, logs belong to devices, not loops: a changed loop count re-homes groups in memory
+   (placement by hash at open, as today) and copies nothing; only a changed device count
+   re-partitions, which a disk moved to another server does not cause. Without D6 (Q1 declined),
+   keep journal's protocol (hash placement, one copy into the next generation, the layout as the
+   commit point): it is crash-tested and costs one copy of the live bytes. *Adopting the old logs
+   read-only* until each group checkpoints anew loses: every later recovery reads two generations
+   and stitches each group's sequence across them, and an idle group never checkpoints, so the old
+   logs never go.
+2. Stream the copy: read one old log, append each record to its new loop's open turn, and sync a turn
+   when it reaches a quarter segment; memory is then L_new turns, not every live record.
+3. Park idle groups in the table: once a group's last record is a checkpoint and a retention window
+   has passed without a write, the host moves that record into the group's table entry (its `base`
+   and payload, as `close_group` does, `host.h:324-336`) and the log forgets it; its next write
+   starts from `base`. Re-homing then copies only groups with records since their last checkpoint,
+   at most the logs' retention windows, whatever the number of open indexes.
+4. A strata test reopens logged indexes at L = 1 → 3 → 2 with a power cut during the
+   re-partition, and the kv harness keeps each index's group id in its directory.
+5. Group creations and closes join the loop's turn: the table shards they touch are written with
+   the turn and published at its barrier, so creating many indexes costs one barrier per turn, not
+   two per index. Parking (item 3) makes gap 6 go too: an open with no live records starts no
+   segment.
+
+Class: mechanism in journal (items 2, 3 and 5, coordinated with Detent's lead), tests and harness
+in strata (item 4). Items 2, 3 and 5 are not needed for A6's rows; they are needed before a host
+holds millions of indexes (many-indexes workload), so they go to the owner as Q3.
+
+**The cost of re-homing** (probe D, job 261120-074846-356a48, `rehome.cc`: journal's Host on a real
+directory, syncs made counted no-ops by `nosync.c`, so CPU, memory and syncs, not device time; idle
+groups with one 48-byte checkpoint record each, 4 MiB segments):
+
+| Idle groups | open at the same L | open at another L (re-partition) | extra CPU per group | extra syncs | peak memory added at open |
+|---|---|---|---|---|---|
+| 10k, 4 → 8 | 0.12 s | 0.21 s | 4.5 µs | 77 | +5.4 MiB |
+| 100k, 4 → 8 | 0.32 s | 0.69 s | 3.8 µs | 85 | +42 MiB |
+| 100k, 8 → 2 | 0.28 s | 0.65 s | 3.7 µs | 39 | +36 MiB |
+| 100k, 10% with a 1 KiB batch | 0.30 s | 0.74 s | 4.0 µs | 93 | +76 MiB |
+| 300k, 4 → 8 | 0.78 s | 2.06 s | 4.3 µs | 130 | +165 MiB |
+
+Extrapolated linearly, a host with 1M open idle indexes pays 2.6 s of CPU and about 550 MiB to
+recover its logs at every open, and 4.3 s more to re-partition, plus a few hundred syncs (several
+seconds of barriers at 20 ms); 10M pay 70 s and 5.5 GiB. Every cost scales with idle groups,
+which wrote nothing: item 3 (parking) takes all of it to the groups with records in the retention
+window, and D6 takes the re-partition itself to zero. Creating those groups costs more than
+re-homing them: 94 s of CPU and 900k sync calls for 300k (gap 5, item 5). The re-partition itself
+raised the peak a further 30 MiB at 100k and 64 MiB at 300k (its in-memory map, gap 1).
 
 ## Decisions not taken here
 
+- **Compressing log records.** RocksDB's bench WAL is uncompressed too, and the log's excess is
+  copies and zeros (D2), not entropy. Worth a probe after D2 lands, on the 1 KiB rows only.
+- **Changing the harness's budget split** (giving strata RocksDB's `memory / 8` buffer). That matches
+  a setting rather than beating a mechanism; D4 bounds the active buffer at half the share instead.
+- **Several turns in flight (`RFTW0002`).** Parked in standalone-turn-log; a device that flushes one
+  at a time gains nothing from it (Group commit).
+- **A fixed group-commit delay.** It delays K=1 by its length; D5's bound follows the cohort and the
+  barrier.
+
 ## Questions for the owner
+
+Each has a default the tasks follow until answered.
+
+- **Q1. One log per device (D6).** Architecture: logs stop being per loop (Track C D11, D104).
+  Options: (a) D6, one log and one flush per device, every loop appending to it; (b) per-loop logs
+  with one device flush (`F_BARRIERFSYNC` per log), 31% slower at T=8 on macOS; (c) keep one log
+  per loop and accept the K-log rows as losses (2.5-3.3× at K=4-8). Recommendation: (a): it is the
+  fastest shape measured, and it makes a changed loop count free (D10). Default: tasks 1-9 proceed,
+  which help every option; task 10 waits for the answer.
+- **Q2. Which memory the gate compares.** The harness reports the higher of RSS and the physical
+  footprint; on macOS RSS counts freed pages the allocator keeps. Recommendation: keep it (it is
+  what the host pays), and let D3 remove the pages; add the footprint as a column so the two
+  causes stay apart. Default: as recommended.
+- **Q3. Idle groups leave the log, re-partition streams, and group creation joins the turn (D10
+  items 2, 3 and 5).** A journal change shared with Detent. Not needed for A6's rows; needed
+  before a host holds millions of open indexes. Recommendation: yes, after A6, coordinated with
+  Detent's lead. Default: task 9 only records the design in journal's docs.
+- **Q4. An unversioned upsert (D11).** A public operation that returns no version and whose delete
+  resolves at flush. Without it, overwrite at 10× stays about 1.1× in CPU. Recommendation: add it.
+  Default: not built; A6 reports the overwrite CPU row.
 
 ## Tasks for turn-log-parity
 
+In order; each is one landing with its test and the rows it moves.
+
+| # | Task | Files | Rows |
+|---|---|---|---|
+| 1 | D5 cohort wait, bound 1/16 of the last barrier; a test counting barriers per writer at K=4 with a mutant that drops the wait | `include/strata/core/turn_seal.hh`, `tests/test_turn_seal*` | group commit K=2-8 on one log |
+| 2 | D3 the turn path owns its buffers: per-log encode buffer, records encoded in place, framing straight into the turn | `include/strata/core/index.hh` (`log_state`), `turn_seal.hh`; journal `framing.h`, `turn_log.h` | peak RSS on logged rows, `wal` CPU, VM `wal1` |
+| 3 | D1 segment ladder and off-turn preparation, D2 item 1 spare pool | journal `turn_log.h`, `turn_driver.h`; strata `bench/kv/kv_strata.hh` geometry | disk on every logged row, bytes written, `wal` p99.99 (preallocation) |
+| 4 | D2 item 2 checkpoint inside the window | `index.hh` (`checkpoint_log_bytes`, `log_due`) | bytes written (YCSB logged loads) |
+| 5 | D7 pack the turn; bound the window in bytes | journal `turn_driver.h` (`seal_turn`); `index.hh` (`log_state::join`, `seal`) | `wal` p99.99, `wal1` VM rows, logged load throughput |
+| 6 | D4 background flush, active buffer at half the share | `index.hh` (`flush_point`, `freeze`, `flush`, `buffer_limit`), host executor | peak memory, 1 KiB fillrandom, tier-none p99, time to durable |
+| 7 | D9 sorted runs in the merge policy | `include/strata/core/merge_policy.hh`, `index.hh` merge scheduling | `tenx1`/`twox1` fillseq CPU and bytes written |
+| 8 | D10 item 4: reopen at L = 1 → 3 → 2 with power cuts; `kv_strata` stores group ids | `tests/` (logged index reopen), `bench/kv/kv_strata.hh` | loop count (owner) |
+| 9 | D10 gap 3: refuse a current-generation log with loop ≥ L; record items 2, 3 and 5 in journal's `host-layout.md` | journal `host.h`, `docs/design/host-layout.md` | loop count (owner) |
+| 10 | D6 one log per device, after Q1; first `probe-e.sh`'s floor on bare-metal Linux | journal `host.h`, `turn_driver.h`; strata's loop wiring (`turn_seal.hh`, `kv_strata.hh`) | group commit on K logs; loop count |
+| 11 | D11 unversioned upsert, after Q4 | `index.hh` (replace path, flush), public API | overwrite CPU at 10× |
+| 12 | Profile `wal1` in the Linux and FreeBSD VMs after tasks 2-5 | none (a probe) | `wal1` VM CPU |
+
+Tasks 3, 5 and 9 change journal: coordinated with Detent's lead before landing.
+
 ## Checks
+
+Each axis reruns from committed scripts (`bench/kv/probes/rocksdb-parity/`), light, minutes each,
+from a strata checkout with `build-rel` (and RocksDB's `kv_rocksdb` from
+`bench/engines/rocksdb-11.11` at `~/.scratch/rocksdb-11.11-build`):
+
+| Axis | Check | Pass |
+|---|---|---|
+| disk, bytes written | `probe-a.sh`: `wbytes.c` counts bytes per file class and zero-fill | log zero-fill 0 after warm-up; log records ≤ 1.1× commands; disk ≤ RocksDB's |
+| memory | `probe-a.sh`: `vmmap -summary` at `KV_PAUSE_AFTER_RUN` | `MALLOC_MEDIUM (empty)` under 8 MiB; footprint ≤ RocksDB's |
+| group commit, log count | `probe-b.sh`: K 1-8 on 1-8 logs, syncs per op | syncs per op ≤ 1/K + 0.05 on one log; ops/s ≥ RocksDB's at each K |
+| log count floor | `probe-e.sh` (`devbarrier.c`), with and without the cohort wait | commits per flush = T on the shared file |
+| CPU | `probe-c.sh`: `sample` of the CPU-loss rows | copies and `madvise` under 10% of `wal`'s busy samples |
+| loop count | `probe-d.sh` (`rehome.cc`, faultfs) and task 8's test | every record back at every L; re-partition memory bounded by turns, not live bytes |
+
+The gate's rows stay the verdict: A6's exclusive rerun of `bench/kv/run.py` after the tasks land.
