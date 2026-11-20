@@ -109,11 +109,12 @@ struct word {
 };
 
 // One waiting pin or shutdown, on the heap (task's lock_waiter shape): its list and its awaiter each hold
-// a reference, so a delivery never writes into a frame destroyed while it waited. Exactly one of the
-// delivery and the awaiter's destruction sets `st` last: a delivery before the suspension makes
-// await_suspend decline, and one that meets `abandoned` releases the pin it carries.
+// a reference, so a delivery never writes into a frame destroyed while it waited. A delivery before the
+// suspension makes await_suspend decline; one to a suspended waiter holds `posting` while it posts the
+// resume, and the awaiter's destruction waits through it; one that meets `abandoned` releases the pin it
+// carries. docs/mechanisms/catalog-delivery.md has who may touch what in each state.
 struct waiter {
-	enum : int { registered, suspended, delivered, abandoned };
+	enum : int { registered, suspended, posting, delivered, abandoned };
 	waiter *next = nullptr, *prev = nullptr;
 	std::atomic<int> st{registered};
 	std::atomic<int> refs{1};  // the awaiter's; joining a list adds the list's
@@ -1153,14 +1154,16 @@ private:
 	}
 
 	// Delivers a taken list outside the mutex: a pin (error null) or the error, then drops the list's
-	// reference. A waiter whose frame is gone (`abandoned`) is not resumed; the pin it was handed is
-	// released here.
+	// reference. A suspended waiter is `posting` until its resume is posted, so its frame's destruction
+	// returns only after the post; one whose frame is gone (`abandoned`) is not resumed, and the pin it
+	// was handed is released here.
 	void deliver(waiter* list, std::uint64_t gen, const std::exception_ptr& error) noexcept {
 		for (waiter* w = list; w;) {
 			waiter* next = w->next;
 			w->gen = gen;
 			w->error = error;
-			const int was = w->st.exchange(waiter::delivered, std::memory_order_acq_rel);
+			int was = w->st.load(std::memory_order_acquire);
+			while (was != waiter::abandoned && !w->st.compare_exchange_weak(was, was == waiter::suspended ? waiter::posting : waiter::delivered, std::memory_order_acq_rel, std::memory_order_acquire)) {}
 			if (was == waiter::suspended) {
 				const std::coroutine_handle<> h = w->h;
 				const task::scheduler_ref sched = w->sched;
@@ -1169,6 +1172,7 @@ private:
 				} else {
 					h.resume();
 				}
+				if (w->st.exchange(waiter::delivered, std::memory_order_acq_rel) == waiter::abandoned) { w->st.notify_all(); }
 			} else if (was == waiter::abandoned && w->pins && !error) {
 				gone_pins_.fetch_add(1, std::memory_order_relaxed);
 				unpin(at(w->idx), w->idx);
@@ -1210,15 +1214,24 @@ private:
 	}
 
 	// A frame destroyed while it waited: unlinked if still listed; else its delivery has run (the pin it
-	// was handed is released here) or will find it abandoned and release the pin. A waiter that never
-	// joined a list (the pin did not wait, or threw first), or that ~catalog orphaned, leaves `c` alone.
+	// was handed is released here), is posting its resume (waited for, then as run), or will find it
+	// abandoned and release the pin. Once it returns, no delivery touches the waiter's scheduler. A waiter
+	// that never joined a list (the pin did not wait, or threw first), or that ~catalog orphaned, leaves `c` alone.
 	static void abandon(catalog* c, waiter* w) noexcept {
 		if (!w->mu) {
 		} else if (c->unlink_waiter(w)) {
 			w->release();  // the list's
-		} else if (w->st.exchange(waiter::abandoned, std::memory_order_acq_rel) == waiter::delivered && w->pins && !w->error) {
-			c->gone_pins_.fetch_add(1, std::memory_order_relaxed);
-			c->unpin(c->at(w->idx), w->idx);
+		} else {
+			int was = w->st.exchange(waiter::abandoned, std::memory_order_acq_rel);
+			if (was == waiter::posting) {  // bounded by one post; the delivery's exchange wakes it
+				c->hook_noexcept("abandon.posting");
+				w->st.wait(waiter::abandoned, std::memory_order_acquire);
+				was = waiter::delivered;
+			}
+			if (was == waiter::delivered && w->pins && !w->error) {
+				c->gone_pins_.fetch_add(1, std::memory_order_relaxed);
+				c->unpin(c->at(w->idx), w->idx);
+			}
 		}
 		w->release();
 	}

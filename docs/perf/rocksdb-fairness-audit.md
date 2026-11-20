@@ -213,8 +213,8 @@ memory only, as the report says; they are not I/O rows.
 - Memory: the same M/4 for buffers; RocksDB's cache M holds decoded blocks, strata has none and
   reads through mmap; peak RSS counts strata's mapped pages and RocksDB's cache, not either's
   page cache.
-- Compression: LZ4 at 16 KiB blocks (RocksDB's calibrated fastest) against strata's zstd at
-  64 KiB frames, its only setting; the disk axis compares codecs as much as layouts.
+- Compression: RocksDB's pinned variant (next section) against strata's zstd at 64 KiB frames,
+  its only setting; the disk axis compares codecs as much as layouts.
 - Bloom at 10 bits per key (0.99% false positives measured) against strata's fuse filter
   (0.39%): each engine's default.
 - strata-side harness costs, both small: the test-hook get decodes without the scan's per-segment
@@ -235,6 +235,29 @@ memory only, as the report says; they are not I/O rows.
 
 Cost at scale: these are measurement corrections, not engine wins, and the time they move is
 barrier wait, not CPU; no CPU-hours or dollars follow from them.
+
+## RocksDB's pin per value-size class
+
+Every gate row runs RocksDB 11.11 on its fastest configuration for the row's value size
+(`KV_VARIANT_<size>`), so no ratio rests on a default it could beat. `bench/kv/run.py calibrate`
+runs six variants (`lvl-4k-lz4`, `lvl-16k-lz4`, `lvl-4k-none`, `lvl-4k-zstd`, `lvl-4k-lz4-hash`,
+`uni-4k-lz4`: level or universal compaction, 4 or 16 KiB blocks, LZ4, zstd or none, hash index)
+and strata on fillrandom, readrandom and YCSB A, one thread, over five interleaved trials. A
+variant's score is the geometric mean of its median ops/s over the workloads; the pin must be
+within 3% of the best (below RocksDB's A/A spread of 0.2-8%), and the command exits nonzero
+otherwise.
+
+The gate's value-size classes are 100 B and 1 KiB. At the gate's code (`dd02c63d`) the pin is the
+fastest at both:
+
+| Value size | Pin | Next best (share of the pin) | Job |
+|---|---|---|---|
+| 100 B | `lvl-16k-lz4` | `lvl-4k-none` 0.972, `lvl-4k-lz4-hash` 0.967 | 261119-165657-597c2b |
+| 1 KiB | `lvl-4k-none` | `lvl-16k-lz4` 0.980, `uni-4k-lz4` 0.930 | 261119-165659-de5c70 |
+
+An earlier calibration scored 1 KiB's old pin `lvl-16k-lz4` at 0.970 of `lvl-4k-none`
+(261118-175419-c46cd4), so 1 KiB moved to `lvl-4k-none`: the rule picks the pin, and the move
+favors RocksDB. The ladder's other classes (400 B, 4 KiB, 64 KiB) have no gate rows and no pin.
 
 ## What did not run
 
