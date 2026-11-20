@@ -73,7 +73,7 @@ group_type::config config(cs::NodeId self, unsigned voters, strata::byte_budget&
 	c.options.configuration.configuration[0] = 'G';
 	c.options.admission = admission;
 	c.options.limits.command_bytes = 4096;
-	c.options.limits.rpc_bytes = 16384;
+	c.options.limits.rpc_bytes = 8192;  // a batch fits one 16 KiB turn-log segment (DRIVER.md)
 	c.options.limits.log_bytes = 64 * 1024;
 	c.options.limits.log_entries = 64;
 	c.options.limits.control_entries = 4;

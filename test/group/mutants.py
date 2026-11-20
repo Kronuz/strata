@@ -171,7 +171,7 @@ MUTANTS = {
         "\t\t\t(void)s;\n\t\t\tbreak;\n")],
     # read_applied reads this replica's state without the Driver's quorum probe (A4).
     "read-skips-probe": [(GROUP,
-        "\t\tconst auto ready = co_await loop_->driver().read(config_.id, std::move(token));\n\t\tco_await applied_at(ready.index);\n",
+        "\t\tconst auto ready = co_await loop_->driver().read(id_, std::move(token));\n\t\tco_await applied_at(ready.index);\n",
         "\t\t(void)token;\n")],
 }
 

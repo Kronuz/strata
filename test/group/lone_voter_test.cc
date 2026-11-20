@@ -66,7 +66,7 @@ group_type::config config(strata::byte_budget& storage) {
 	c.options.admission = admission;
 	// Small enough that a checkpoint's reservation fits the admission's artifact limit.
 	c.options.limits.command_bytes = 4096;
-	c.options.limits.rpc_bytes = 16384;
+	c.options.limits.rpc_bytes = 8192;  // a batch fits one 16 KiB turn-log segment (DRIVER.md)
 	c.options.limits.log_bytes = 64 * 1024;
 	c.options.limits.log_entries = 64;
 	c.options.limits.control_entries = 4;

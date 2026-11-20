@@ -27,14 +27,14 @@ FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefil
 # coroutine seam, is what journal's turn driver runs on (no Asio).
 set(COMPLETION_TASK ON CACHE BOOL "" FORCE)
 set(COMPLETION_ASIO OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG 7731315d0660a953f7b3bf956df3127d5a525a03)
+FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG d8b538c6778f0a1b969e42c8428995d1d29d4731)
 # The manifest log's block framing (manifest-log D2), and the turn log, its driver and host that a
 # logged index writes through (standalone-turn-log D1); strata::group runs on the drivers.
-FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.git GIT_TAG cc95ba636dee73b494daef7bbd8d341505aea9a1)
+FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.git GIT_TAG 9e11713edbb6e31681e1ae7a3f8f18f15eb7eaac)
 # Background work's threaded executor: one WorkPool per node, a WorkGroup per index.
 FetchContent_Declare(workpool GIT_REPOSITORY https://github.com/Kronuz/workpool.git GIT_TAG 640c66bfebccae811377670a265b62f4878ede8a)
 # strata::group's replication: consensus's Driver (docs/DRIVER.md, contract consensus:driver).
-FetchContent_Declare(consensus GIT_REPOSITORY https://github.com/Kronuz/consensus.git GIT_TAG 57745e8541d7101c82b8f3f1bdd5472397875edf)
+FetchContent_Declare(consensus GIT_REPOSITORY https://github.com/Kronuz/consensus.git GIT_TAG 1c08c9fc40620c0be445069bb3b1e319aa4a28f1)
 # fst is termdict's; strata pins it so the dictionary's bytes do not drift.
 FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict compressors fusefilter completion workpool journal consensus)
 
