@@ -1,11 +1,14 @@
 // C1's strata arm (docs/design/hybrid-search.md C1; driver bench/hybrid/c1.py): one index per
 // tenant, each vector a document whose stored value is its 768 float32s, answered by an exact scan.
-//   c1_strata load  ROOT N VECFILE              N indexes of 1,000 documents, from VECFILE's rows
-//   c1_strata serve ROOT N QFILE SAMPLE OUTDIR  a catalog over ROOT as a host runs it (defer_io, the
+//   c1_strata load  ROOT N VECFILE [i8]         N indexes of 1,000 documents, from VECFILE's rows
+//   c1_strata serve ROOT N QFILE SAMPLE OUTDIR [i8]
+//                                               a catalog over ROOT as a host runs it (defer_io, the
 //                                               sweep on); prints `ready`, then per `pass NAME` line
 //                                               runs query i on tenant SAMPLE[i], writes
 //                                               `seconds id...` lines to OUTDIR/NAME.txt, prints `done`
 // No vector code exists in strata yet; this measures what the design's exact search starts from.
+// `i8` (hybrid-search.md A2) stores each vector as a float32 scale and 768 int8 codes (772 bytes
+// against 3,072) and scores the codes against the float32 query: the code column read cold.
 #include "../idle_index/meters.hh"
 
 #include "strata/core/budget.hh"
@@ -18,6 +21,8 @@
 
 #include <algorithm>
 #include <condition_variable>
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -38,6 +43,8 @@ using cat_t = catalog<kv_index>;
 namespace {
 
 constexpr std::size_t dim = 768, per = 1000, top = 10;
+constexpr std::size_t i8_size = sizeof(float) + dim;  // scale, then one code per component
+bool i8 = false;
 
 std::vector<float> read_floats(const char* path, std::size_t first, std::size_t count) {
 	std::vector<float> v(count);
@@ -52,6 +59,19 @@ kv_index::options index_options() {
 	kv_index::options o;
 	o.keyed = true;
 	return o;
+}
+
+// Scale = max |x| / 127, then each component rounded to the nearest code.
+std::string quantize(const float* v) {
+	float m = 0;
+	for (std::size_t i = 0; i < dim; ++i) { m = std::max(m, std::fabs(v[i])); }
+	const float scale = m / 127.0f;
+	std::string out(i8_size, '\0');
+	std::memcpy(out.data(), &scale, sizeof scale);
+	for (std::size_t i = 0; i < dim; ++i) {
+		out[sizeof scale + i] = char(std::int8_t(std::lrintf(scale > 0 ? v[i] / scale : 0.0f)));
+	}
+	return out;
 }
 
 int load(const fs::path& root, std::uint64_t n, const char* vecs) {
@@ -69,7 +89,13 @@ int load(const fs::path& root, std::uint64_t n, const char* vecs) {
 			auto& op = tx.ops[0];
 			op.key = key_of(d);
 			op.doc.key = op.key;
-			op.doc.stored.assign(std::string_view(reinterpret_cast<const char*>(rows.data() + d * dim), dim * sizeof(float)));
+			const float* v = rows.data() + d * dim;
+			if (i8) {
+				const std::string code = quantize(v);
+				op.doc.stored.assign(code);
+			} else {
+				op.doc.stored.assign(std::string_view(reinterpret_cast<const char*>(v), dim * sizeof(float)));
+			}
 			if (ix.apply(tx, {}).result != verdict::accepted) { throw std::runtime_error("apply refused"); }
 		}
 		ix.commit();
@@ -175,6 +201,18 @@ float dot(const char* v, const float* q) {
 	return ((acc[0] + acc[4]) + (acc[1] + acc[5])) + ((acc[2] + acc[6]) + (acc[3] + acc[7]));
 }
 
+// The codes against the float32 query, scaled back: eight accumulators as `dot`.
+float dot_i8(const char* v, const float* q) {
+	float scale;
+	std::memcpy(&scale, v, sizeof scale);
+	const auto* c = reinterpret_cast<const std::int8_t*>(v + sizeof scale);
+	float acc[8] = {};
+	for (std::size_t i = 0; i < dim; i += 8) {
+		for (int j = 0; j < 8; ++j) { acc[j] += float(c[i + std::size_t(j)]) * q[i + std::size_t(j)]; }
+	}
+	return scale * (((acc[0] + acc[4]) + (acc[1] + acc[5])) + ((acc[2] + acc[6]) + (acc[3] + acc[7])));
+}
+
 using hit = std::pair<float, std::uint32_t>;
 
 // One query: a pin by key, a reader, an exact scan of every document, the top 10 by inner product.
@@ -184,8 +222,8 @@ task::task<std::vector<hit>> query(cat_t& c, std::string key, const float* q) {
 	auto p = co_await c.pin_request(key);
 	const auto g = p.reader().acquire();
 	g->scan("", [&](std::string_view k, std::string_view v, std::uint64_t) {
-		if (v.size() != dim * sizeof(float)) { throw std::runtime_error("value of another size"); }
-		const float s = dot(v.data(), q);
+		if (v.size() != (i8 ? i8_size : dim * sizeof(float))) { throw std::runtime_error("value of another size"); }
+		const float s = i8 ? dot_i8(v.data(), q) : dot(v.data(), q);
 		if (best.size() == top && s <= best.back().first) { return; }
 		const hit h{s, std::uint32_t(std::strtoul(std::string(k.substr(1)).c_str(), nullptr, 10))};
 		best.insert(std::upper_bound(best.begin(), best.end(), h, [](const hit& a, const hit& b) { return a.first > b.first; }), h);
@@ -260,8 +298,12 @@ int serve(const fs::path& root, std::uint64_t n, const char* qfile, const char* 
 
 int main(int argc, char** argv) {
 	const std::string cmd = argc > 1 ? argv[1] : "";
+	if (argc > 1 && std::string(argv[argc - 1]) == "i8") {
+		i8 = true;
+		--argc;
+	}
 	if (cmd == "load" && argc == 5) { return load(argv[2], std::strtoull(argv[3], nullptr, 10), argv[4]); }
 	if (cmd == "serve" && argc == 7) { return serve(argv[2], std::strtoull(argv[3], nullptr, 10), argv[4], argv[5], argv[6]); }
-	std::fprintf(stderr, "usage: c1_strata load ROOT N VECFILE | serve ROOT N QFILE SAMPLE OUTDIR\n");
+	std::fprintf(stderr, "usage: c1_strata load ROOT N VECFILE [i8] | serve ROOT N QFILE SAMPLE OUTDIR [i8]\n");
 	return 2;
 }

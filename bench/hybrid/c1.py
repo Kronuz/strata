@@ -12,7 +12,8 @@ LanceDB and strata embedded; macOS runs them natively (bench/hybrid/setup.sh) as
   c1.py row SYS N            measure, then clean (one exclusive job: the disk holds one system at 1,000 tenants)
   c1.py dry N [SYS...]       load, measure and clean each system: the harness end to end
 SYS: qdrant (payload tenancy), pg (shared table + btree(tenant)), es (shared index, filtered kNN),
-lance (table per tenant, flat), strata (index per tenant behind a catalog, exact scan).
+lance (table per tenant, flat), strata (index per tenant behind a catalog, exact scan), strata-i8 (A2:
+the same with int8 codes stored; not in the default dry run).
 Results: C1_HOME/results/SYS-N-load.json, SYS-N-tune.json and SYS-N.json.
 """
 
@@ -555,24 +556,32 @@ class Strata(Embedded):
     """One strata index per tenant (bench/hybrid/c1_strata.cc), opened through a catalog as a host does."""
 
     name = "strata"
+    codec: list[str] = []
 
     def bin(self) -> str:
         return os.environ.get("C1_STRATA", str(HERE.parent.parent / "build-c1" / "c1_strata"))
 
     def load(self) -> None:
-        subprocess.run([self.bin(), "load", str(self.dd), str(self.n), str(H / "vec.f32")], check=True, stdout=sys.stderr)
+        subprocess.run([self.bin(), "load", str(self.dd), str(self.n), str(H / "vec.f32"), *self.codec], check=True, stdout=sys.stderr)
 
     def start(self) -> float:
         with open(H / "out" / "sample.txt", "w") as f:
             f.write("\n".join(map(str, sample(self.n))) + "\n")
-        return self.serve([self.bin(), "serve", str(self.dd), str(self.n), str(H / "q.f32"), str(H / "out" / "sample.txt"), str(H / "out")])
+        return self.serve([self.bin(), "serve", str(self.dd), str(self.n), str(H / "q.f32"), str(H / "out" / "sample.txt"), str(H / "out"), *self.codec])
 
     def version(self) -> str:
         return os.environ.get("C1_COMMIT") or sh(["git", "-C", str(HERE), "rev-parse", "--short=12", "HEAD"], check=False)
 
 
+class StrataI8(Strata):
+    """A2's experiment: each vector stored as 772 bytes of int8 codes and a scale, scored against the float32 query."""
+
+    name = "strata-i8"
+    codec = ["i8"]
+
+
 def make(sys_: str, n: int) -> Server:
-    return {"qdrant": Qdrant, "pg": PG, "es": ES, "lance": Lance, "strata": Strata}[sys_](n)
+    return {"qdrant": Qdrant, "pg": PG, "es": ES, "lance": Lance, "strata": Strata, "strata-i8": StrataI8}[sys_](n)
 
 
 def save(name: str, out: dict) -> None:
