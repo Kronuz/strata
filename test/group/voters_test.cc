@@ -165,8 +165,9 @@ struct world {
 	};
 	std::vector<acknowledged> acks;
 	std::uint64_t stalls = 0, crashes = 0;
+	bool hand_off;  // the hosts know their peers' applied positions: a stalled leader hands off
 
-	world(unsigned n, std::uint64_t s) : voters(n), seed(s), rng(s) {
+	world(unsigned n, std::uint64_t s, bool handing_off = false) : voters(n), seed(s), rng(s), hand_off(handing_off) {
 		for (cs::NodeId id = 1; id <= n; ++id) {
 			auto x = std::make_unique<node>();
 			x->id = id;
@@ -189,6 +190,14 @@ struct world {
 		p->lp = std::make_unique<sg::loop>(p->loop_ref(), j::completion_ref::of(p->inline_io), *p->host, 0, seed * 31 + x.id);
 		const auto from = x.id;
 		p->lp->send = [this, from](cs::GroupId, cs::Send s) { net.push_back({from, s.peer, std::move(s.message)}); };
+		if (hand_off) {
+			p->lp->applied_past = [this, from](cs::GroupId, cs::Index index) -> std::optional<cs::NodeId> {
+				for (auto& [id, y] : nodes) {
+					if (id != from && y->open() && !y->p->g->stalled() && y->p->g->applied() >= index) { return id; }
+				}
+				return std::nullopt;
+			};
+		}
 		auto* raw = p.get();
 		task::spawn(p->loop_ref(), p->host->driver(0).run(j::completion_ref::of(p->held), p->stop.token()), [raw](std::exception_ptr) { raw->turns_done = true; });
 		task::spawn(p->loop_ref(), p->lp->run(p->stop.token()), [raw](std::exception_ptr) { raw->driver_done = true; });
@@ -553,7 +562,10 @@ void default_limits() {
 	task::spawn(task::scheduler_ref::of(loop_s), host.driver(0).run(j::completion_ref::of(io), stop.token()), [&](std::exception_ptr) { turns_done = true; });
 	task::spawn(task::scheduler_ref::of(loop_s), lp.run(stop.token()), [&](std::exception_ptr) { driver_done = true; });
 	auto c = config(1, 1, x.storage);
-	c.options.limits = cs::Limits{};  // consensus's defaults: a 64 MiB log
+	// consensus's default log, a 64 MiB one; the wire limits stay the test's, so a batch fits one
+	// turn-log segment (D132).
+	c.options.limits.log_bytes = cs::Limits{}.log_bytes;
+	c.options.limits.log_entries = cs::Limits{}.log_entries;
 	group_type g(lp, c, std::make_unique<ff::io>(x.dir_disk), x.app, task::scheduler_ref::of(chore_s));
 	auto run_all = [&] {
 		for (int i = 0; i < 100000; ++i) {
@@ -868,6 +880,166 @@ void write_path(unsigned voters, std::uint64_t seed, bool stale, a3_totals& tota
 	}
 }
 
+// The leader of a term above `term`, other than `not_this`, if one is elected.
+node* leader_above(world& w, cs::Term term, const node* not_this) {
+	for (auto& [id, x] : w.nodes) {
+		if (x.get() == not_this || !x->open()) { continue; }
+		if (auto st = x->p->lp->driver().state(gid); st && st->role == cs::Role::Leader && st->term > term) { return x.get(); }
+	}
+	return nullptr;
+}
+bool is_superseded(std::exception_ptr e) {
+	try {
+		if (e) { std::rethrow_exception(e); }
+	} catch (const cs::superseded&) {
+		return true;
+	} catch (...) {}
+	return false;
+}
+// Every node applied the same entries, and its digest equals a replay from empty of the log.
+void same_digests(world& w) {
+	const auto& first = *w.nodes.begin()->second;
+	const auto through = first.p->g->applied();
+	const auto reference = replay(first.log, through);
+	for (auto& [id, x] : w.nodes) {
+		const auto who = "node " + std::to_string(id);
+		check(!x->p->g->fenced(), who + " is not fenced: " + x->p->g->fence_reason());
+		check(x->p->g->applied() == through, who + " applied what node 1 did");
+		check(of(*x->p->g, x->app) == reference, who + "'s digest equals the replay");
+	}
+}
+
+// An election replaces an uncommitted entry: the leader prepares a request, is cut off as it
+// places it, and another node is elected and commits past it. The request answers `superseded`,
+// is never forwarded or submitted again, and its command is in no node's log.
+void superseded_entry(unsigned voters) {
+	context = std::to_string(voters) + " voters, an election replaces an uncommitted entry";
+	world w(voters, 131);
+	if (!check(w.settle(), "the cluster settles")) { return; }
+	auto& l = *w.leader();
+	const auto term = l.p->lp->driver().state(gid)->term;
+	writers_of ws{&w, {}, 0};
+	for (auto& [id, x] : w.nodes) { ws.at.emplace(id, std::make_unique<writer_type>(*x->p->g)); }
+	const std::string request = "P|s|lost";
+	auto cut_then_prepare = [&w, &l, inner = prepare_at(l, request)](blob::index_type& ix, const std::vector<std::string>& pending) {
+		w.isolated.insert(l.id);  // past the ready point: the placement reaches no one
+		return inner(ix, pending);
+	};
+	auto s = start(l.p->loop_ref(), ws.at.at(l.id)->submit(cut_then_prepare, [&ws, request](unsigned n) { return forward_to_leader(&ws, request, n); }));
+	l.run();
+	for (int i = 0; i < 20000 && !w.isolated.count(l.id); ++i) { w.step(); }
+	if (!check(w.isolated.count(l.id), "the leader prepares the request")) { return; }
+	// The cut-off leader places it alone: its own IO and chore, no time passing.
+	for (int i = 0; i < 200; ++i) {
+		while (l.p->held.held()) {
+			l.p->held.complete(l.p->held.tickets().front());
+			l.run();
+		}
+		l.p->chore_s.run();
+		l.run();
+	}
+	node* fresh = nullptr;
+	for (int i = 0; i < 40000 && !fresh; ++i) {
+		w.step();
+		fresh = leader_above(w, term, &l);
+	}
+	if (!check(fresh, "the others elect a new leader")) { return; }
+	auto t = start(fresh->p->loop_ref(), fresh->p->g->propose("P|s|won"));
+	for (int i = 0; i < 40000 && !t->done; ++i) { w.step(); }
+	check(t->done && !t->error, "the new leader commits its write: " + what(t->error));
+	check(!s->done, "the cut-off request waits for its placement");
+	w.isolated.clear();
+	if (!check(w.settle(), "the cluster settles once healed")) { return; }
+	check(s->done && is_superseded(s->error), "the request answers superseded: " + (s->done ? what(s->error) : std::string("unanswered")));
+	check(ws.forwards == 0, "the superseded request is never forwarded");
+	for (auto& [id, x] : w.nodes) {
+		for (const auto& [i, e] : x->log) { check(e.command != request, "node " + std::to_string(id) + "'s log never holds the superseded request (at " + std::to_string(i) + ")"); }
+	}
+	same_digests(w);
+}
+
+// A forward to the host's choice of leader, counted; a second one is counted and never sent.
+task::task<sg::submitted> forward_to(writers_of* ws, node* to, std::string request, unsigned placements) {
+	if (++ws->forwards > 1) { co_return sg::submitted{sg::next_step::unavailable, std::nullopt, std::nullopt, placements, true}; }
+	co_await task::schedule_on{to->p->loop_ref()};
+	co_return co_await ws->at.at(to->id)->submit(prepare_at(*to, request), [ws, to, request](unsigned n) { return forward_to(ws, to, request, n); }, placements, true);
+}
+
+// A replica that does not lead forwards a request once: to the leader, which answers it; to a
+// replica that does not lead either (a stale view), which answers 503 and forwards no further.
+void forward_once(unsigned voters) {
+	context = std::to_string(voters) + " voters, a request forwarded once";
+	world w(voters, 147);
+	if (!check(w.settle(), "the cluster settles")) { return; }
+	auto& l = *w.leader();
+	std::vector<node*> followers;
+	for (auto& [id, x] : w.nodes) {
+		if (x.get() != &l) { followers.push_back(x.get()); }
+	}
+	auto& a = *followers[0];
+	auto& b = *followers[1];
+	auto submit = [&](node& to, const std::string& request, std::uint64_t& forwards) {
+		writers_of ws{&w, {}, 0};
+		for (auto& [id, x] : w.nodes) { ws.at.emplace(id, std::make_unique<writer_type>(*x->p->g)); }
+		auto s = start(a.p->loop_ref(), ws.at.at(a.id)->submit(prepare_at(a, request), [&ws, to = &to, request](unsigned n) { return forward_to(&ws, to, request, n); }));
+		a.run();
+		for (int i = 0; i < 40000 && !s->done; ++i) { w.step(); }
+		forwards = ws.forwards;
+		return s;
+	};
+	std::uint64_t forwards = 0;
+	auto s = submit(l, "M|k|one", forwards);
+	check(s->done && !s->error, "the forwarded merge answers: " + what(s->error));
+	if (s->done && s->value) {
+		const auto& r = *s->value;
+		check(forwards == 1 && r.forwarded, "the follower forwards the merge once");
+		check(r.outcome == sg::next_step::reply && r.reply && r.reply->applied && r.reply->applied->result == strata::verdict::accepted, "the leader answers the forwarded merge with its verdict");
+	}
+	s = submit(b, "M|k|two", forwards);
+	check(s->done && !s->error, "the request forwarded to a replica that does not lead answers: " + what(s->error));
+	if (s->done && s->value) {
+		check(forwards == 1, "a forwarded request is never forwarded again: " + std::to_string(forwards) + " forwards");
+		check(s->value->outcome == sg::next_step::unavailable && s->value->placements == 0, "a forwarded request at a replica that does not lead answers 503, nothing placed");
+	}
+	if (!check(w.settle(), "the cluster settles")) { return; }
+	same_digests(w);
+}
+
+// A leader stalled on `no_space` holds its own `quorum` answers; one election timeout in, it
+// hands leadership to a follower applied past the stalled entry, which answers writes, and the
+// old leader answers its write once space frees.
+void stalled_leader(unsigned voters) {
+	context = std::to_string(voters) + " voters, a leader stalled on no_space";
+	world w(voters, 163, true);
+	if (!check(w.settle(), "the cluster settles")) { return; }
+	auto& l = *w.leader();
+	const auto term = l.p->lp->driver().state(gid)->term;
+	std::optional<strata::byte_budget::permit> hog = l.storage.open();
+	check(hog->try_grow(l.storage.capacity() - l.storage.used() - 16), "the leader's budget is nearly spent");
+	auto s = start(l.p->loop_ref(), l.p->g->propose("P|a|" + std::string(64, 'x')));
+	l.run();
+	bool stalled = false;
+	node* next = nullptr;
+	for (int i = 0; i < 40000 && !next; ++i) {
+		w.step();
+		stalled = stalled || l.p->g->stalled();
+		next = leader_above(w, term, &l);
+	}
+	check(stalled, "the leader stalls on no_space");
+	if (!check(next, "the stalled leader hands leadership to a follower")) { return; }
+	check(l.p->g->stalled(), "the old leader is still stalled");
+	check(next->p->g->applied() > l.p->g->applied(), "the new leader applied past the stalled entry: " + std::to_string(next->p->g->applied()) + " against " + std::to_string(l.p->g->applied()));
+	check(!s->done, "the stalled leader's `quorum` answer waits with its apply");
+	auto t = start(next->p->loop_ref(), next->p->g->propose("P|b|after"));
+	for (int i = 0; i < 40000 && !t->done; ++i) { w.step(); }
+	check(t->done && !t->error && t->value && t->value->applied && t->value->applied->result == strata::verdict::accepted, "the new leader answers a write: " + what(t->error));
+	hog.reset();
+	l.p->g->resume();
+	if (!check(w.settle(), "the cluster settles once space frees")) { return; }
+	check(s->done && !s->error && s->value && s->value->applied && s->value->applied->result == strata::verdict::accepted, "the old leader answers its write with apply's verdict: " + what(s->error));
+	same_digests(w);
+}
+
 void write_paths(unsigned voters, std::uint64_t schedules) {
 	a3_totals plain, stale;
 	for (std::uint64_t seed = 1; seed <= schedules; ++seed) {
@@ -897,6 +1069,12 @@ int main(int argc, char** argv) {
 	install_gap(5);
 	write_paths(3, 8);
 	write_paths(5, 8);
+	superseded_entry(3);
+	superseded_entry(5);
+	forward_once(3);
+	forward_once(5);
+	stalled_leader(3);
+	stalled_leader(5);
 	// D109: the schedules whose ungated checkpoints left a replica behind (group-install's A8).
 	for (std::uint64_t seed : {8, 12, 16, 18, 23, 24, 27}) { schedule(3, seed, seed % 2 == 0, false); }
 	std::uint64_t acked = 0, applied = 0, stalls = 0, crashes = 0, runs = 0, short_of_space = 0;

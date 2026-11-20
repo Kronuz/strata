@@ -18,7 +18,10 @@
 // group is closed in the host's table with no live turn-log record (A5); a reopen's term record
 // and its first write share one turn: as many barriers as a write to an open group (A7, checked
 // by `reopen-turn` alone until consensus reopens without an election).
-// `group_lifetime_test [held|points|reopen|reopen-turn]`.
+//
+// failed-open: a reopen over a lost directory fails closed (P_b > P_H) and closes its row; the
+// same process then reopens the group over its directory and reads every acknowledged entry.
+// `group_lifetime_test [held|points|reopen|reopen-turn|failed-open]`.
 #include "blob_app.hh"
 #include "host_io.hh"
 #include "oracle.hh"
@@ -543,6 +546,57 @@ void reopen(bool turn) {
 	p->shut();
 }
 
+// A failed open fences the group and closes its consensus row, so the id opens again on the
+// same Driver without a restart.
+void failed_open() {
+	context = "failed open";
+	disks d;
+	ff::filesystem lost;  // a directory that lost strata's index: its head is below the bundle
+	std::map<std::uint64_t, blob::app::seen_entry> seen;
+	blob::app app;
+	app.seen = &seen;
+	auto p = std::make_unique<process>(d, app);
+	const auto open_group = [&](ff::filesystem& dir) {
+		p->g.reset();
+		p->g = std::make_unique<group_type>(*p->lp, config(gid, d.storage), std::make_unique<ff::io>(dir), app, task::scheduler_ref::of(p->chore_s));
+		auto o = start(p->ref(), p->g->open());
+		p->pump([&] { return o->done.load(); });
+		return o->error;
+	};
+	const auto write = [&](const std::string& command) {
+		auto w = start(p->ref(), p->g->propose(command));
+		p->pump([&] { return w->done.load(); });
+		check(!w->error, command + ": " + what(w->error));
+	};
+	check(!open_group(d.dir), "the first open");
+	write("P|a|aa");
+	auto k = start(p->ref(), p->g->checkpoint());
+	p->pump([&] { return k->done.load(); });
+	check(!k->error, "the checkpoint: " + what(k->error));
+	write("P|b|bb");
+	p->shut();
+	p = std::make_unique<process>(d, app);
+	const auto error = open_group(lost);
+	check(error != nullptr, "an open over the lost directory fails closed");
+	check(what(error).find("P_b > P_H") != std::string::npos, "it fails on the bundle past strata's head: " + what(error));
+	check(p->g->fenced(), "the failed group is fenced");
+	check(p->lp->driver().groups() == 0, "the failed open closed its row: " + std::to_string(p->lp->driver().groups()) + " rows");
+	const auto again = open_group(d.dir);
+	check(!again, "the same process reopens the group: " + what(again));
+	if (!again) {
+		auto r = start(p->ref(), p->g->read_applied([](blob::index_type& ix) {
+			std::map<std::string, std::uint64_t> of;
+			for (const auto& key : group_test::keys) {
+				if (auto f = ix.find_key(key)) { of[key] = f->second; }
+			}
+			return of;
+		}));
+		p->pump([&] { return r->done.load(); });
+		check(!r->error && r->value && r->value->size() == 2, "the reopen reads a and b: " + what(r->error));
+	}
+	p->shut();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -551,6 +605,7 @@ int main(int argc, char** argv) {
 	if (only.empty() || only == "points") { points(); }
 	if (only.empty() || only == "reopen") { reopen(false); }
 	if (only == "reopen-turn") { reopen(true); }
+	if (only.empty() || only == "failed-open") { failed_open(); }
 	std::printf("lifetime: %s\n", failures ? "FAIL" : "ok");
 	return failures ? 1 : 0;
 }

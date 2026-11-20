@@ -96,6 +96,9 @@ public:
 
 	// The transport's (quest 4); a lone voter sends nothing.
 	std::function<void(cs::GroupId, cs::Send)> send;
+	// The host's view of a group's followers (health): one applied through `index`, if it knows
+	// one. A leader stalled on space hands leadership to it (D3); unset, it hands off to no one.
+	std::function<std::optional<cs::NodeId>(cs::GroupId, cs::Index)> applied_past;
 
 	void attach(cs::GroupId id, member& m) {
 		if (!members_.emplace(id, &m).second) { throw std::logic_error("strata::group: the group is attached to this loop"); }
@@ -157,41 +160,70 @@ public:
 	// recovery, one item at a time.
 	group(loop& l, config c, std::unique_ptr<jn::IO> directory, App& app, task::scheduler_ref chore)
 		: loop_(&l), id_(c.id), log_bound_(cs::checkpoint_detail::maximum_size(c.options.limits)), replacement_pool_(c.options.admission.replacement_pool.logical_bytes),
-		  opening_(std::make_unique<config>(std::move(c))), dir_(std::move(directory)), files_(*dir_), app_(&app), chore_(chore) {
+		  handoff_after_(c.options.timing.election_max * 1'000'000), opening_(std::make_unique<config>(std::move(c))), dir_(std::move(directory)), files_(*dir_), app_(&app), chore_(chore) {
+		handoff_.self = this;
+		handoff_.fire = &handoff_fired;
 		loop_->attach(id_, *this);
 	}
 	group(const group&) = delete;
 	group& operator=(const group&) = delete;
 	// Destroyed with its chore idle and no call in flight: after close(), or once fenced and the
 	// chore has drained (a stopped process).
-	~group() override { loop_->detach(id_); }
+	~group() override {
+		if (handoff_.armed()) { loop_->scheduler().cancel(handoff_); }
+		loop_->detach(id_);
+	}
 
 	cs::GroupId id() const noexcept { return id_; }
 	loop& owner() const noexcept { return *loop_; }
 
 	// Opens the group: recovers it when the host's table holds it, else creates it. On the loop.
+	// A failed open fences the group and closes its row, so the id opens again on this Driver.
 	task::task<void> open() {
 		co_await task::schedule_on{loop_->scheduler()};
 		if (!opening_) { throw std::logic_error("strata::group: the group was opened"); }
 		auto& driver = loop_->driver();
 		driver.open(id_, std::move(opening_->options));
-		// Recovery goes first: the ranges Core delivers meanwhile wait behind it.
-		hold_.store(true);
-		std::optional<bundle> restored;
-		if (const auto status = loop_->host().status(id_); status == jn::GroupStatus::stored || status == jn::GroupStatus::closed) {
-			co_await driver.recover(id_, [&](jn::ArtifactReader& r) {
-				std::string bytes(std::size_t(r.descriptor().length), '\0');
-				for (std::size_t at = 0; at < bytes.size();) {
-					const auto n = std::min<std::size_t>(bytes.size() - at, 65536);
-					at += r.read_at(at, std::span<char>(bytes.data() + at, n));
-				}
-				restored = decode(bytes);
-			});
-		} else {
-			co_await driver.create(id_, opening_->identity);
+		std::exception_ptr failed;
+		try {
+			// Recovery goes first: the ranges Core delivers meanwhile wait behind it.
+			hold_.store(true);
+			std::optional<bundle> restored;
+			if (const auto status = loop_->host().status(id_); status == jn::GroupStatus::stored || status == jn::GroupStatus::closed) {
+				co_await driver.recover(id_, [&](jn::ArtifactReader& r) {
+					std::string bytes(std::size_t(r.descriptor().length), '\0');
+					for (std::size_t at = 0; at < bytes.size();) {
+						const auto n = std::min<std::size_t>(bytes.size() - at, 65536);
+						at += r.read_at(at, std::span<char>(bytes.data() + at, n));
+					}
+					restored = decode(bytes);
+				});
+			} else {
+				co_await driver.create(id_, opening_->identity);
+			}
+			co_await on_chore(
+				[this, b = std::move(restored)]() mutable {
+					try {
+						recover(std::move(b));
+					} catch (...) {
+						fence_local(error_text(std::current_exception()));  // before any range applies
+						throw;
+					}
+				},
+				true);
+		} catch (...) {
+			failed = std::current_exception();
 		}
-		co_await on_chore([this, b = std::move(restored)]() mutable { recover(std::move(b)); }, true);
 		opening_.reset();
+		if (!failed) { co_return; }
+		fence_local(error_text(failed));
+		co_await task::schedule_on{loop_->scheduler()};
+		// The open's error is the answer; a close that fails too leaves the row, which a reopen
+		// then refuses ("open on this Driver").
+		try {
+			co_await driver.close(id_);
+		} catch (...) {}
+		std::rethrow_exception(failed);
 	}
 
 	// Proposes a command. `none` answers at ProposalPlaced; `quorum` when this replica applies
@@ -516,6 +548,7 @@ private:
 				if (r == step::stall) { stalled_ = true; }
 				if (r == step::done) { queue_.pop_front(); }  // fence_local keeps the running item
 			}
+			if (r == step::stall && loop_->applied_past) { task::spawn(loop_->scheduler(), stall_on_loop(loop_, id_)); }
 			if (r == step::done) {
 				if (w->queued_owns) {
 					delete w;
@@ -832,6 +865,42 @@ private:
 		readers_.clear();
 	}
 
+	// --- a stalled leader's hand-off (D3) -------------------------------------------------
+
+	struct handoff_timer : wheel::timer_entry {
+		group* self = nullptr;
+	};
+	static void handoff_fired(wheel::timer_entry& e, bool expired) noexcept {
+		if (expired) { static_cast<handoff_timer&>(e).self->hand_off(); }
+	}
+	// Holds the loop and the id, not the group, which a stopped process may destroy first.
+	static task::task<void> stall_on_loop(loop* l, cs::GroupId id) {
+		if (auto* g = dynamic_cast<group*>(l->find(id))) { g->arm_handoff(); }
+		co_return;
+	}
+	void arm_handoff() {
+		if (!handoff_.armed()) { loop_->scheduler().arm(handoff_, loop_->scheduler().now() + handoff_after_); }
+	}
+	// One election timeout into a stall, a leader hands leadership to a follower applied past the
+	// stalled entry, and looks again each timeout while the stall lasts.
+	void hand_off() noexcept {
+		if (!stalled() || fenced_.load()) { return; }
+		const auto s = loop_->driver().state(id_);
+		if (!s || s->role != cs::Role::Leader) { return; }
+		std::optional<cs::NodeId> target;
+		try {
+			target = loop_->applied_past(id_, applied() + 1);
+		} catch (...) {}
+		if (target) { task::spawn(loop_->scheduler(), transfer_on_loop(loop_, id_, *target)); }
+		arm_handoff();
+	}
+	// A refused or aborted transfer is tried again at the next timeout while the stall lasts.
+	static task::task<void> transfer_on_loop(loop* l, cs::GroupId id, cs::NodeId target) {
+		try {
+			co_await l->driver().transfer_leadership(id, target);
+		} catch (...) {}
+	}
+
 	// Holds the loop and the id, not the group, which a stopped process may destroy first.
 	static task::task<void> notify_applied_on_loop(loop* l, cs::GroupId id, cs::Index through) {
 		l->driver().applied(id, cs::Applied{through});
@@ -843,6 +912,8 @@ private:
 	cs::GroupId id_;
 	std::size_t log_bound_;            // the checkpoint's least reservation past its bundle
 	std::uint64_t replacement_pool_;   // the admission's pool that reservation comes from
+	std::uint64_t handoff_after_;      // one election timeout, ns: a stalled leader's hand-off
+	handoff_timer handoff_;            // armed on the loop only while stalled
 	std::unique_ptr<config> opening_;  // what open() needs, freed once it returns
 	std::unique_ptr<jn::IO> dir_;
 	file_set files_;

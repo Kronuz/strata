@@ -169,6 +169,28 @@ MUTANTS = {
     "close-uncovered": [(GROUP,
         "\t\t\tif (!s || published.through >= s->committed) { break; }\n",
         "\t\t\t(void)s;\n\t\t\tbreak;\n")],
+    # A failed open leaves its consensus row: the same process cannot open the id again
+    # (--target=group_lifetime_test failed-open).
+    "failed-open-keeps-row": [(GROUP,
+        "\t\ttry {\n\t\t\tco_await driver.close(id_);\n\t\t} catch (...) {}\n",
+        "")],
+    # A leader stalled on no_space keeps leadership: its group answers no `quorum` write (A3, D3).
+    "no-hand-off": [(GROUP,
+        "\t\tif (target) { task::spawn(loop_->scheduler(), transfer_on_loop(loop_, id_, *target)); }\n",
+        "\t\t(void)target;\n")],
+    # A `quorum` waiter takes the verdict of another term's entry at its placement (A3).
+    "superseded-ignored": [(GROUP,
+        "\t\t\tif (o.term != placement.term) {\n",
+        "\t\t\tif (false) {\n")],
+    # The write path submits a superseded request again (A3).
+    "resubmit-superseded": [(SUBMIT,
+        "\t\t\t\t} catch (...) {\n\t\t\t\t\tfailed = std::current_exception();\n\t\t\t\t}\n\t\t\t\tdrop(mine);\n",
+        "\t\t\t\t} catch (const cs::superseded&) {\n\t\t\t\t\tdrop(mine);\n\t\t\t\t\tcontinue;\n"
+        "\t\t\t\t} catch (...) {\n\t\t\t\t\tfailed = std::current_exception();\n\t\t\t\t}\n\t\t\t\tdrop(mine);\n")],
+    # A forwarded request that finds no leader is forwarded again (A3).
+    "forward-twice": [(SUBMIT,
+        "\t\t\t\tif (forwarded) {",
+        "\t\t\t\tif (false) {")],
     # read_applied reads this replica's state without the Driver's quorum probe (A4).
     "read-skips-probe": [(GROUP,
         "\t\tconst auto ready = co_await loop_->driver().read(id_, std::move(token));\n\t\tco_await applied_at(ready.index);\n",

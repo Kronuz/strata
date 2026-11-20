@@ -40,7 +40,10 @@ transaction and its own state.
   4. The applied position, published after strata's write is visible.
   5. The `quorum` waiter at that index: the verdict when the term matches, `superseded` otherwise.
 - **A stalled group** (`no_space`, ENOSPC) applies nothing until the host calls `resume()`;
-  its `quorum` answers wait with it.
+  its `quorum` answers wait with it. A stalled leader arms a loop timer for one election
+  timeout; at it, it asks the loop's `applied_past` hook (the host's view of its followers) for
+  one applied past the stalled entry and `transfer_leadership`s to it, looking again each
+  timeout while the stall lasts. Without the hook, or as a lone voter, it hands off to no one.
 - **`propose`** at `ack::none` answers at `ProposalPlaced`; at `ack::quorum` it answers when this
   replica applies the placement, with apply's verdict (Q10's lead default, `answer.hh`). A proposal
   whose placement is not yet known registers late, so apply keeps the outcomes of entries above the
@@ -105,6 +108,9 @@ and a CRC32C over all of it. It names no manifest CRC32C: install's pin carries 
 `Restore` callback only decodes the bundle on the loop. Recovery is the chore's first item, ahead
 of every range Core delivers meanwhile:
 
+A failed open fences the group and closes its Driver row, so the same process opens the id
+again with a new group object.
+
 1. Open strata at P_H; fail closed if P_b > P_H. With no index there, create it deferred (D112):
    nothing is written until the first checkpoint commits it, and a crash before that finds no
    index again and recreates it from the log.
@@ -148,7 +154,11 @@ The write path (A3): two merges to one id, a client's conditional write and an i
 submitted while the leader is cut off and another elected: every answer matches the replay's
 verdict at its placement, no merge answers 409, the invalid one 400 once, nothing needs a second
 placement, a deposed proposer forwards; with a predictor that misses, merges answer 503 after
-their third placement. A replica cut off while every other one checkpoints past it is named in
+their third placement. An election that replaces a cut-off leader's placed request answers it
+`superseded`, never forwarded or placed again; a follower forwards a request once, to the leader,
+which answers it, or to a replica that does not lead, which answers 503; a leader stalled on
+`no_space` hands leadership to a follower applied past it, which answers writes while the old
+leader's waits. A replica cut off while every other one checkpoints past it is named in
 `installs_needed()` and stays behind (no install yet).
 
 `test/group/lifetime_test.cc` (ctest `group_lifetime`, A5 and A10): two groups on one loop with
@@ -163,7 +173,9 @@ reopened in one process, then after a restart (A5, A7): a closed group is closed
 table with no live turn-log record. `reopen-turn` also requires a reopen's term record to share
 its first write's turn, as many barriers as a write to an open group (the turn log's
 `stats().barriers`); at consensus 1c08c9f a reopened lone voter elects first, and its first write
-takes 5 barriers against an open group's 2, which detent:consensus-quiescence removes.
+takes 5 barriers against an open group's 2, which detent:consensus-quiescence removes. `failed-open`:
+a reopen over a directory that lost strata's index fails closed (P_b > P_H) and leaves no row;
+the same process then reopens the group over its directory and reads every acknowledged entry.
 
 `test/group/footprint_test.cc` (ctest `group_footprint`, A6): lone voters on real directories,
 counting descriptors, heap, threads, timers, coroutine frames and an idle minute's resumes per
