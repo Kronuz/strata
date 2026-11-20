@@ -7,6 +7,7 @@
 #include "strata/core/work_pool_executor.hh"
 
 #include <atomic>
+#include <cerrno>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
@@ -83,7 +84,8 @@ task::task<void> pinner(cat_t* c, int* got) {
 	}
 }
 
-void a_delivery_never_posts_to_a_torn_down_scheduler() {
+// `fail`: the open fails, so the delivery carries its error and the waiting abandon releases no pin.
+void a_delivery_never_posts_to_a_torn_down_scheduler(bool fail) {
 	std::mutex m;
 	std::condition_variable cv;
 	bool suspended = false, posting = false, released = false;
@@ -110,6 +112,10 @@ void a_delivery_never_posts_to_a_torn_down_scheduler() {
 	};
 	{
 		PW w(1, 1, false, true, hk.hook());
+		if (fail) {
+			w.fail_resolve = EIO;
+			w.fail_left = 1;
+		}
 		auto ts = std::make_unique<gate_sched>();
 		int got = 0;
 		task::task<void> t = pinner(w.cat.get(), &got);
@@ -127,7 +133,8 @@ void a_delivery_never_posts_to_a_torn_down_scheduler() {
 		w.cat->wait_chores();
 		CHECK(!gate_sched::posted_dead.load());
 		CHECK(got == 0 && cat_t::pins_of(w.cat->word_of(0)) == 0);
-		CHECK(w.cat->stats().gone_pins == 1);
+		CHECK(cat_t::state_of(w.cat->word_of(0)) == (fail ? strata::slot_state::failed : strata::slot_state::open));
+		CHECK(w.cat->stats().gone_pins == (fail ? 0u : 1u));
 	}
 	gate_sched::gate = nullptr;
 }
@@ -135,7 +142,8 @@ void a_delivery_never_posts_to_a_torn_down_scheduler() {
 }  // namespace
 
 int main() {
-	a_delivery_never_posts_to_a_torn_down_scheduler();
+	a_delivery_never_posts_to_a_torn_down_scheduler(false);
+	a_delivery_never_posts_to_a_torn_down_scheduler(true);
 	if (failures) {
 		std::fprintf(stderr, "catalog_post_lifetime: %d failure(s)\n", failures);
 		return 1;
