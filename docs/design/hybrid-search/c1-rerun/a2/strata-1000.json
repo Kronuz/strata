@@ -1,0 +1,61 @@
+{
+ "system": "strata",
+ "tenants": 1000,
+ "per_tenant": 1000,
+ "dim": 768,
+ "queries": 1000,
+ "host": "dg-linux",
+ "os": "Linux 6.8.0-149-generic",
+ "cpus": 8,
+ "env": "linux-vm",
+ "in_process": true,
+ "knob": {},
+ "disk": {
+  "mb": 2969,
+  "files": 2000
+ },
+ "start_s": 0.03,
+ "version": "7b02184a70cf",
+ "idle_start": {
+  "rss_mb": 7.727,
+  "anon_mb": 3.426,
+  "cpu_s": 0.03,
+  "procs": 1.0,
+  "idle_s": 30.0,
+  "idle_cpu_s": 0.02
+ },
+ "cache_dropped": true,
+ "cold": {
+  "p50": 7.801,
+  "p99": 10.766,
+  "max": 25.995,
+  "n": 1000,
+  "recall10": 1.0,
+  "short": 0
+ },
+ "warm1": {
+  "p50": 0.799,
+  "p99": 0.923,
+  "max": 1.089,
+  "n": 1000,
+  "recall10": 1.0,
+  "short": 0
+ },
+ "warm2": {
+  "p50": 0.799,
+  "p99": 0.912,
+  "max": 1.051,
+  "n": 1000,
+  "recall10": 1.0,
+  "short": 0
+ },
+ "idle_after": {
+  "rss_mb": 2982.449,
+  "anon_mb": 16.949,
+  "cpu_s": 4.19,
+  "procs": 1.0,
+  "idle_s": 30.0,
+  "idle_cpu_s": 0.02
+ },
+ "resets": 0
+}
