@@ -46,8 +46,8 @@ beside it. Idle is measured right after start, then again after the queries.
 | strata | 1,000 | 30.4 | 2,969 | 3.4 | 7.8 | 0.02 | 8.29 / 12.9 | 0.79 / 1.32 (1.39) | 16.9 | 261118-044452-9ca15f |
 | pgvector | 1,000 | 96.7 | 5,062 | 4.3 | 31.8 | 0.05 | 12.6 / 20.1 | 5.30 / 7.38 (6.47) | 5.8 | 261118-044458-428db2 |
 | LanceDB | 1,000 | 52.2 | 2,961 | 71.6 | 138.5 | 0.00 | 16.5 / 21.4 | 10.2 / 14.0 (18.0) | 109.6 | 261118-044455-07f613 |
-| Qdrant | 1,000 | not measured | | | | | | | | load 261118-044500-19572d failed |
-| Elasticsearch | 1,000 | not measured | | | | | | | | skipped after Qdrant's |
+| Qdrant | 1,000 | not measured (denied) | | | | | | | | load 261118-044500-19572d failed; rerun refused by the permission classifier |
+| Elasticsearch | 1,000 | not measured (denied) | | | | | | | | jobs 261118-044501-c7b37f, 261118-044503-2593f7, 261118-044504-13047d skipped after Qdrant's |
 
 Commits: strata 100 at strata:ed42f792, strata 1,000 at strata:3e8dcb93 (the harness changes
 between them touch Qdrant and Elasticsearch only); the rest at the commit of their job.
