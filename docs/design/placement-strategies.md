@@ -234,6 +234,37 @@ The single-step rule (D3) and the `leaving` marker keep each step safe. Leadersh
 by transfer (D6), so a move toward locality can also move the leader to the node where
 writes originate.
 
+### Scripted placement (parked)
+
+Status: parked, owner 2026-11-20. Declarative strategies come first; this is the seam they
+leave for rules they cannot express (tenancy, cost, data residency, business locality).
+
+A Lua script, the language Xapiand already embeds, scores candidates; it never places copies:
+
+1. **Events, not loops.** The placement group calls the script when a unit's placement is
+   due (index created, node joined, left or failed, a co-access edge crossed its threshold),
+   never as a sweep over every unit.
+2. **Filter and score.** Its input is the unit (path, size, write rate, co-access edges, its
+   declared strategy) and the candidate nodes (labels, load, free bytes, current copies). It
+   returns a filtered, scored list of nodes.
+3. **Invariants stay the engine's.** The placement group takes the best-scored nodes that keep
+   the voter count, the failure-domain spread, the byte and move budgets and the peer bound.
+   A script can make placement worse, never less durable, as with adaptive locality.
+4. **Run once, logged.** Only the placement group's leader runs it, and the decision is logged
+   as its output. Replicas apply the decision and never rerun the script, so a script need not
+   be deterministic.
+5. **Sandboxed and versioned.** An instruction budget and a memory limit per call. A script that
+   fails or exceeds them falls back to the declared strategy and is reported. Scripts are
+   versioned in the index settings like any other setting.
+6. **Dry runs.** The placement simulator (`docs/perf/placement-strategies-sim.md`) runs the
+   same script against a recorded cluster, so an operator sees what a rule would move before
+   deploying it.
+
+The same shape (events, a bounded script, engine-enforced invariants) fits other hooks:
+retention and freezing policies, document-to-shard routing, ranking and query rewriting.
+WebAssembly is the alternative runtime if hooks in other languages are ever wanted; Lua is
+the default because Xapiand already embeds it.
+
 ## Feasibility
 
 - **Count, fraction, all, constraints, follow, affinity groups: high.** All are
