@@ -1,0 +1,55 @@
+{
+ "system": "es",
+ "tenants": 1000,
+ "per_tenant": 1000,
+ "dim": 768,
+ "host": "dg-linux",
+ "os": "Linux 6.8.0-149-generic",
+ "cpus": 8,
+ "env": "linux-vm",
+ "free_gb_before": 41.9,
+ "start_s": 37.7,
+ "version": "9.5.5",
+ "load_s": 1139.0,
+ "tune": {
+  "system": "es",
+  "tenants": 1000,
+  "bar": 0.95,
+  "queries": 200,
+  "tried": [
+   {
+    "knob": {
+     "num_candidates": 50
+    },
+    "recall10": 0.3545
+   },
+   {
+    "knob": {
+     "num_candidates": 1000
+    },
+    "recall10": 0.624
+   },
+   {
+    "knob": {
+     "num_candidates": 1000,
+     "rescore_vector": {
+      "oversample": 20
+     }
+    },
+    "recall10": 0.9695
+   }
+  ],
+  "knob": {
+   "num_candidates": 1000,
+   "rescore_vector": {
+    "oversample": 20
+   }
+  },
+  "met": true
+ },
+ "resets": 0,
+ "disk": {
+  "mb": 3118,
+  "files": 155
+ }
+}

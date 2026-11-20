@@ -1,4 +1,4 @@
-> Status: AWAITING THE OWNER'S GO OR NO-GO (2026-11-18): the C1 rerun with strata is in ([C1 rerun](#c1-rerun-2026-11-18)); Q1 was "not yet" until it ran (2026-10-27).
+> Status: AWAITING THE OWNER'S GO OR NO-GO (2026-11-20): the C1 rerun with strata, all five systems at 100 and 1,000 tenants, and the `i8` experiment are in ([C1 rerun](#c1-rerun-2026-11-18)); Q1 was "not yet" until they ran (2026-10-27).
 
 # Hybrid search: full text plus vectors for AI retrieval
 
@@ -24,20 +24,32 @@ many-small-indexes workload rewards, and we start at zero where the leaders are 
 ### C1 rerun (2026-11-18)
 
 **Recommendation: go on steps 1 to 4, with cold p99 as the condition step 4 must close.** strata,
-with no vector code (each vector a stored value, an exact scan), already leads the field on warm
-p99 and idle cost at 1,000-vector tenants; it trails only Qdrant on cold p99, which Qdrant buys
-with resident mapped memory. Results, jobs and caveats: `hybrid-search/c1-rerun.md`.
+with no vector code (each vector a stored value, an exact scan), leads the field on warm p99 and
+idle cost at 1,000-vector tenants, at 100 and 1,000 tenants; it trails only Qdrant on cold p99,
+which Qdrant buys by keeping its whole collection mapped. D3's `i8` code column, prototyped as
+the stored value, halves strata's cold p99 and leaves it 1.2× behind Qdrant with nothing
+resident. Results, jobs, dollars and caveats: `hybrid-search/c1-rerun.md`.
 
-| Axis (100 / 1,000 tenants) | strata | Best other | strata's position |
-|---|---|---|---|
-| Warm p99 | 1.26 / 1.32 ms | Qdrant 3.92 ms / pgvector 7.38 ms | 3.1× faster (2.3× net of Qdrant's client overhead) / 5.6× faster |
-| Idle anon | 3.4 / 3.4 MB | pgvector 4.3 / 4.3 MB | parity with pgvector; 13× below Qdrant, 2,600× below Elasticsearch |
-| Idle CPU over 30 s | 0.01 / 0.02 s | LanceDB 0.00 s | noise floor, as LanceDB and pgvector |
-| Cold p99 | 11.9 / 12.9 ms | Qdrant 4.02 ms / pgvector 20.1 ms | 3.0× slower than Qdrant (382 MB kept mapped) / 1.6× faster |
+| Axis (100 / 1,000 tenants) | strata `f32` (main) | strata `i8` (A2) | Best other | strata's position |
+|---|---|---|---|---|
+| Warm p99 | 1.26 / 1.32 ms | 0.72 / 0.69 ms | Qdrant 3.92 / 4.10 ms (its better pass) | 3.1× / 3.1× faster; `i8` 5.5× / 6.0× faster |
+| Idle anon | 3.4 / 3.4 MB | 3.4 / 3.4 MB | pgvector 4.3 / 4.3 MB | parity with pgvector; at 1,000, 30× below Qdrant (405× counting its 3,026 MB mapped) and 2,560× below Elasticsearch |
+| Idle CPU over 30 s | 0.01 / 0.02 s | 0.01 / 0.02 s | LanceDB 0.00 s | noise floor, as LanceDB and pgvector; Elasticsearch half a core at 1,000 |
+| Cold p99 | 11.9 / 12.9 ms | 5.81 / 5.74 ms | Qdrant 4.02 / 4.69 ms (mapped); pgvector 15.8 / 20.1 ms | `f32` 3.0× / 2.7× slower than Qdrant; `i8` 1.4× / 1.2× slower, 3.5× faster than pgvector |
+| Resident cost per 1M vectors, $4 per GiB-month | $0.01 a month | $0.01 | Qdrant $12.20 with the mapped collection; Elasticsearch $34.30 plus $15.40 of idle CPU | the field's floor, tied with pgvector |
 
-C1 as written asks for 10^5 tenants; disk held this run to 10^3, and Qdrant and Elasticsearch
-at 10^3 are not measured (the VM was powered off mid-load). The cold gap is the A2 experiment:
-D3's `i8` code column reads a quarter of the `f32` bytes a cold query reads today.
+What the optimization bounds:
+
+1. Warm p99 and idle cost: the lead is clear and structural (3× to 20× on p99, at or below
+   the field's floor on memory), with no vector code yet.
+2. Cold p99: `i8` buys 1.9× to 2.0× (same commit and chain, strata:7b02184a) and closes 2.7× to
+   1.2× against Qdrant, at recall@10 0.99 before D4's rerank. Bytes fell 3.9×, so a fixed
+   cost of about 4 ms per cold tenant open is now 70% of the p99; `bit1` alone estimates to
+   about 4.3 ms, Qdrant's level. A clear cold lead needs the per-tenant open cut as well; that
+   is the condition, and it is engine work (the cold tier's and idle-index's open path), not
+   vector work.
+3. Not measured: 10^4 and 10^5 tenants (disk), and Qdrant truly cold or under a memory limit,
+   which would compare the two at equal memory.
 
 ### Where our foundations clearly win, and what each claim still needs
 
