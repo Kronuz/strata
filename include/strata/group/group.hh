@@ -882,16 +882,18 @@ private:
 		if (!handoff_.armed()) { loop_->scheduler().arm(handoff_, loop_->scheduler().now() + handoff_after_); }
 	}
 	// One election timeout into a stall, a leader hands leadership to a follower applied past the
-	// stalled entry, and looks again each timeout while the stall lasts.
+	// stalled entry. The timer re-arms each timeout while the stall lasts, whatever the role: a
+	// replica elected while stalled hands off within one timeout of leading.
 	void hand_off() noexcept {
 		if (!stalled() || fenced_.load()) { return; }
 		const auto s = loop_->driver().state(id_);
-		if (!s || s->role != cs::Role::Leader) { return; }
-		std::optional<cs::NodeId> target;
-		try {
-			target = loop_->applied_past(id_, applied() + 1);
-		} catch (...) {}
-		if (target) { task::spawn(loop_->scheduler(), transfer_on_loop(loop_, id_, *target)); }
+		if (s && s->role == cs::Role::Leader) {
+			std::optional<cs::NodeId> target;
+			try {
+				target = loop_->applied_past(id_, applied() + 1);
+			} catch (...) {}
+			if (target) { task::spawn(loop_->scheduler(), transfer_on_loop(loop_, id_, *target)); }
+		}
 		arm_handoff();
 	}
 	// A refused or aborted transfer is tried again at the next timeout while the stall lasts.

@@ -181,8 +181,13 @@ MUTANTS = {
         "")],
     # A leader stalled on no_space keeps leadership: its group answers no `quorum` write (A3, D3).
     "no-hand-off": [(GROUP,
-        "\t\tif (target) { task::spawn(loop_->scheduler(), transfer_on_loop(loop_, id_, *target)); }\n",
-        "\t\t(void)target;\n")],
+        "\t\t\tif (target) { task::spawn(loop_->scheduler(), transfer_on_loop(loop_, id_, *target)); }\n",
+        "\t\t\t(void)target;\n")],
+    # The hand-off timer re-arms only on a leader: a replica elected while stalled keeps
+    # leadership (A3, D3; voters_test `stalled_follower_elected`).
+    "handoff-leader-only": [(GROUP,
+        "\t\tif (s && s->role == cs::Role::Leader) {\n",
+        "\t\tif (!s || s->role != cs::Role::Leader) { return; }\n\t\t{\n")],
     # A `quorum` waiter takes the verdict of another term's entry at its placement (A3).
     "superseded-ignored": [(GROUP,
         "\t\t\tif (o.term != placement.term) {\n",
