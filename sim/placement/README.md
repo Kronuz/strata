@@ -29,5 +29,6 @@ Public graphs are not committed. Download them into the worktree's `.scratch/`:
 | `partition.py` | Multilevel k-way partitioner |
 | `spar.py` | SPAR's online algorithm as published |
 | `strategies.py` | Hash, count, affinity, partition, adaptive locality, churn |
+| `scored.py` | The scripted-placement seam: one scoring function per strategy, invariants enforced by the engine |
 | `root_index.py` | Cost model: root read copies everywhere against a per-node cache |
 | `test_placement.py` | One hand-checked small case per strategy |

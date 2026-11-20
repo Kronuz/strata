@@ -21,6 +21,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import root_index
 from cluster import Cluster, Placement, bytes_on, evaluate
+from partition import build_adjacency
+from scored import locality, scored_place
 from strategies import (
     adaptive_place,
     affinity_place,
@@ -28,6 +30,7 @@ from strategies import (
     churn_hash,
     churn_slots,
     churn_spar,
+    coaccess_graph,
     count_place,
     hash_place,
     local_post,
@@ -98,10 +101,12 @@ def run_one(
             p = base("partition")
         elif name == "partition+local":
             p = local_post(w, base("partition"))
-        elif name == "spar":
-            p, spar_state = spar_place(w, c, k=2, seed=seed)
+        elif name in ("spar", "spar-literal"):
+            p, spar_state = spar_place(w, c, k=2, seed=seed, literal=name == "spar-literal")
         elif name == "adaptive":
             p = adaptive_place(w, c, base("affinity"), beta=beta)
+        elif name == "scored":
+            p = scored_place(w, c, locality(build_adjacency(w.units, coaccess_graph(w))), name="scored")
         elif name == "two-level":
             p = adaptive_place(w, c, base("partition"), beta=beta, name="two-level")
         else:
@@ -113,8 +118,7 @@ def run_one(
             moved = churn_hash(w, c, p, leave, seed)
         elif name == "count":
             moved = churn_count(w, c, p, leave)
-        elif name == "spar":
-            assert spar_state is not None
+        elif spar_state is not None:
             moved = churn_spar(spar_state, leave)
             m["master_cov"] = p.extra["master_cov"]
             m["spar_moves"] = p.extra["moves"]
@@ -208,7 +212,7 @@ def smoke() -> None:
     if not result.wasSuccessful():
         raise SystemExit(1)
     for w in (planted(8, 25, 0.3, 0.004), synthetic(0.002)):
-        rows = run_one(w, 10, ALL, seed=1, sample=2000, beta=1.0)
+        rows = run_one(w, 10, [*ALL, "spar-literal", "scored"], seed=1, sample=2000, beta=1.0)
         print(f"\n{w.name}: {w.units} units, {w.indexes} indexes, {len(w.edges)} edges, N=10")
         print(markdown(rows))
         for r in rows:

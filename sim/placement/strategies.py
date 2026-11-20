@@ -132,8 +132,10 @@ def local_post(w: Workload, base: Placement) -> Placement:
     return Placement(base.strategy + "+local", [list(v) for v in base.voters], reads)
 
 
-def spar_place(w: Workload, c: Cluster, k: int = 2, seed: int = 0) -> tuple[Placement, Spar]:
-    s = Spar(c.n, k, w.size, seed=seed)
+def spar_place(
+    w: Workload, c: Cluster, k: int = 2, seed: int = 0, literal: bool = False
+) -> tuple[Placement, Spar]:
+    s = Spar(c.n, k, w.size, seed=seed, literal=literal)
     for u, v in w.edges:
         s.add_edge(u, v)
     for u in range(w.units):

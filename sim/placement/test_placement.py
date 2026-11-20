@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import root_index
 from cluster import Cluster, Placement, bytes_on, evaluate, peers
 from partition import build_adjacency, cut, partition
+from scored import locality, rendezvous, scored_place
 from spar import Spar
 from strategies import (
     _mix,
@@ -165,6 +166,21 @@ class SparTest(unittest.TestCase):
         self.assertEqual(s.slaves[0], {1, 2})
         self.assertEqual(s.slaves[5], {0, 1})
 
+    def test_literal_rule_moves_to_fuller_partition(self) -> None:
+        # M1 holds 0, 1; M2 holds 2, 3, 4; M3 holds 5, 6. Edge 0-5 arrives: moving 5 to M1
+        # saves 3 replicas, moving 0 to M3 saves 1, and M1 and M3 hold 2 masters each.
+        for literal, master5 in ((False, 2), (True, 0)):
+            t = Spar(3, 0, [1.0] * 7, literal=literal)
+            t.online = False
+            for u, server in [(0, 0), (1, 0), (2, 1), (3, 1), (4, 1), (5, 2), (6, 2)]:
+                t.add_user(u, server)
+            for u, v in [(0, 1), (0, 4), (4, 5)]:
+                t.add_edge(u, v)
+            t.online = True
+            t.add_edge(0, 5)
+            self.assertEqual(t.master[5], master5)
+            self.assertEqual(t.master[0], 0)
+
     def test_move_when_balance_allows(self) -> None:
         s = Spar(2, 0, [1.0] * 4)
         for u, server in [(0, 0), (1, 1), (2, 0), (3, 0)]:
@@ -238,6 +254,32 @@ class AdaptiveTest(unittest.TestCase):
         self.assertEqual(
             adaptive_place(w, c, b, beta=0.7, rates=drifted, incumbent=p0.reads, h=0.25).reads, [[], [], [0]]
         )
+
+
+class ScoredTest(unittest.TestCase):
+    def test_engine_enforces_spread(self) -> None:
+        p = scored_place(manual(1, []), Cluster.of(6), lambda u, node, view: -float(node))
+        self.assertEqual(p.voters, [[0, 2, 4]])  # 1 and 3 share a rack with an earlier pick
+
+    def test_engine_fills_what_the_scorer_filters(self) -> None:
+        p = scored_place(manual(1, []), Cluster.of(6), lambda u, node, view: 1.0 if node == 0 else None)
+        self.assertEqual(p.voters, [[0, 2, 4]])
+        self.assertEqual(p.extra["engine_filled"], 2)
+
+    def test_capacity(self) -> None:
+        p = scored_place(manual(2, []), Cluster.of(6), lambda u, node, view: -float(node), capacity=1.0)
+        self.assertEqual(p.voters, [[0, 2, 4], [1, 3, 5]])
+
+    def test_locality_scorer(self) -> None:
+        w = manual(2, [])
+        w.size = [2.0, 1.0]
+        p = scored_place(w, Cluster.of(6), locality([{1: 5.0}, {0: 5.0}]))
+        self.assertEqual(p.voters, [[0, 2, 4], [0, 3, 5]])
+
+    def test_rendezvous_matches_hash_shape(self) -> None:
+        p = scored_place(manual(50, []), Cluster.of(10), rendezvous)
+        self.assertTrue(all(len(set(v)) == 3 for v in p.voters))
+        self.assertEqual(p.extra["engine_filled"], 0)
 
 
 class RootIndexTest(unittest.TestCase):

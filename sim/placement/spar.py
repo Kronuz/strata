@@ -18,12 +18,25 @@ from cluster import Placement
 class Spar:
     """SPAR state over ``m`` servers with redundancy ``k`` and per-user sizes."""
 
-    def __init__(self, m: int, k: int, size: list[float], seed: int = 0, max_move_degree: int = 2000) -> None:
+    def __init__(
+        self,
+        m: int,
+        k: int,
+        size: list[float],
+        seed: int = 0,
+        max_move_degree: int = 2000,
+        literal: bool = False,
+    ) -> None:
         self.m = m
         self.k = k
         self.size = size
         self.rng = random.Random(seed)
         self.max_move_degree = max_move_degree
+        # §4.2 also allows a move to a fuller partition when the savings over the second-best
+        # option exceed the two partitions' master ratio. Read literally, that lets masters pile
+        # up (coefficient of variation 0.5-1.9 on Facebook); the default allows moves only to a
+        # partition with fewer masters, which matches the paper's reported balance.
+        self.literal = literal
         n = len(size)
         self.alive = [True] * m
         self.nalive = m
@@ -176,7 +189,7 @@ class Spar:
             s = self.master[x]
             second = options[rank + 1][0] if rank + 1 < len(options) else 0
             ratio = self.nmasters[t] / max(1, self.nmasters[s])
-            if self.nmasters[t] < self.nmasters[s] or (second - delta) > ratio:
+            if self.nmasters[t] < self.nmasters[s] or (self.literal and (second - delta) > ratio):
                 self.apply_move(x, t)
                 return
 
