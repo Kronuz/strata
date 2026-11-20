@@ -479,7 +479,7 @@ struct log_state {
 	std::uint64_t last_checkpoint = 0;
 	std::string checkpoint_payload;
 
-	// Records of a group one turn seals: journal calls a sealer once per turn for one record.
+	// Records of a group one turn seals: seal() hands one, the driver's repeat calls get nothing.
 	static constexpr std::size_t turn_records = 1;
 	struct joined {
 		bool opened = false;    // it opened a record, so the loop is woken
@@ -508,10 +508,12 @@ struct log_state {
 		applied = at;
 		return {opened, 0};
 	}
-	// The sealer (D3), called once per turn by the driver: the next whole record, oldest first,
-	// if it frames within `room` (turn_framed_bytes bounds the driver's record_cost).
+	// The sealer (D3), called by the driver each turn: the next whole record, oldest first, if it
+	// frames within `room` (turn_framed_bytes bounds the driver's record_cost), and none while the
+	// last one handed is not durable, so a turn takes turn_records of the group (D4's window).
 	std::optional<kronuz::journal::TurnRecord> seal(std::uint64_t room, bool first) {
 		const std::lock_guard lock(mu);
+		if (handed.load(std::memory_order_relaxed) > synced.load(std::memory_order_relaxed)) { return std::nullopt; }
 		kronuz::journal::TurnRecord r;
 		r.group = group;
 		r.kind = kronuz::journal::TurnRecordKind::Batch;

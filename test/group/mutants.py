@@ -174,6 +174,11 @@ MUTANTS = {
     "failed-open-keeps-row": [(GROUP,
         "\t\ttry {\n\t\t\tco_await driver.close(id_);\n\t\t} catch (...) {}\n",
         "")],
+    # The index's sealer hands a record on the driver's repeat calls in one turn, past D4's
+    # window (--target=standalone_turn_log_test; its `lag` case).
+    "seal-repeats": [(INDEX,
+        "\t\tif (handed.load(std::memory_order_relaxed) > synced.load(std::memory_order_relaxed)) { return std::nullopt; }\n",
+        "")],
     # A leader stalled on no_space keeps leadership: its group answers no `quorum` write (A3, D3).
     "no-hand-off": [(GROUP,
         "\t\tif (target) { task::spawn(loop_->scheduler(), transfer_on_loop(loop_, id_, *target)); }\n",

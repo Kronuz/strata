@@ -1196,8 +1196,10 @@ void t6() {
 		const std::uint64_t base = h.table.entry(group)->base;
 		kv_index ix = kv_index::open(io, logged_options(h.sealer));
 		CHECK(state_of(ix) == prefixes_of(0, n, 0).back());
-		CHECK(h.table.status(group) == jr::GroupStatus::stored && h.sealer.turn() && h.driver.sequence(group) == base + 1);
-		CHECK(ix.apply(tx({replace("k0", "z")}), {}).result == verdict::accepted && ix.applied().index == base + 2);
+		// A new host's table retires the close's sequence + 1, so the record restages past it.
+		CHECK(h.sealer.retired(group) == base + 1);
+		CHECK(h.table.status(group) == jr::GroupStatus::stored && h.sealer.turn() && h.driver.sequence(group) == base + 2);
+		CHECK(ix.apply(tx({replace("k0", "z")}), {}).result == verdict::accepted && ix.applied().index == base + 3);
 	}
 	{
 		// Another host: its table and log live elsewhere, and its identity differs.
