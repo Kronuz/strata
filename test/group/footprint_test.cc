@@ -25,7 +25,6 @@
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <execinfo.h>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -39,12 +38,26 @@
 #include <vector>
 
 #include <dirent.h>
+#if __has_include(<execinfo.h>)
+#include <execinfo.h>
+#endif
 #include <sys/resource.h>
 #include <unistd.h>
 #ifdef __APPLE__
 #include <mach/mach.h>
 #endif
 
+// A sanitizer owns the whole new/delete family (TSan defines it, ASan interposes the aligned and
+// nothrow forms), so the counting allocator cannot coexist with one: the test skips there.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define FOOTPRINT_SANITIZED 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#define FOOTPRINT_SANITIZED 1
+#endif
+#endif
+
+#ifndef FOOTPRINT_SANITIZED
 // Live heap, requested bytes: every plain new in this program; live blocks by requested size too
 // (the last slot holds the larger ones), for GROUP_FOOTPRINT_SIZES.
 static std::atomic<std::int64_t> live_bytes{0};
@@ -95,6 +108,13 @@ void operator delete(void* q, std::size_t) noexcept { operator delete(q); }
 void* operator new[](std::size_t n) { return operator new(n); }
 void operator delete[](void* q) noexcept { operator delete(q); }
 void operator delete[](void* q, std::size_t) noexcept { operator delete(q); }
+#else
+static std::atomic<std::int64_t> live_bytes{0};
+constexpr std::size_t size_slots = 16384;
+static std::atomic<std::int32_t> live_sizes[size_slots + 1];
+static int trace_window = 0;
+static std::size_t trace_size() { return 0; }
+#endif
 
 namespace {
 
@@ -316,6 +336,10 @@ static void sizes(std::size_t closes) {
 }
 
 int main(int argc, char** argv) {
+#ifdef FOOTPRINT_SANITIZED
+	std::fprintf(stderr, "SKIP: the heap counts need the program's own operator new, which a sanitizer owns\n");
+	return 77;
+#endif
 	const std::size_t count = argc > 1 ? std::stoull(argv[1]) : 64;
 	const std::size_t closes = std::min<std::size_t>(count, argc > 2 ? std::stoull(argv[2]) : count);
 	const fs::path root = argc > 3 ? fs::path(argv[3]) : fs::current_path() / ("group-footprint-" + std::to_string(::getpid()));

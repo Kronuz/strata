@@ -119,9 +119,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   # What an idle open group holds, on real directories (A6); frames counted, the frame pool off
   # so a freed frame leaves the heap count (the pool's cache is per thread, not per group).
   add_executable(group_footprint_test test/group/footprint_test.cc)
-  target_link_libraries(group_footprint_test PRIVATE strata::group)
+  find_package(Backtrace)  # libexecinfo on FreeBSD, libc elsewhere
+  target_link_libraries(group_footprint_test PRIVATE strata::group ${Backtrace_LIBRARIES})
   target_compile_definitions(group_footprint_test PRIVATE TASK_COUNT_FRAMES=1 TASK_FRAME_POOL=0)
   add_test(NAME group_footprint COMMAND group_footprint_test)
+  set_tests_properties(group_footprint PROPERTIES SKIP_RETURN_CODE 77)  # a sanitizer owns operator new
   # The file set beside strata in one directory, each leaving the other's names alone (A6, D111).
   add_executable(group_file_set_test test/group/file_set_test.cc)
   target_link_libraries(group_file_set_test PRIVATE strata::group)
