@@ -179,6 +179,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(standalone_turn_log_test PRIVATE strata::core)
   target_compile_definitions(standalone_turn_log_test PRIVATE STRATA_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
   add_test(NAME standalone_turn_log COMMAND standalone_turn_log_test)
+  # Group commit: a closed loop of writers rides one barrier each (rocksdb-parity D5).
+  add_executable(test_barrier_cohort test/test_barrier_cohort.cc)
+  target_link_libraries(test_barrier_cohort PRIVATE strata::core)
+  add_test(NAME barrier_cohort COMMAND test_barrier_cohort)
   # kv_strata's sync batch: one transaction, one record and one barrier (bench/kv/kv_strata.hh).
   add_executable(kv_strata_batch_test test/kv_strata_batch_test.cc)
   target_include_directories(kv_strata_batch_test PRIVATE bench/kv)
