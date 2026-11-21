@@ -1,10 +1,10 @@
 // sim_run [--plant lost-write] [--expect VERDICT] [--history FILE] [--keys N] [--ms N] SEED...:
-// the simulator end to end. Per seed, one register server and seven clients on the simulated network, under
-// partitions, clogs, connection resets and server outages; clients record a D9 history (an
-// unanswered operation is unknown and retires its client) and the checker judges it. The server
-// is strata's register held in one place, so every seed is linearizable unless a fault is
-// planted: lost-write acknowledges one put it never stores. Prints one line per seed and exits
-// 0 when every verdict is VERDICT (default linearizable), 1 otherwise, 3 on bad usage.
+// the simulator end to end. Per seed, one register server and seven clients on the simulated
+// network, under partitions, clogs, connection resets and server outages; clients record a D9
+// history (an unanswered operation is unknown and retires its client) and the checker judges
+// it. The server is strata's register held in one place, so every seed is linearizable unless a
+// fault is planted: lost-write acknowledges one put it never stores. Prints one line per seed
+// and exits 0 when every verdict is VERDICT (default linearizable), 1 otherwise, 3 on bad usage.
 #include "simulation/history.hh"
 #include "simulation/network.hh"
 
