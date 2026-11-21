@@ -169,6 +169,20 @@ void lone() {
 	});
 	check(ids_after->value && *ids_after->value, "concurrent creations take distinct group ids");
 
+	// A command prepared from a view another command has since changed loses its race: strata
+	// refuses it on the version it expected, and the record stays as the winner wrote it.
+	std::string stale;
+	auto prep = w.read(l, [&](const sp::view& v) { return sp::create_namespace(v, "race", 1, 1).command; });
+	if (check(prep->value.has_value(), "a stale command is prepared")) { stale = *prep->value; }
+	auto winner = std::make_shared<sp::namespace_record>();
+	auto won = create(w, l, "race", 2, 2, winner);
+	w.run_until(won);
+	auto lost = start(l.p->loop_ref(), l.p->g->propose(stale));
+	w.run_until(lost);
+	check(accepted(won) && lost->done && !lost->error && lost->value->applied && lost->value->applied->result == strata::verdict::version_conflict, "the stale command is refused on its expected version");
+	auto race = w.read(l, [](const sp::view& v) { return v.namespace_at("race"); });
+	check(race->value && *race->value && (*race->value)->record == *winner, "the record is the winner's");
+
 	// A command that fails its decoder is refused `invalid` and writes nothing.
 	for (std::string bytes : {std::string("\x01\x01\x02\x01" "D\x00", 6), std::string("garbage")}) {
 		auto p = start(l.p->loop_ref(), l.p->g->propose(bytes));

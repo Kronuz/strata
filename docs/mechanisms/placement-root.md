@@ -88,3 +88,35 @@ choice before the next shard:
 Every data member but a learner is a voter. With fewer active nodes than `rf` the shard runs short.
 Choosing the leader first keeps every node's leaderships within one of each other under
 creations, so at most one above the mean; the other members take the fewest groups.
+
+The leader choice is the trade: the leader slot ignores groups, so with mixed `rf` group counts
+drift apart (a model of 5,000 random creation sequences on up to 12 nodes: leaderships at most
+0.92 above the mean, groups at most 2 apart at one `rf` and 10 apart with `rf` mixed from 1 to 5),
+while choosing all members by groups first lets leaderships reach 2 above the mean at one `rf` and
+over 100 with `rf` mixed. Deletes and joins move the mean under a node's leaderships; spreading them
+again is repair's leader balance (`transfer_leadership`), not placement's.
+
+## Proof
+
+- `test/placement/root_records_test.cc` (ctest `placement_root_records`): each record and a
+  command against fixed bytes both ways, every strict prefix and a trailing byte refused, each
+  decoder rule refused by a record that breaks it alone (a count of 2^62 refused before any
+  allocation), path validity, key order, and over random paths: a key is in a path's subtree range
+  exactly when its path is below it.
+- `test/placement/root_placement_test.cc` (ctest `placement_root_placement`): 2,000 seeded
+  creation sequences on 1 to 12 nodes, every shard with `min(rf, nodes)` distinct data members,
+  D7's roles, a voter first, the loads equal to the shards placed, and every node's leaderships at
+  most one above the mean. `root_placement_model.py` (ctest `placement_root_model`) checks the
+  choices for 1,000 scenarios with random loads, repeated or zero ids and `rf 0` against a model
+  of the rule written apart.
+- `test/placement/root_group_test.cc` (ctest `placement_root_group`): on a lone voter, nodes and
+  namespaces created, read, updated and deleted through the writer, `twitter` and `twitter/user`
+  distinct, a second create and a busy node's removal refused, a leaving node skipped, five
+  concurrent creates placed once each with distinct group ids, a stale command refused on its
+  expected version, a malformed one `invalid`, and the records equal a replay of the log. At 3 and 5
+  voters, 20 seeds each lose every minority in turn (power cut, never back) at a seeded event while
+  creates and deletes run, half also cutting and restarting a survivor: every acknowledged record is
+  on every survivor, and their records equal each other's and a replay.
+- `test/placement/root_fuzz.cc`: the decoders under libFuzzer (`STRATA_FUZZ`); whatever decodes
+  encodes back to the same bytes. Its corpus replays as ctest `fuzz_placement_root_replay`.
+- `test/placement/root_mutants.py`: one mutant per guard, each killed by one of those tests.

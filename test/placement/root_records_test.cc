@@ -95,7 +95,7 @@ void rules() {
 	check(refuses(node, sp::encode(sp::node_record{"", {}, "", sp::node_state::active, 0, ""})), "an empty name");
 	check(refuses(node, sp::encode(sp::node_record{"n", {""}, "", sp::node_state::active, 0, ""})), "an empty address");
 	check(refuses(node, bytes({1, 1, 'n', 0, 0, 3, 0, 0})), "an unknown node state");
-	check(refuses(node, bytes({1, 1, 'n', 0xff, 0xff, 0xff, 0xff, 0x0f, 0, 0, 0, 0})), "an address count past the bytes left");
+	check(refuses(node, bytes({1, 1, 'n', 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x40, 0, 0, 0, 0})), "an address count of 2^62, past the bytes left, refused before any allocation");
 	check(refuses(load, sp::encode(sp::load_record{1, 2})), "more leaderships than groups");
 	const auto ns = [](std::uint32_t rf, std::vector<sp::shard> shards) { return sp::encode(sp::namespace_record{rf, 0, std::move(shards)}); };
 	const sp::member v1{1, sp::role::voter}, v2{2, sp::role::voter}, l2{2, sp::role::learner};
