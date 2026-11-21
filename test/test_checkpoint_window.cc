@@ -3,12 +3,9 @@
 // of turns. The idle checkpoint moves forward (D2 item 3) and the writer checkpoints inside the
 // window, (retain_segments - 1) segments of commands (D2 item 2), so the log never holds more
 // than retain_segments + spare_segments + 1 segment files.
-// Usage: test_checkpoint_window [explicit]: the writer's trigger set to the window by
-// checkpoint_log_bytes, as the index has no window of its own yet.
 #include "kv_test.hh"
 #include "strata/core/turn_seal.hh"
 
-#include <cstring>
 #include <memory>
 #include <string>
 
@@ -70,8 +67,7 @@ std::size_t segment_files(jr::IO& io) {
 
 }  // namespace
 
-int main(int argc, char** argv) {
-	const bool explicit_trigger = argc > 1 && !std::strcmp(argv[1], "explicit");
+int main() {
 	const jr::TurnLogOptions g = geometry();
 	const std::uint64_t window = (g.retain_segments - 1) * g.segment_bytes;
 	const std::size_t bound = g.retain_segments + g.spare_segments + 1;
@@ -91,7 +87,6 @@ int main(int argc, char** argv) {
 	o.log_group = 1;
 	kv_index idle = kv_index::create(idle_io, o, uuid_of("idle"));
 	o.log_group = 2;
-	if (explicit_trigger) { o.checkpoint_log_bytes = window; }
 	kv_index writer = kv_index::create(writer_io, o, uuid_of("writer"));
 	turns();
 

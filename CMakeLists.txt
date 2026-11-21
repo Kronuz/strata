@@ -233,7 +233,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   # the log keeps at most retain + spare + 1 segment files (rocksdb-parity D2's test).
   add_executable(test_checkpoint_window test/test_checkpoint_window.cc)
   target_link_libraries(test_checkpoint_window PRIVATE strata::core)
-  add_test(NAME checkpoint_window_explicit COMMAND test_checkpoint_window explicit)
+  add_test(NAME checkpoint_window COMMAND test_checkpoint_window)
   add_executable(apply_atomic_test test/apply_atomic_test.cc)
   target_link_libraries(apply_atomic_test PRIVATE strata::core)
   add_test(NAME apply_atomic COMMAND apply_atomic_test)

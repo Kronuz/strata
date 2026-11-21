@@ -123,7 +123,7 @@ int main(int argc, char** argv) {
 		o.log = &sealer;
 		o.log_group = i + 1;
 		o.command_bytes = command_bytes;
-		if (trigger) { o.checkpoint_log_bytes = trigger; }
+		if (trigger) { o.checkpoint_floor_bytes = trigger; }  // at 10k writers the window's share is below any floor
 		std::array<char, 16> uuid{'c', 'k', 'p', 't'};
 		std::memcpy(uuid.data() + 8, &i, sizeof i);
 		ixs[i] = std::make_unique<kv_index>(reopen ? kv_index::open(*ios[i], o) : kv_index::create(*ios[i], o, uuid));
