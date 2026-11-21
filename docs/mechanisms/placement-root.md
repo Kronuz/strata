@@ -25,17 +25,21 @@ One strata index holds every record. A key is a tag byte and the record's name:
 | `P` + path | a namespace, one per index | `rf`, settings version, per shard: group id, incarnation, members (node, role) |
 
 - **Paths.** A path is 1 to `max_path` bytes (strata's key limit, `format::max_term_bytes`, less
-  the tag) of `/`-separated names, none empty, no NUL, no leading or trailing `/`. `twitter` and
-  `twitter/user` are two keys, `Ptwitter` and `Ptwitter/user`. Names starting with `.` are records
-  like any other; whether a listing shows them is the scan's rule.
-- **Order.** Keys sort as bytes, so namespace keys sort as their paths: every one is in
+  the tag) of `/`-separated names, none empty, no NUL, no leading or trailing `/`. Its key stores
+  each `/` as byte 0: `twitter` and `twitter/user` are `Ptwitter` and `Ptwitter\0user`, two
+  records. Names starting with `.` are records like any other; whether a listing shows them is the
+  scan's rule.
+- **Order.** Keys sort as bytes and names hold no NUL, so namespace keys sort in path order, name
+  by name: `twitter` < `twitter/user` < `twitter/user/a` < `twitter-a`. Every one is in
   `[namespaces_begin(), namespaces_end())` = `["P", "Q")`, and the subtree under `p` (its
-  descendants, not `p` itself) is the contiguous range `["P" p "/", "P" p "0")`, since `0` follows
-  `/`. A sibling such as `p-x` sorts between `p` and `p/...`, so a matcher that wants `p` and its
-  subtree seeks twice or reads past the siblings between. Node and load keys sort by id.
-- **What the scan relies on**: `namespace_key(path)`, `path_of(key)` and the range above
-  (`records.hh`); a scan reads `basic_index::scan(from, to, n, f)` and seeks by starting a new scan
-  at the next key it can match.
+  descendants, not `p` itself) is the contiguous range `[subtree_begin(p), subtree_end(p))` =
+  `["P" p' "\0", "P" p' "\1")`, where `p'` is `p` with each `/` as byte 0, right after `p`'s own
+  key: a scan reads each record once. A key holding a raw `/` names no path. Node and load keys
+  sort by id.
+- **What the scan relies on**: `namespace_key(path)`, `path_of(key)`, `subtree_begin(p)`,
+  `subtree_end(p)` and the ranges above (`records.hh`); a scan reads
+  `basic_index::scan(from, to, n, f)` and seeks by starting a new scan at the next key it can
+  match.
 
 ## Records
 
@@ -101,8 +105,8 @@ again is repair's leader balance (`transfer_leadership`), not placement's.
 - `test/placement/root_records_test.cc` (ctest `placement_root_records`): each record and a
   command against fixed bytes both ways, every strict prefix and a trailing byte refused, each
   decoder rule refused by a record that breaks it alone (a count of 2^62 refused before any
-  allocation), path validity, key order, and over random paths: a key is in a path's subtree range
-  exactly when its path is below it.
+  allocation), path validity, and over random paths: key order equals path order, and a path's
+  subtree range holds exactly its descendants, right after its own key.
 - `test/placement/root_placement_test.cc` (ctest `placement_root_placement`): 2,000 seeded
   creation sequences on 1 to 12 nodes, every shard with `min(rf, nodes)` distinct data members,
   D7's roles, a voter first, the loads equal to the shards placed, and every node's leaderships at

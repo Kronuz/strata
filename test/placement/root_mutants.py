@@ -22,6 +22,8 @@ REC, PLACE, GROUP = "placement_root_records_test", "placement_root_placement_tes
 
 # name: (test, [(file, old, new), ...])
 MUTANTS = {
+    # A namespace key keeps its raw `/`: siblings such as `twitter-a` sort inside a subtree.
+    "slash-raw": (REC, [(RECORDS, "\tstd::replace(k.begin() + 1, k.end(), '/', '\\0');\n", "")]),
     # A decoder accepts bytes past its record, so a record has two encodings.
     "trailing-bytes": (REC, [(RECORDS, "\t\tif (left()) { fail(\"trailing bytes\"); }", "\t\tif (false) { fail(\"trailing bytes\"); }")]),
     # A count is not bounded by the bytes left: a hostile count allocates before it fails.

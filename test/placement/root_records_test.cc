@@ -1,9 +1,11 @@
 // The root's record bytes (quest placement A1; contract strata:placement-records, pre-release
 // bytes under D30): each record and a command against fixed fixtures, both ways; every strict
 // prefix and a trailing byte refused; each decoder rule refused by a record that breaks it alone;
-// keys and paths, with nested paths distinct and a subtree one key range.
+// keys and paths, with key order path order, nested paths distinct and a subtree one key range
+// right after its path.
 #include "strata/placement/records.hh"
 
+#include <algorithm>
 #include <cstdio>
 #include <iostream>
 #include <random>
@@ -137,15 +139,30 @@ void paths() {
 	for (std::string p : {"a", "twitter", "twitter/user", ".x", "a/.b/c", "a-b", "\xc3\xa9t\xc3\xa9"}) { check(sp::valid_path(p), "valid path " + p); }
 	for (const std::string& p : std::vector<std::string>{"", "/", "/a", "a/", "a//b", std::string("a\0b", 3)}) { check(!sp::valid_path(p), "invalid path " + hex(p)); }
 	check(sp::max_path == strata::format::max_term_bytes - 1, "a path is strata's key limit less the tag");
-	// Key order is path order: a node's subtree sorts after it, a sibling may sort between.
-	const std::vector<std::string> sorted = {"twitte", "twitter", "twitter-x", "twitter/user", "twitter/user/a", "twitter0"};
+	// Key order is path order, name by name: a path's subtree sorts right after it.
+	const std::vector<std::string> sorted = {"twitte", "twitter", "twitter/user", "twitter/user/a", "twitter-x", "twitter0"};
 	for (std::size_t i = 1; i < sorted.size(); ++i) { check(sp::namespace_key(sorted[i - 1]) < sp::namespace_key(sorted[i]), sorted[i - 1] + " sorts before " + sorted[i]); }
+	check(sp::namespace_key("twitter/user") == std::string("Ptwitter\0user", 13), "a key stores each / as byte 0");
 	check(sp::namespace_key("twitter") != sp::namespace_key("twitter/user"), "nested paths are distinct keys");
-	check(sp::path_of(sp::namespace_key("twitter/user")) == std::optional<std::string_view>("twitter/user") && !sp::path_of("Pa//b") && !sp::path_of(sp::node_key(1)), "path_of reads namespace keys only");
+	check(sp::subtree_begin("twitter") == std::string("Ptwitter\0", 9) && sp::subtree_end("twitter") == std::string("Ptwitter\1", 9), "a subtree is [key \\0, key \\1)");
+	check(sp::path_of(sp::namespace_key("twitter/user")) == std::optional<std::string>("twitter/user"), "path_of reads a key back");
+	check(!sp::path_of("Pa/b") && !sp::path_of(std::string("Pa\0\0b", 5)) && !sp::path_of(sp::node_key(1)), "path_of refuses a raw /, an empty name and other keys");
 	check(sp::namespaces_begin() <= sp::namespace_key("\x01") && sp::namespace_key("\xff\xff") < sp::namespaces_end(), "every namespace key is in the namespace range");
-	// The subtree property, over random paths.
+	// Over random paths: key order equals path order, and a subtree's range holds exactly its
+	// descendants, right after the path's own key.
+	const auto names = [](const std::string& p) {
+		std::vector<std::string> out(1);
+		for (char c : p) {
+			if (c == '/') {
+				out.emplace_back();
+			} else {
+				out.back().push_back(c);
+			}
+		}
+		return out;
+	};
 	std::mt19937_64 rng(7);
-	const std::string alphabet = "ab-./0z";
+	const std::string alphabet = std::string("ab-./0z\x01\x7f\xff", 10);
 	std::vector<std::string> ps;
 	while (ps.size() < 400) {
 		std::string p;
@@ -154,13 +171,20 @@ void paths() {
 	}
 	std::size_t inside = 0;
 	for (const auto& p : ps) {
-		const auto lo = sp::namespace_key(p) + "/", hi = sp::namespace_key(p) + "0";
+		const auto lo = sp::subtree_begin(p), hi = sp::subtree_end(p), own = sp::namespace_key(p);
+		check(sp::path_of(own) == p, "path_of reads " + hex(p) + " back");
 		for (const auto& q : ps) {
-			const bool below = q.size() > p.size() + 1 && q.compare(0, p.size(), p) == 0 && q[p.size()] == '/';
 			const auto k = sp::namespace_key(q);
+			const auto np = names(p), nq = names(q);
+			const bool path_less = std::lexicographical_compare(np.begin(), np.end(), nq.begin(), nq.end(), [](const std::string& x, const std::string& y) {
+				return std::lexicographical_compare(x.begin(), x.end(), y.begin(), y.end(), [](char c, char d) { return static_cast<unsigned char>(c) < static_cast<unsigned char>(d); });
+			});
+			if (!check(path_less == (own < k), hex(p) + " and " + hex(q) + ": key order is path order")) { return; }
+			const bool below = q.size() > p.size() + 1 && q.compare(0, p.size(), p) == 0 && q[p.size()] == '/';
 			const bool in_range = lo <= k && k < hi;
 			inside += below;
-			if (!check(below == in_range, q + (below ? " is" : " is not") + " under " + p + ", so its key is" + (below ? "" : " not") + " in the subtree's range")) { return; }
+			if (!check(below == in_range, hex(q) + (below ? " is" : " is not") + " under " + hex(p) + ", so its key is" + (below ? "" : " not") + " in the subtree's range")) { return; }
+			check(!(own < k && k < lo), "no key sorts between " + hex(p) + " and its subtree");
 		}
 	}
 	check(inside > 0, "the random paths nest");

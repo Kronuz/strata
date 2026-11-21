@@ -6,8 +6,9 @@
 //   "G"                  the next group id
 //   "L" + id (8 B, BE)   a node's load: groups and preferred leaderships
 //   "N" + id (8 B, BE)   a node: name, addresses, certificate pin, state, directory version, attributes
-//   "P" + path           a namespace (one per index): rf, settings version, per shard its group
-//                        id, incarnation and members (the first the preferred leader)
+//   "P" + path           a namespace (one per index), each `/` stored as byte 0: rf, settings
+//                        version, per shard its group id, incarnation and members (the first
+//                        the preferred leader)
 //
 // A value is a format byte, then LEB128 integers in their shortest form and byte strings as a
 // length and bytes; a decoder bounds every count by the bytes left, refuses trailing bytes and
@@ -84,19 +85,27 @@ inline std::string load_key(node_id id) { return detail::id_key(tag::load, id); 
 inline std::optional<node_id> node_of(std::string_view key) { return detail::id_of(tag::node, key); }
 inline std::optional<node_id> load_of(std::string_view key) { return detail::id_of(tag::load, key); }
 
-// A namespace's key: the tag, then the path's bytes, so keys sort as paths do and a subtree
-// `p/...` is the range [namespace_key(p) + "/", namespace_key(p) + "0").
+// A namespace's key: the tag, then the path with each `/` stored as byte 0. Names hold no NUL,
+// so keys sort in path order, name by name (`twitter` < `twitter/user` < `twitter-a`), and the
+// subtree under `p` is the range [subtree_begin(p), subtree_end(p)) right after `p`'s own key.
 inline std::string namespace_key(std::string_view path) {
 	if (!valid_path(path)) { throw std::invalid_argument("strata::placement: invalid path"); }
 	std::string k(1, tag::path);
 	k.append(path);
+	std::replace(k.begin() + 1, k.end(), '/', '\0');
 	return k;
 }
-// The path a namespace key names, if it is one.
-inline std::optional<std::string_view> path_of(std::string_view key) {
-	if (key.empty() || key[0] != tag::path || !valid_path(key.substr(1))) { return std::nullopt; }
-	return key.substr(1);
+// The path a namespace key names, if it is one: a key holding a raw `/` is none.
+inline std::optional<std::string> path_of(std::string_view key) {
+	if (key.empty() || key[0] != tag::path || key.find('/') != std::string_view::npos) { return std::nullopt; }
+	std::string p(key.substr(1));
+	std::replace(p.begin(), p.end(), '\0', '/');
+	if (!valid_path(p)) { return std::nullopt; }
+	return p;
 }
+// The keys of `path`'s descendants, not its own: [namespace_key(path) + "\0", namespace_key(path) + "\1").
+inline std::string subtree_begin(std::string_view path) { return namespace_key(path) + '\0'; }
+inline std::string subtree_end(std::string_view path) { return namespace_key(path) + '\1'; }
 // Every namespace key is in [namespaces_begin, namespaces_end).
 inline std::string namespaces_begin() { return std::string(1, tag::path); }
 inline std::string namespaces_end() { return std::string(1, char(tag::path + 1)); }
