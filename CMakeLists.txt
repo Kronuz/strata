@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.18)
 project(strata LANGUAGES C CXX)
 
+# Ninja is the only supported generator (the top-level project only).
+if (CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR AND NOT CMAKE_GENERATOR MATCHES "^Ninja")
+	message(FATAL_ERROR "Ninja only: configure with -G Ninja (not ${CMAKE_GENERATOR})")
+endif ()
+
 include(FetchContent)
 
 # Building blocks (Kronuz libraries). Point FETCHCONTENT_SOURCE_DIR_<NAME> at local

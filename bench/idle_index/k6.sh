@@ -16,7 +16,7 @@ build)
 		src=$here
 		[ "$side" = main ] && src=$main_src
 		rm -rf "${out:?}/$side-build"  # a job's checkout differs from the last one's
-		cmake -S "$src" -B "$out/$side-build" -DCMAKE_BUILD_TYPE=Release >/dev/null
+		cmake -G Ninja -S "$src" -B "$out/$side-build" -DCMAKE_BUILD_TYPE=Release >/dev/null
 		cmake --build "$out/$side-build" -j4 --target idle_index idle_index_count >/dev/null
 		mkdir -p "$out/$side"
 		cp "$out/$side-build/idle_index" "$out/$side-build/idle_index_count" "$out/$side/"
