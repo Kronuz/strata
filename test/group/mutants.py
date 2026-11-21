@@ -119,10 +119,6 @@ MUTANTS = {
     "resubmit-invalid": [(ANSWER,
         "\tcase verdict::version_conflict:\n",
         "\tcase verdict::invalid: return placements < max_placements ? next_step::resubmit : next_step::unavailable;\n\tcase verdict::version_conflict:\n")],
-    # The close leaves its index open: a closed group keeps the index's descriptors (A6).
-    "close-keeps-index": [(GROUP,
-        "\t\t\tif (ix_) { ix_->close(); ix_.reset(); }\n",
-        "")],
     # The file set keeps its last written file open: an idle group holds a descriptor (A6).
     "files-keep-handle": [
         (FILES, "\t\tauto f = open(name, true);\n", "\t\tlast_ = open(name, true);\n\t\tauto& f = last_;\n"),
@@ -137,10 +133,6 @@ MUTANTS = {
     "first-commit-unsynced": [(INDEX,
         "\t\t\tfiles_[name] = bytes.size();\n\t\t\tsync_dir();\n\t\t});\n",
         "\t\t\tfiles_[name] = bytes.size();\n\t\t\tif (g != 1) { sync_dir(); }\n\t\t});\n")],
-    # The close keeps the group's directory open: a closed group holds a descriptor (A6, D111).
-    "close-keeps-directory": [(GROUP,
-        "\t\t\tfiles_.close();\n\t\t\tdir_.reset();\n",
-        "\t\t\tfiles_.close();\n")],
     # A destroyed group stays in its loop's table: what it leaves is ours (A6; footprint).
     "destroy-keeps-member": [(GROUP,
         "\t~group() override { loop_->detach(id_); }\n",

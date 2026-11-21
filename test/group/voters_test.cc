@@ -11,6 +11,7 @@
 // `group_voters_test [schedules [first]]`; a failure names its voters, seed and crash point;
 // `0` schedules runs the named cases alone.
 #include "blob_app.hh"
+#include "group_catalog_borrow.hh"
 #include "host_io.hh"
 #include "oracle.hh"
 
@@ -81,9 +82,6 @@ group_type::config config(cs::NodeId self, unsigned voters, strata::byte_budget&
 	c.options.timing = cs::Timing{10, 40, 60, 120, 60000};
 	c.options.scheduling = cs::WorkerLimits{16, 128};
 	c.identity = j::Identity{'V', char('0' + self)};
-	c.uuid = {'g', 'r', 'o', 'u', 'p', char('0' + self)};
-	c.strata.keyed = true;
-	c.strata.storage = &storage;
 	return c;
 }
 
@@ -131,7 +129,7 @@ struct node {
 		j::InlineCompletion inline_io;
 		std::unique_ptr<j::Host> host;
 		std::unique_ptr<sg::loop> lp;
-		std::unique_ptr<group_type> g;
+		group_test::borrowed<group_type> g;
 		task::cancel_source stop;
 		bool turns_done = false, driver_done = false;
 		std::shared_ptr<started<bool>> opening;
@@ -207,7 +205,7 @@ struct world {
 	// A new group object on the node's loop, opened: at boot, or after a close.
 	void attach(node& x) {
 		auto& p = *x.p;
-		p.g = std::make_unique<group_type>(*p.lp, config(x.id, voters, x.storage), std::make_unique<fl::io>(x.dir_disk), x.app, task::scheduler_ref::of(p.chore_s));
+		p.g.emplace(*p.lp, config(x.id, voters, x.storage), std::make_unique<fl::io>(x.dir_disk), x.storage, {'g', 'r', 'o', 'u', 'p', char('0' + x.id)}, x.app, task::scheduler_ref::of(p.chore_s));
 		p.opening = start(p.loop_ref(), p.g->open());
 		x.run();
 	}
@@ -571,7 +569,8 @@ void default_limits() {
 	// turn-log segment (D132).
 	c.options.limits.log_bytes = cs::Limits{}.log_bytes;
 	c.options.limits.log_entries = cs::Limits{}.log_entries;
-	group_type g(lp, c, std::make_unique<fl::io>(x.dir_disk), x.app, task::scheduler_ref::of(chore_s));
+	group_test::borrowed<group_type> held;
+	auto& g = held.emplace(lp, c, std::make_unique<fl::io>(x.dir_disk), x.storage, {'g', 'r', 'o', 'u', 'p', '1'}, x.app, task::scheduler_ref::of(chore_s));
 	auto run_all = [&] {
 		for (int i = 0; i < 100000; ++i) {
 			if (!loop_s.run() && !chore_s.run()) { return; }
