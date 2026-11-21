@@ -53,6 +53,12 @@ add_library(strata_group INTERFACE)
 target_link_libraries(strata_group INTERFACE strata::core consensus::consensus)
 add_library(strata::group ALIAS strata_group)
 
+# strata::placement (header-only): the root authority's records, placement and application on
+# strata::group (docs/mechanisms/placement-root.md).
+add_library(strata_placement INTERFACE)
+target_link_libraries(strata_placement INTERFACE strata::group)
+add_library(strata::placement ALIAS strata_placement)
+
 # Core links none of prospect's libraries, directly or through the libraries it links (fst reaches it
 # through termdict; docset, bitpack, analysis, unicode, snowball are search's alone).
 function(strata_check_links target forbidden)
@@ -377,6 +383,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
       target_compile_options(fuzz_${target} PRIVATE -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all)
       target_link_options(fuzz_${target} PRIVATE -fsanitize=fuzzer,address,undefined)
     endif()
+  endforeach()
+  # strata::placement's tests: one CMake file per part (test/placement/*.cmake).
+  file(GLOB placement_tests CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test/placement/*.cmake")
+  foreach(placement_test ${placement_tests})
+    include("${placement_test}")
   endforeach()
   # The boundary (docs/design/core-split.md): every core header compiled alone, in a translation
   # unit of its own, with only strata::core's include root and libraries. core_boundary builds

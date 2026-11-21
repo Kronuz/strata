@@ -1,0 +1,28 @@
+# strata::placement's root (quest placement, task root; docs/mechanisms/placement-root.md),
+# included from the top-level CMakeLists.txt with the other test/placement/*.cmake files.
+set(placement_root_dir "${CMAKE_CURRENT_SOURCE_DIR}/test/placement")
+add_executable(placement_root_records_test "${placement_root_dir}/root_records_test.cc")
+target_link_libraries(placement_root_records_test PRIVATE strata::placement)
+add_test(NAME placement_root_records COMMAND placement_root_records_test)
+add_executable(placement_root_placement_test "${placement_root_dir}/root_placement_test.cc")
+target_link_libraries(placement_root_placement_test PRIVATE strata::placement)
+add_test(NAME placement_root_placement COMMAND placement_root_placement_test)
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME placement_root_model COMMAND "${Python3_EXECUTABLE}" "${placement_root_dir}/root_placement_model.py" $<TARGET_FILE:placement_root_placement_test>)
+endif()
+add_executable(placement_root_group_test "${placement_root_dir}/root_group_test.cc")
+target_link_libraries(placement_root_group_test PRIVATE strata::placement)
+add_test(NAME placement_root_group COMMAND placement_root_group_test)
+set_tests_properties(placement_root_group PROPERTIES TIMEOUT 1500)
+# The decoders' fuzz target: its corpus replays in every build; with STRATA_FUZZ (Clang) the
+# libFuzzer binary builds too.
+add_executable(fuzz_placement_root_replay "${placement_root_dir}/root_fuzz.cc" fuzz/replay.cc)
+target_link_libraries(fuzz_placement_root_replay PRIVATE strata::placement)
+add_test(NAME fuzz_placement_root_replay COMMAND fuzz_placement_root_replay "${placement_root_dir}/root_corpus")
+if(STRATA_FUZZ)
+  add_executable(fuzz_placement_root "${placement_root_dir}/root_fuzz.cc")
+  target_link_libraries(fuzz_placement_root PRIVATE strata::placement)
+  target_compile_options(fuzz_placement_root PRIVATE -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all)
+  target_link_options(fuzz_placement_root PRIVATE -fsanitize=fuzzer,address,undefined)
+endif()

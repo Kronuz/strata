@@ -139,7 +139,7 @@ struct load_record {
 
 struct member {
 	node_id node = 0;
-	placement::role role = role::voter;
+	placement::role role = placement::role::voter;
 	bool operator==(const member&) const = default;
 };
 
