@@ -31,7 +31,7 @@ constexpr node_id server = 0;
 constexpr node_id clients = 7;  // nodes 1 to 7
 constexpr time_ns timeout = 3'000'000;
 // The run's size: keys, and simulated ms of workload; lost-write drops the first put after a quarter.
-struct shape { std::uint64_t keys = 8; time_ns workload = 200'000'000; };
+struct shape { std::uint64_t keys = 16; time_ns workload = 100'000'000; };
 constexpr std::uint64_t trace_client = 16, trace_fault = 17;
 
 // A request "id op key value expected" and its reply "id outcome value version"; expected

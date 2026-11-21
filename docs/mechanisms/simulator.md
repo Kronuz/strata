@@ -62,14 +62,16 @@ repository; strata adds it with `add_subdirectory(sim)`.
 ## End to end: `sim_run`
 
 `sim_run SEED...` is the pipeline's own test. One server node holds the register; seven client
-nodes on two racks issue puts (some conditional), erases and gets over 200 simulated ms, while a
-fault every 2 to 20 ms partitions a client, clogs a link, resets a connection or takes the server
-down for 0.5 to 10 ms. A client that hears no answer (a timeout or a reset) records the operation
-as unknown and retires; a new client takes its node. The register lives in one place, so every
-history must be linearizable. `--plant lost-write` acknowledges one put from 50 ms on without
-storing it, and the checker must reject the history. The suite runs five seeds each way, and runs
-seed 7 twice in two processes, requiring the same history file byte for byte
-(`sim/cmake/same_history.cmake`).
+nodes on two racks issue puts (some conditional), erases and gets on 16 keys over 100 simulated ms
+(`--keys`, `--ms`), while a fault every 2 to 20 ms partitions a client, clogs a link, resets a
+connection or takes the server down for 0.5 to 10 ms. A client that hears no answer (a timeout or a
+reset) records the operation as unknown and retires; a new client takes its node. The register
+lives in one place, so every history must be linearizable. `--plant lost-write` acknowledges the
+first put after a quarter of the run without storing it, and the checker must reject the history. A
+seed takes well under a second in RelWithDebInfo (about 2,000 operations, 8,000 search nodes); at 8
+keys and 200 ms one took 17 s, as unknown puts piling on few keys multiply the configurations
+carried across cuts. The suite runs five seeds each way, and runs seed 7 twice in two processes,
+requiring the same history file byte for byte (`sim/cmake/same_history.cmake`).
 
 ## Tests
 
