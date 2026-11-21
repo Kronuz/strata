@@ -5,7 +5,8 @@
 #   ab.sh build OUT BASE_SRC PROSPECT_SRC     both binaries, Release, Ninja (a light job)
 #   ab.sh fixtures OUT COUNT                  d1000s1, d1000s4, d1000s10 of COUNT clones, and
 #                                             d1000s4c (100 clones, one field dropped from the table)
-#   ab.sh row OUT FIXTURE COUNT PAIRS ARMS... per pair, base then proto (proto first on odd pairs),
+#   ab.sh row OUT FIXTURE COUNT PAIRS ARMS... per pair, each side of SIDES ("base proto"; "base aa"
+#                                             is the A/A, aa a copy of base), reversed on even pairs,
 #                                             each ARM of `eager_open open ... query`
 #   ab.sh heap OUT FIXTURE COUNT ARMS...      the counting build's live heap per index, each side
 #   ab.sh identity OUT COUNT                  identity hashes and refusals, every arm and side
@@ -21,13 +22,15 @@ run() {  # SIDE BIN ARGS...
 case "$cmd" in
 build)
 	base_src=$3 prospect_src=$4
-	mkdir -p "$out/base" "$out/proto"
+	mkdir -p "$out/base" "$out/proto" "$out/aa"
 	cmake -G Ninja -S "$here/bench/eager_open" -B "$out/base-build" -DCMAKE_BUILD_TYPE=Release -DSTRATA_SOURCE="$base_src" >/dev/null
 	cmake --build "$out/base-build" -j4 --target eager_open eager_open_count >/dev/null
 	cmake -G Ninja -S "$here/bench/eager_open" -B "$out/proto-build" -DCMAKE_BUILD_TYPE=Release -DSTRATA_SOURCE="$here" -DFETCHCONTENT_SOURCE_DIR_PROSPECT="$prospect_src" >/dev/null
 	cmake --build "$out/proto-build" -j4 --target eager_open eager_open_count >/dev/null
 	for s in base proto; do cp "$out/$s-build/eager_open" "$out/$s-build/eager_open_count" "$out/$s/"; done
+	cp "$out/base/eager_open" "$out/base/eager_open_count" "$out/aa/"
 	git -C "$base_src" rev-parse HEAD >"$out/base/commit"
+	cp "$out/base/commit" "$out/aa/commit"
 	{ git -C "$here" rev-parse HEAD; git -C "$prospect_src" rev-parse HEAD; } >"$out/proto/commit"
 	file "$out/base/eager_open" "$out/proto/eager_open"
 	cat "$out/base/commit" "$out/proto/commit"
@@ -45,9 +48,10 @@ fixtures)
 row)
 	fixture=$3 count=$4 pairs=$5
 	shift 5
-	echo "base $(cat "$out/base/commit"), proto $(tr '\n' ' ' <"$out/proto/commit"), $(uname -sm), $(date -u +%FT%TZ), $fixture x $count"
+	read -r -a sides <<<"${SIDES:-base proto}"
+	echo "sides ${sides[*]}: base $(cat "$out/base/commit"), proto $(tr '\n' ' ' <"$out/proto/commit"), $(uname -sm), $(date -u +%FT%TZ), $fixture x $count"
 	for p in $(seq 1 "$pairs"); do
-		if [ $((p % 2)) = 1 ]; then order="base proto"; else order="proto base"; fi
+		if [ $((p % 2)) = 1 ]; then order="${sides[0]} ${sides[1]}"; else order="${sides[1]} ${sides[0]}"; fi
 		for side in $order; do
 			for a in "$@"; do run "$side" eager_open open "$out/$fixture" "$count" "$a" query; done
 		done
