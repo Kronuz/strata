@@ -60,10 +60,11 @@ private:
 	faultfs::io io_;
 };
 
+// The host names a loop's segments l<generation>-<loop>-turns-<segment> (host.h's layout).
 std::size_t segment_files(jr::IO& io) {
 	std::size_t n = 0;
 	auto cursor = io.scan_directory();
-	while (auto name = cursor->next()) { n += jr::turn_log_detail::segment_number(*name).has_value(); }
+	while (auto name = cursor->next()) { n += name->find("-turns-") != std::string::npos; }
 	return n;
 }
 

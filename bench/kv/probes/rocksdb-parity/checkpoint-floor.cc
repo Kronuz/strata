@@ -105,7 +105,8 @@ int main(int argc, char** argv) {
 	const auto t0 = std::chrono::steady_clock::now();
 	std::vector<std::shared_ptr<jr::IO>> ios(n);
 	std::vector<std::unique_ptr<kv_index>> ixs(n);
-	for (std::size_t i = 0; i < n; ++i) {
+	// Created on 16 threads: each create's commits sync, about 90 ms of them on the host.
+	auto create = [&](std::size_t i) {
 		char name[32];
 		std::snprintf(name, sizeof name, "/i%06zu", i);
 		ios[i] = posix_io(dir + name);
@@ -121,6 +122,16 @@ int main(int argc, char** argv) {
 		std::array<char, 16> uuid{'c', 'k', 'p', 't'};
 		std::memcpy(uuid.data() + 8, &i, sizeof i);
 		ixs[i] = std::make_unique<kv_index>(kv_index::create(*ios[i], o, uuid));
+	};
+	{
+		std::atomic<std::size_t> next{0};
+		std::vector<std::thread> cs;
+		for (int t = 0; t < 16; ++t) {
+			cs.emplace_back([&] {
+				for (std::size_t i; (i = next++) < n;) { create(i); }
+			});
+		}
+		for (auto& c : cs) { c.join(); }
 	}
 	const double create_s = seconds_since(t0);
 
