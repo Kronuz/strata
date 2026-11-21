@@ -203,6 +203,12 @@ public:
 		auto f = in_->create_exclusive(n);
 		return std::make_unique<probe_file>(std::move(f), *k_, std::move(t));
 	}
+	std::unique_ptr<File> open_reclaim_candidate(std::string_view n) override {
+		auto t = k_->take_fd();
+		auto f = in_->open_reclaim_candidate(n);
+		if (!f) { return nullptr; }
+		return std::make_unique<probe_file>(std::move(f), *k_, std::move(t));
+	}
 	std::unique_ptr<File> open_existing_read_only(std::string_view n) override { return in_->open_existing_read_only(n); }
 	void open_existing_read_only_into(std::string_view n, File& f) override { in_->open_existing_read_only_into(n, f); }
 	std::unique_ptr<File> open_reclaim_candidate_read_only(std::string_view n) override { return in_->open_reclaim_candidate_read_only(n); }

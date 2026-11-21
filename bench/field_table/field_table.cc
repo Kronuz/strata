@@ -18,8 +18,6 @@
 static std::size_t usable(void* p) { return malloc_size(p); }
 #else
 #include <malloc.h>
-
-namespace fl = kronuz::faultlab;
 static std::size_t usable(void* p) { return malloc_usable_size(p); }
 #endif
 
@@ -35,6 +33,8 @@ void operator delete(void* p) noexcept {
 	std::free(p);
 }
 void operator delete(void* p, std::size_t) noexcept { operator delete(p); }
+
+namespace fl = kronuz::faultlab;
 
 using namespace strata;
 using index_t = basic_index<document_layout>;
