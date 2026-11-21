@@ -65,7 +65,7 @@ void operator delete[](void* p, const std::nothrow_t&) noexcept { std::free(p); 
 
 static const auto uuid = uuid_of("apply-atomic");
 
-static std::uint64_t head_generation(const faultfs::filesystem& fs) {
+static std::uint64_t head_generation(const fl::filesystem& fs) {
 	std::uint64_t g = 0;
 	for (const auto& n : fs.list()) {
 		if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest) { g = std::max(g, p->a); }
@@ -75,7 +75,7 @@ static std::uint64_t head_generation(const faultfs::filesystem& fs) {
 
 // Flips a byte inside every `kind` section of the oldest segment (S1), keeping its size, so the
 // footer and table of contents still decode. False when S1 has no such section.
-static bool damage_section(faultfs::filesystem& fs, faultfs::io& io, format::section kind) {
+static bool damage_section(fl::filesystem& fs, fl::io& io, format::section kind) {
 	const auto g = head_generation(fs);
 	const auto m = files::read_log(fs.view(index_detail::manifest_name(g)), g).state;
 	const std::string s1 = index_detail::segment_name(m.segments.begin()->first);
@@ -97,8 +97,8 @@ static bool damage_section(faultfs::filesystem& fs, faultfs::io& io, format::sec
 // S1 holds Q1 and S2 holds Q2; with `damage`, S1's keys section is damaged at its size, so the
 // open passes and the first read of that region throws corrupt_segment.
 struct world {
-	faultfs::filesystem fs;
-	faultfs::io io{fs};
+	fl::filesystem fs;
+	fl::io io{fs};
 	byte_budget storage{1ull << 40}, mem{1ull << 40};
 	reader_registry reg{32};
 	kv_index::options o;
@@ -168,8 +168,8 @@ struct world {
 // keyed write after the throw either succeeds or throws corrupt_segment again (the segment stays
 // failed, D11); reads of S2 still answer. Returns whether the case reached stage 1.
 static bool section_attempt(format::section kind, const char* label, bool lazy) {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	kv_index::options o;
 	o.keyed = true;
 	o.auto_merge = false;
@@ -261,7 +261,7 @@ static outcome attempt(bool damage, bool reader, bool prior, std::size_t n, cons
 }
 
 // The manifest logs by name, with their bytes.
-static std::map<std::string, std::string> logs_of(const faultfs::filesystem& fs) {
+static std::map<std::string, std::string> logs_of(const fl::filesystem& fs) {
 	std::map<std::string, std::string> logs;
 	for (const auto& n : fs.list()) {
 		if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest) { logs.emplace(n, std::string(fs.view(n))); }
@@ -283,8 +283,8 @@ static std::string view_state(const View& v) {
 
 // A checkpoint to install: another index's content at generation `generation`.
 struct install_source {
-	faultfs::filesystem fs;
-	faultfs::io io{fs};
+	fl::filesystem fs;
+	fl::io io{fs};
 	std::uint64_t generation = 0;
 
 	install_source() {

@@ -683,7 +683,7 @@ struct sim {
 		auto& pin = *held[i].p;
 		const std::string key = w->cat->key_at(pin.where().slot);
 		const int dir = std::atoi(key.c_str() + 1);
-		w->dirs[dir].fs.add_fault({faultfs::op::sync, 1, EIO});
+		w->dirs[dir].fs.add_fault({fl::op::sync, 1, EIO});
 		bool fenced = false;
 		try {
 			(void)pin.index().apply(tx({set_meta("fence" + std::to_string(rng() % 50), "x")}), {});  // an owed index answers map_owed

@@ -4,12 +4,12 @@
 // directory and the index's on separate filesystems, so the host's syncs are the log's barriers.
 #include "kv_strata.hh"
 
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 
 #include <cstdio>
 #include <string>
 
-namespace faultfs = strata::faultfs;
+namespace fl = kronuz::faultlab;
 
 namespace {
 
@@ -19,7 +19,7 @@ namespace jr = kronuz::journal;
 // has no directory lock, and nothing else shares this filesystem).
 class host_dir final : public jr::IO {
 public:
-	explicit host_dir(faultfs::filesystem& fs) : io_(fs) {}
+	explicit host_dir(fl::filesystem& fs) : io_(fs) {}
 	jr::FilesystemClass directory_filesystem() const override { return io_.directory_filesystem(); }
 	jr::DirectoryTrust directory_trust() const override { return io_.directory_trust(); }
 	std::unique_ptr<jr::OwnerLock> acquire_owner(bool) override { return std::make_unique<jr::OwnerLock>(); }
@@ -38,7 +38,7 @@ public:
 	std::unique_ptr<jr::DirectoryCursor> scan_directory() override { return io_.scan_directory(); }
 
 private:
-	faultfs::io io_;
+	fl::io io_;
 };
 
 int failures = 0;
@@ -56,7 +56,7 @@ std::string key_of(int i) {
 }  // namespace
 
 int main() {
-	faultfs::filesystem host_fs, index_fs;
+	fl::filesystem host_fs, index_fs;
 	kvbench::config c;
 	c.dir = "kv";
 	c.dur = kvbench::durability::sync;
@@ -65,7 +65,7 @@ int main() {
 	c.background = 0;
 	strata_kv e(c, [&](const std::string& dir) -> std::shared_ptr<kronuz::journal::IO> {
 		if (dir.ends_with("/host")) { return std::make_shared<host_dir>(host_fs); }
-		return std::make_shared<faultfs::io>(index_fs);
+		return std::make_shared<fl::io>(index_fs);
 	});
 	e.on_phase("run", kvbench::durability::sync);
 	const std::string value(100, 'v');
@@ -73,7 +73,7 @@ int main() {
 	for (int i = 0; i < 16; ++i) { e.put(0, key_of(i), value); }
 	e.durable(0);
 
-	using faultfs::op;
+	using fl::op;
 	const std::uint64_t syncs = host_fs.operations(op::sync), writes = host_fs.operations(op::write);
 	constexpr int batches = 32;
 	int records = 0;

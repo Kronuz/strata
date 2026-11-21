@@ -5,7 +5,7 @@
 #pragma once
 
 #include "strata/core/counted_io.hh"
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 #include "strata/core/resource_budget.hh"
 
 #include <atomic>
@@ -27,6 +27,8 @@
 #include <system_error>
 #include <thread>
 #include <utility>
+
+namespace fl = kronuz::faultlab;
 
 namespace {
 
@@ -179,7 +181,7 @@ struct probe_cursor final : DirectoryCursor {
 // open file, owner lock and scan, one map per mapping.
 class probe_io final : public IO {
 public:
-	static std::unique_ptr<IO> make(kernel& k, strata::faultfs::io& in) {
+	static std::unique_ptr<IO> make(kernel& k, fl::io& in) {
 		kernel::fd_token t = k.take_fd();
 		return std::unique_ptr<IO>(new probe_io(in, k, std::move(t)));
 	}
@@ -216,8 +218,8 @@ public:
 	void sync_directory() override { in_->sync_directory(); }
 
 private:
-	probe_io(strata::faultfs::io& in, kernel& k, kernel::fd_token t) : in_(&in), k_(&k), tok_(std::move(t)) {}
-	strata::faultfs::io* in_;
+	probe_io(fl::io& in, kernel& k, kernel::fd_token t) : in_(&in), k_(&k), tok_(std::move(t)) {}
+	fl::io* in_;
 	kernel* k_;
 	kernel::fd_token tok_;
 };

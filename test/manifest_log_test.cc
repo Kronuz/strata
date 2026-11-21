@@ -3,7 +3,7 @@
 // decoder's bounds, and the tracked snapshot size (the re-check's C7). The log file (D4, D6, D7):
 // the reader's caller rules, crash images, bit flips, bounds on read, replay cost, allocation
 // failure, and the appender.
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 #include "strata/core/manifest_log.hh"
 
 #include <algorithm>
@@ -21,6 +21,8 @@
 #include <set>
 #include <string>
 #include <vector>
+
+namespace fl = kronuz::faultlab;
 
 #if defined(__SANITIZE_THREAD__)
 #define MANIFEST_LOG_TSAN 1
@@ -1309,8 +1311,8 @@ void appender() {
 	const std::string name = "manifest-" + std::to_string(g);
 	std::vector<std::string> records;
 	for (std::size_t k = 1; k < b.states.size(); ++k) { records.push_back(encode_edit(diff(b.states[k - 1], b.states[k]))); }
-	auto fresh = [&](faultfs::filesystem& fs) {
-		faultfs::io io(fs);
+	auto fresh = [&](fl::filesystem& fs) {
+		fl::io io(fs);
 		auto f = io.create_exclusive(name);
 		const std::string snap = frame_snapshot(base);
 		f->write_at(0, snap);
@@ -1319,7 +1321,7 @@ void appender() {
 		return std::make_unique<counting_file>(std::move(f));
 	};
 	{  // one write and one sync_data per append; the bytes are the emitter's
-		faultfs::filesystem fs;
+		fl::filesystem fs;
 		auto f = fresh(fs);
 		log_appender a(*f, base.uuid, g, b.ends[0]);
 		for (std::size_t k = 0; k < records.size(); ++k) {
@@ -1333,7 +1335,7 @@ void appender() {
 		CHECK(read_log(fs.view(name), g).state == b.states.back());
 	}
 	{  // pieces: each ends on a sector boundary, and together they are the same bytes
-		faultfs::filesystem fs;
+		fl::filesystem fs;
 		auto f = fresh(fs);
 		log_appender a(*f, base.uuid, g, b.ends[0], 600);  // 512-byte pieces
 		log_state big = base;
@@ -1347,7 +1349,7 @@ void appender() {
 		CHECK(read_log(fs.view(name), g).state == big);
 	}
 	{  // a short write: undone and synced, then the retry appends at the old end
-		faultfs::filesystem fs;
+		fl::filesystem fs;
 		auto f = fresh(fs);
 		log_appender a(*f, base.uuid, g, b.ends[0]);
 		a.append(records[0]);
@@ -1358,7 +1360,7 @@ void appender() {
 		CHECK(fs.view(name).size() == b.ends[1] && f->syncs == syncs + 1 && !a.broken() && !a.in_flight() && a.end() == b.ends[1]);
 		fs.crash(3);  // the truncate-back is durable
 		CHECK(fs.view(name).size() == b.ends[1]);
-		faultfs::io io(fs);
+		fl::io io(fs);
 		auto again = io.open_existing(name);
 		log_appender retry(*again, base.uuid, g, b.ends[1]);
 		retry.append(records[1]);
@@ -1369,7 +1371,7 @@ void appender() {
 		std::size_t previous = 0, refused = 0, longer = 0;
 		for (std::uint64_t off : {1, 2}) {
 			for (std::uint64_t seed = 0; seed < 64; ++seed) {
-				faultfs::filesystem fs;
+				fl::filesystem fs;
 				auto f = fresh(fs);
 				log_appender a(*f, base.uuid, g, b.ends[0]);
 				a.append(records[0]);
@@ -1391,7 +1393,7 @@ void appender() {
 		CHECK(previous + refused == 128 && previous > 0 && longer > 0);
 	}
 	{  // ENOSPC: the same, and the error is the caller's to report as space
-		faultfs::filesystem fs;
+		fl::filesystem fs;
 		auto f = fresh(fs);
 		log_appender a(*f, base.uuid, g, b.ends[0]);
 		fs.set_capacity(fs.used() + 10);
@@ -1407,28 +1409,28 @@ void appender() {
 		CHECK(read_log(fs.view(name), g).state == b.states[1] && !read_log(fs.view(name), g).dirty);
 	}
 	{  // a failed truncate-back breaks the appender: no later append
-		faultfs::filesystem fs;
+		fl::filesystem fs;
 		auto f = fresh(fs);
 		log_appender a(*f, base.uuid, g, b.ends[0]);
-		fs.add_fault({faultfs::op::write});
-		fs.add_fault({faultfs::op::truncate});
+		fs.add_fault({fl::op::write});
+		fs.add_fault({fl::op::truncate});
 		CHECK(throws<std::system_error>([&] { a.append(records[0]); }));
 		CHECK(a.broken());
 		fs.clear_faults();
 		CHECK(throws<std::logic_error>([&] { a.append(records[0]); }));
 	}
 	{  // a failed barrier breaks it too
-		faultfs::filesystem fs;
+		fl::filesystem fs;
 		auto f = fresh(fs);
 		log_appender a(*f, base.uuid, g, b.ends[0]);
-		fs.add_fault({faultfs::op::sync});
+		fs.add_fault({fl::op::sync});
 		CHECK(throws<std::system_error>([&] { a.append(records[0]); }));
 		CHECK(a.broken() && a.end() == b.ends[0]);
 		fs.clear_faults();
 		CHECK(throws<std::logic_error>([&] { a.append(records[0]); }));
 	}
 	{  // one record in flight
-		faultfs::filesystem fs;
+		fl::filesystem fs;
 		auto f = fresh(fs);
 		log_appender a(*f, base.uuid, g, b.ends[0]);
 		a.write(records[0]);
@@ -1441,7 +1443,7 @@ void appender() {
 	}
 	{  // a power loss after the write and before its barrier: the previous generation or the new one
 		for (std::uint64_t seed = 0; seed < 64; ++seed) {
-			faultfs::filesystem fs;
+			fl::filesystem fs;
 			auto f = fresh(fs);
 			log_appender a(*f, base.uuid, g, b.ends[0]);
 			a.append(records[0]);

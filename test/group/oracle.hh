@@ -6,7 +6,7 @@
 
 #include "blob_app.hh"
 
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 
 #include <map>
 #include <optional>
@@ -16,7 +16,7 @@
 namespace group_test {
 
 namespace sg = strata::group;
-namespace ff = strata::faultfs;
+namespace fl = kronuz::faultlab;
 using group_type = sg::group<blob::app>;
 
 // An in-memory file set with file_set's apply interface.
@@ -71,8 +71,8 @@ inline digest of(group_type& g, blob::app& app) {
 // A replay from empty of the log's committed commands, through the application alone;
 // `verdicts`, if given, gets strata's answer at each index that writes.
 inline digest replay(const std::map<std::uint64_t, blob::app::seen_entry>& log, std::uint64_t through, std::map<std::uint64_t, strata::verdict::outcome>* verdicts = nullptr) {
-	ff::filesystem fs;
-	ff::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	strata::basic_index_options<strata::document_layout> o;
 	o.keyed = true;
 	auto ix = blob::index_type::create(io, o, {'r', 'e', 'f'});

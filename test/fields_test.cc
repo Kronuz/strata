@@ -1,7 +1,7 @@
 // The field table (fields-and-keys D2, F1): how a transaction names fields, the model it must
 // agree with, the races the design lists, and the table in the manifest log. The layout adds one
 // plugin whose parts carry field references, so the test sees which id each reference resolved to.
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 #include "strata/core/fields.hh"
 #include "strata/core/index.hh"
 
@@ -18,6 +18,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+namespace fl = kronuz::faultlab;
 
 static int failures = 0;
 #define CHECK(cond) \
@@ -141,8 +143,8 @@ struct model {
 // references by declaration and by id mixed. Every term's resolved field is the one the host named.
 static void property(std::uint64_t seed, int steps) {
 	std::mt19937_64 rng(seed);
-	faultfs::filesystem fs;
-	faultfs::io io{fs};
+	fl::filesystem fs;
+	fl::io io{fs};
 	auto ix = index_t::create(io, opts(), uuid);
 	model m;
 	std::vector<host_view> stale;
@@ -219,8 +221,8 @@ static void property(std::uint64_t seed, int steps) {
 
 // A rejected declaring transaction leaves no trace and the next transaction reuses its ids.
 static void rollback_then_reuse() {
-	faultfs::filesystem fs, fs2;
-	faultfs::io io{fs}, io2{fs2};
+	fl::filesystem fs, fs2;
+	fl::io io{fs}, io2{fs2};
 	auto ix = index_t::create(io, opts(), uuid);
 	auto twin = index_t::create(io2, opts(), uuid);
 	ix.apply([] {
@@ -257,8 +259,8 @@ static void rollback_then_reuse() {
 
 // A host holding ids from before a lost tail is refused, never misattributed.
 static void lost_tail() {
-	faultfs::filesystem fs;
-	faultfs::io io{fs};
+	fl::filesystem fs;
+	fl::io io{fs};
 	std::optional<index_t> ix(index_t::create(io, opts(), uuid));
 	transaction first;
 	first.fields = {decl("x"), decl("y")};
@@ -301,8 +303,8 @@ static void lost_tail() {
 
 // Stage 1's rules, one at a time.
 static void rules() {
-	faultfs::filesystem fs;
-	faultfs::io io{fs};
+	fl::filesystem fs;
+	fl::io io{fs};
 	auto ix = index_t::create(io, opts(), uuid);
 	auto verdict_of = [&](transaction t) { return run(ix, t).result; };
 	auto with_fields = [](std::vector<field_declaration> f, std::vector<operation> ops = {}) {
@@ -341,8 +343,8 @@ static void rules() {
 	conflict.expected_fields = field_mark{ix.fields().size(), ix.fields_mark().chain + 1};
 	CHECK(verdict_of(conflict) == verdict_t::fields_conflict && !ix.fields().find("never"));
 	// A keyless index refuses a key field.
-	faultfs::filesystem fs2;
-	faultfs::io io2{fs2};
+	fl::filesystem fs2;
+	fl::io io2{fs2};
 	auto o = opts();
 	o.keyed = false;
 	auto keyless = index_t::create(io2, o, uuid);
@@ -360,10 +362,10 @@ static bool throws(const std::function<void()>& f) {
 }
 
 // The newest manifest log's name (manifest-log D1).
-static std::string log_name(faultfs::io& io) { return index_detail::manifest_name(*index_detail::log_holding(io)); }
+static std::string log_name(fl::io& io) { return index_detail::manifest_name(*index_detail::log_holding(io)); }
 // A torn tail after the log's end: zeros to past the next block boundary, a piece a crash never
 // wrote (D6's table), so the next commit rolls over instead of appending over it.
-static void tear(faultfs::io& io) {
+static void tear(fl::io& io) {
 	auto f = io.open_existing(log_name(io));
 	f->write_at(f->size(), std::string(512, '\0'));
 	f->sync();
@@ -372,8 +374,8 @@ static void tear(faultfs::io& io) {
 // The table in the log: declarations ride the edits, old generations keep their prefix, replay is
 // skipped, two replicas applying one log agree, a checkpoint installs.
 static void file_and_replicas() {
-	faultfs::filesystem fs, fs2, fs3;
-	faultfs::io io{fs}, io2{fs2}, io3{fs3};
+	fl::filesystem fs, fs2, fs3;
+	fl::io io{fs}, io2{fs2}, io3{fs3};
 	auto a = index_t::create(io, opts(), uuid);
 	auto b = index_t::create(io2, opts(), uuid);
 	std::vector<transaction> log;
@@ -430,8 +432,8 @@ static void file_and_replicas() {
 // A torn tail past the log's last record is never appended over: the next commit rolls over to a
 // new log and the old one keeps its bytes. check() compares the log with the table.
 static void torn_tail_and_check() {
-	faultfs::filesystem fs;
-	faultfs::io io{fs};
+	fl::filesystem fs;
+	fl::io io{fs};
 	{
 		auto ix = index_t::create(io, opts(), uuid);
 		transaction t;
@@ -473,8 +475,8 @@ static void crash_points() {
 	for (const bool rewrite : {false, true}) {
 		for (std::uint64_t cut = 0; cut < 40; ++cut) {
 			for (std::uint64_t seed = 0; seed < 3; ++seed) {
-				faultfs::filesystem fs;
-				faultfs::io io{fs};
+				fl::filesystem fs;
+				fl::io io{fs};
 				field_mark old_mark, new_mark;
 				std::size_t old_size = 0;
 				{
@@ -532,8 +534,8 @@ static void crash_points() {
 
 // Readers see a table that never changes under them: views taken while the writer declares.
 static void readers() {
-	faultfs::filesystem fs;
-	faultfs::io io{fs};
+	fl::filesystem fs;
+	fl::io io{fs};
 	reader_registry reg{32};
 	auto o = opts();
 	o.readers = &reg;
@@ -592,8 +594,8 @@ struct extra_plugin : stored_plugin {
 };
 static void own_builder_parts() {
 	using extra_index = basic_index<layout<keys_plugin, extra_plugin>>;
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	extra_index::options o;
 	o.keyed = true;
 	auto ix = extra_index::create(io, o, uuid);

@@ -31,7 +31,7 @@ struct on_disk {
 	std::set<std::string> names;
 };
 
-static on_disk survey(const faultfs::filesystem& fs) {
+static on_disk survey(const fl::filesystem& fs) {
 	on_disk r;
 	for (const auto& n : fs.list()) {
 		auto p = index_detail::parse_name(n);
@@ -45,7 +45,7 @@ static on_disk survey(const faultfs::filesystem& fs) {
 
 // What recover --to g checks, read-only: the newest manifest names only files that exist with
 // the entry's size.
-static std::string newest_intact(faultfs::filesystem& fs) {
+static std::string newest_intact(fl::filesystem& fs) {
 	std::string head;
 	std::uint64_t top = 0;
 	for (const auto& n : fs.list()) {
@@ -69,13 +69,13 @@ static std::string newest_intact(faultfs::filesystem& fs) {
 }
 
 // Segment files and their sizes.
-static std::map<std::string, std::uint64_t> segment_sizes(const faultfs::filesystem& fs) {
+static std::map<std::string, std::uint64_t> segment_sizes(const fl::filesystem& fs) {
 	std::map<std::string, std::uint64_t> r;
 	for (const auto& n : survey(fs).names) { r[n] = fs.view(n).size(); }
 	return r;
 }
 // Bytes the files in `before` lost since: removed in full, or truncated.
-static std::uint64_t lost(const faultfs::filesystem& fs, const std::map<std::string, std::uint64_t>& before) {
+static std::uint64_t lost(const fl::filesystem& fs, const std::map<std::string, std::uint64_t>& before) {
 	const auto now = segment_sizes(fs);
 	std::uint64_t n = 0;
 	for (const auto& [name, size] : before) {
@@ -169,9 +169,9 @@ private:
 // the files the guarded view maps (shared-reader D7), so faultfs never sees one truncated
 // below its live mapping.
 static int held_view() {
-	faultfs::filesystem fs;
+	fl::filesystem fs;
 	fs.map_files(true);
-	faultfs::io io(fs);
+	fl::io io(fs);
 	reader_registry readers(4);
 	auto o = small_steps();
 	o.readers = &readers;
@@ -199,8 +199,8 @@ int main(int argc, char** argv) {
 	// 1. Many merges, no commit, with the index's own executor: merged-away files leave as the
 	// merges publish.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		auto ix = kv_index::create(io, small_steps(), uuid);
 		std::size_t worst = 0, merged = 0;
 		for (int r = 0; r < 80; ++r) {
@@ -223,8 +223,8 @@ int main(int argc, char** argv) {
 
 	// 2. Commits in between: a file the newest manifest names is never reclaimed by a publish.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		auto ix = kv_index::create(io, small_steps(), uuid);
 		for (int r = 0; r < 60; ++r) {
 			ix.apply(tx(round(r, 50)), {});
@@ -244,8 +244,8 @@ int main(int argc, char** argv) {
 	// 3. Merge A publishes while merge B is pending over a source that has left the segment
 	// list (all its documents deleted and committed): B's source stays whole until B publishes.
 	for (int victim = 0; victim < 3; ++victim) {
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		manual_executor exec;
 		auto o = small_steps();
 		o.auto_merge = false;  // the merges are scheduled together below
@@ -281,8 +281,8 @@ int main(int argc, char** argv) {
 	// nothing here) deletes the output.
 	std::size_t discarded = 0;
 	for (int victim = 0; victim < 6; ++victim) {
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		manual_executor exec;
 		auto o = small_steps();
 		o.auto_merge = false;
@@ -322,8 +322,8 @@ int main(int argc, char** argv) {
 	// 4a. The cap: eight segments merge into one, far more than the cap; the publish frees at
 	// most the cap and a step, in a bounded number of mutations, and commits pay the rest.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		auto o = small_steps();  // no host executor: the owner runs the deletes, in steps
 		o.auto_merge = false;
 		o.reclaim_cap = 2048;
@@ -358,8 +358,8 @@ int main(int argc, char** argv) {
 	// 4b. The upper bound: a backlog of six unpaid files (commits reclaim nothing here), then a
 	// small merge publishes; it frees what it obsoleted and a step, not the backlog.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		auto o = small_steps();
 		o.auto_merge = false;
 		auto ix = kv_index::create(io, o, uuid);

@@ -207,7 +207,7 @@ task::task<void> one_op(PW& w, std::mt19937_64& rng, pinner_handles& mine, count
 			}
 			CHECK(p.index().lease().held_here());
 			if (rng() % 4 == 0 && !p.index().fenced() && cat_t::state_of(w.cat->word_of(p.where().slot)) == S::open) {  // a sync that fails under the turn
-				w.dirs[key].fs.add_fault({faultfs::op::sync, 1, EIO});
+				w.dirs[key].fs.add_fault({fl::op::sync, 1, EIO});
 				try {
 					(void)p.index().apply(tx({set_meta("fence" + std::to_string(rng() % 40), "x")}), {});
 					p.index().commit();
@@ -489,7 +489,7 @@ task::task<void> drain_op(PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[
 			const std::lock_guard turn(turns[key]);
 			if (!p.index().fenced() && cat_t::state_of(w.cat->word_of(p.where().slot)) == S::open) {
 				const strata::lease_scope hold{p.index().lease()};
-				w.dirs[key].fs.add_fault({faultfs::op::sync, 1, EIO});
+				w.dirs[key].fs.add_fault({fl::op::sync, 1, EIO});
 				try {
 					(void)p.index().apply(tx({set_meta("fence" + std::to_string(rng() % 40), "x")}), {});
 					p.index().commit();

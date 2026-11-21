@@ -155,8 +155,8 @@ static void index_key_collisions() {
 	CHECK(key_hash_of(a) == key_hash_of(b) && key_hash_of(c) == key_hash_of(d) && key_hash_of(a) != key_hash_of(c));
 	kv_index::options keyed;
 	keyed.keyed = true;
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, keyed, uuid_of("slots-keys"));
 	CHECK(ix.apply(tx({add(a, "A1")}), {}).result == verdict::accepted);
 	CHECK(!ix.find_key(b) && !ix.get(b) && ix.get(a) == "A1");  // b shares a's hash and is absent
@@ -187,8 +187,8 @@ static void index_docid_collisions() {
 	CHECK(docid_hash_of(x) == docid_hash_of(y) && docid_hash_of(y) == docid_hash_of(z));
 	kv_index::options keyed;
 	keyed.keyed = true;
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, keyed, uuid_of("slots-docs"));
 	CHECK(ix.apply(tx({replace_docid(x, "", "X1")}), {}).result == verdict::accepted);
 	CHECK(ix.has_docid(x) && !ix.has_docid(y) && !ix.has_docid(z));  // y shares x's hash and is absent
@@ -216,8 +216,8 @@ static void index_random_collisions() {
 	for (std::uint64_t seed = 1; seed <= 4; ++seed) {
 		kv_index::options keyed;
 		keyed.keyed = true;
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		auto ix = kv_index::create(io, keyed, uuid_of("slots-random"));
 		std::mt19937_64 r(seed);
 		std::map<std::string, std::string> by_key;
@@ -264,8 +264,8 @@ static void buffer_cap() {
 	o.keyed = true;
 	o.buffered_docs_cap = 5;
 	o.auto_merge = false;
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, o, uuid_of("slots-cap"));
 	std::size_t most = 0;
 	for (int i = 0; i < 40; ++i) {

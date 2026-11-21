@@ -29,7 +29,7 @@
 #include "host_io.hh"
 #include "oracle.hh"
 
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 
 #include <atomic>
 #include <chrono>
@@ -47,7 +47,7 @@ namespace {
 
 namespace cs = kronuz::consensus;
 namespace j = kronuz::journal;
-namespace ff = strata::faultfs;
+namespace fl = kronuz::faultlab;
 namespace sg = strata::group;
 using group_test::group_type;
 using group_test::replay;
@@ -156,7 +156,7 @@ bool all_done(const std::vector<std::shared_ptr<started<T>>>& xs) {
 
 void held() {
 	context = "held";
-	ff::filesystem host_disk, dir_a, dir_b;
+	fl::filesystem host_disk, dir_a, dir_b;
 	strata::byte_budget budget_a{std::uint64_t(1) << 30}, budget_b{std::uint64_t(1) << 30};
 	blob::app app_a, app_b;
 	// A's apply blocks inside its "P|held|x" entry, past its file effects at its strata write,
@@ -178,8 +178,8 @@ void held() {
 	std::atomic<bool> turns_done{false}, driver_done{false};
 	task::spawn(loop_t.ref(), host->driver(0).run(j::completion_ref::of(inline_io), stop.token()), [&](std::exception_ptr) { turns_done.store(true); });
 	task::spawn(loop_t.ref(), lp->run(stop.token()), [&](std::exception_ptr) { driver_done.store(true); });
-	auto a = std::make_unique<group_type>(*lp, config(1, budget_a), std::make_unique<ff::io>(dir_a), app_a, chore_a.ref());
-	auto b = std::make_unique<group_type>(*lp, config(2, budget_b), std::make_unique<ff::io>(dir_b), app_b, chore_b.ref());
+	auto a = std::make_unique<group_type>(*lp, config(1, budget_a), std::make_unique<fl::io>(dir_a), app_a, chore_a.ref());
+	auto b = std::make_unique<group_type>(*lp, config(2, budget_b), std::make_unique<fl::io>(dir_b), app_b, chore_b.ref());
 	loop_t.begin();
 	chore_a.begin();
 	chore_b.begin();
@@ -278,7 +278,7 @@ void held() {
 constexpr cs::GroupId gid = 7;
 
 struct disks {
-	ff::filesystem host, dir;
+	fl::filesystem host, dir;
 	strata::byte_budget storage{std::uint64_t(1) << 30};
 };
 
@@ -298,7 +298,7 @@ struct process {
 		lp = std::make_unique<sg::loop>(ref(), j::completion_ref::of(inline_io), *host, 0, 11);
 		task::spawn(ref(), host->driver(0).run(j::completion_ref::of(held), stop.token()), [this](std::exception_ptr) { turns_done = true; });
 		task::spawn(ref(), lp->run(stop.token()), [this](std::exception_ptr) { driver_done = true; });
-		g = std::make_unique<group_type>(*lp, config(gid, d.storage), std::make_unique<ff::io>(d.dir), app, task::scheduler_ref::of(chore_s));
+		g = std::make_unique<group_type>(*lp, config(gid, d.storage), std::make_unique<fl::io>(d.dir), app, task::scheduler_ref::of(chore_s));
 		loop_s.run();
 	}
 	task::scheduler_ref ref() { return task::scheduler_ref::of(loop_s); }
@@ -572,7 +572,7 @@ void reopen(bool turn) {
 		auto c = config(gid, d.storage);
 		c.closed = record;
 		p->g.reset();
-		p->g = std::make_unique<group_type>(*p->lp, std::move(c), std::make_unique<ff::io>(d.dir), app, task::scheduler_ref::of(p->chore_s));
+		p->g = std::make_unique<group_type>(*p->lp, std::move(c), std::make_unique<fl::io>(d.dir), app, task::scheduler_ref::of(p->chore_s));
 	};
 	const auto same_term = [&](const std::string& how) {
 		const auto s = p->lp->driver().state(gid);
@@ -622,14 +622,14 @@ void reopen(bool turn) {
 void failed_open() {
 	context = "failed open";
 	disks d;
-	ff::filesystem lost;  // a directory that lost strata's index: its head is below the bundle
+	fl::filesystem lost;  // a directory that lost strata's index: its head is below the bundle
 	std::map<std::uint64_t, blob::app::seen_entry> seen;
 	blob::app app;
 	app.seen = &seen;
 	auto p = std::make_unique<process>(d, app);
-	const auto open_group = [&](ff::filesystem& dir) {
+	const auto open_group = [&](fl::filesystem& dir) {
 		p->g.reset();
-		p->g = std::make_unique<group_type>(*p->lp, config(gid, d.storage), std::make_unique<ff::io>(dir), app, task::scheduler_ref::of(p->chore_s));
+		p->g = std::make_unique<group_type>(*p->lp, config(gid, d.storage), std::make_unique<fl::io>(dir), app, task::scheduler_ref::of(p->chore_s));
 		auto o = start(p->ref(), p->g->open());
 		p->pump([&] { return o->done.load(); });
 		return o->error;

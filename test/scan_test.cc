@@ -86,8 +86,8 @@ static std::vector<row> expect(const model_t& m, const std::string& from, std::s
 static const std::array<char, 16> uuid = {'s', 'c', 'a', 'n', '-', 't', 'e', 's', 't'};
 
 struct store {
-	faultfs::filesystem fs;
-	faultfs::io io{fs};
+	fl::filesystem fs;
+	fl::io io{fs};
 	kv_index ix;
 	model_t model;
 	explicit store(std::size_t flush_threads = 1) : ix(kv_index::create(io, options(flush_threads), uuid)) {}
