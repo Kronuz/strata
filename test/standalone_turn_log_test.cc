@@ -1185,6 +1185,39 @@ void served() {
 	std::printf("served: %llu turns for %d transactions\n", (unsigned long long)h.driver.log().stats().turns, writers * n);
 }
 
+// --- rival: a wait whose record another thread's turn wrote ------------------------------------
+
+// No loop serves the turns, and another thread's turn, slowed at its sync, holds the writer's
+// record when the writer starts to wait: the writer's own turn then writes nothing, and its wait
+// returns once the other turn makes the record durable.
+void rival() {
+	fl::filesystem fs;
+	fl::io io(fs);
+	host h(io);
+	kv_index ix = kv_index::create(io, logged_options(h.sealer), uuid_of("rival"));
+	while (h.sealer.turn()) {}  // the join's records
+	for (int round = 0; round < 4; ++round) {
+		CHECK(ix.apply(tx({replace("a", std::to_string(round))}), {}).result == verdict::accepted);
+		fs.sync_latency(std::chrono::milliseconds(100));
+		std::thread other([&] { (void)h.sealer.turn(); });
+		std::this_thread::sleep_for(std::chrono::milliseconds(20));  // the other turn is in its sync
+		std::string error;
+		try {
+			ix.await_durable(ix.applied());
+		} catch (const std::exception& e) {
+			error = e.what();
+		}
+		other.join();
+		fs.sync_latency({});
+		if (!error.empty()) {
+			std::fprintf(stderr, "rival round %d: %s\n", round, error.c_str());
+			++failures;
+			break;
+		}
+		CHECK(ix.log_synced() == ix.applied().index);
+	}
+}
+
 // --- lag: a writer that outruns slow barriers (D4's window, D107) ------------------------------
 
 // Records close many times per barrier unless apply waits: the log stays within one turn in
@@ -1469,7 +1502,7 @@ void m1() {
 
 int main(int argc, char** argv) {
 	const std::vector<std::pair<std::string, void (*)()>> cases = {{"codec", codec}, {"t11", t11}, {"t12", t12}, {"t4", t4}, {"t1", t1}, {"t1r", t1r},
-		{"t2", t2}, {"t3", t3}, {"t5", t5}, {"t5d", t5d}, {"t7", t7}, {"t7b", t7b}, {"t6", t6}, {"t6w", t6w}, {"t8", t8}, {"t10", t10}, {"m1", m1}, {"served", served}, {"lag", lag}, {"t9o", t9o}};
+		{"t2", t2}, {"t3", t3}, {"t5", t5}, {"t5d", t5d}, {"t7", t7}, {"t7b", t7b}, {"t6", t6}, {"t6w", t6w}, {"t8", t8}, {"t10", t10}, {"m1", m1}, {"served", served}, {"rival", rival}, {"lag", lag}, {"t9o", t9o}};
 	std::vector<std::string> wanted;
 	for (int i = 1; i < argc; ++i) {
 		if (std::string(argv[i]) == "--seeds" && i + 1 < argc) {

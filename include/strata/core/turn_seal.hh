@@ -208,10 +208,11 @@ public:
 	}
 	// Returns once the group's records through `sequence` are durable and its watcher has run.
 	// While a loop serves turns it waits for them; otherwise the caller writes them inline, as
-	// journal::run's blocking entry does. A failed turn throws outcome_unknown (D9); a group that
-	// closes first, or a sequence a closed life retired, throws group_closed, as durable() does.
+	// journal::run's blocking entry does, rereading after each turn: another thread's may have
+	// written them. A failed turn throws outcome_unknown (D9); a group that closes first, or a
+	// sequence a closed life retired, throws group_closed, as durable() does.
 	void await(std::uint64_t group, std::uint64_t sequence) {
-		for (;;) {
+		for (bool idle = false;;) {
 			{
 				std::unique_lock lock(mu_);
 				if (failure_) { unknown(); }
@@ -227,18 +228,12 @@ public:
 						const auto at = groups_.find(group);
 						return failure_ || !served_ || at == groups_.end() || sequence <= retired_locked(group) || at->second.durable >= sequence;
 					});
+					idle = false;
 					continue;
 				}
+				if (idle) { throw std::logic_error("strata: a turn-log wait with nothing to write"); }
 			}
-			bool wrote = false;
-			try {
-				wrote = turn();
-			} catch (...) {
-				const std::lock_guard lock(mu_);
-				if (failure_) { unknown(); }
-				throw;
-			}
-			if (!wrote) { throw std::logic_error("strata: a turn-log wait with nothing to write"); }
+			idle = !inline_turn();
 		}
 	}
 	// Returns once `ready()` holds, which a sealer's call makes true (a record handed to a turn):
@@ -246,7 +241,7 @@ public:
 	// no lock of the group's. Throws as await() does.
 	template <class Ready>
 	void await_sealed(std::uint64_t group, Ready ready) {
-		for (;;) {
+		for (bool idle = false;;) {
 			{
 				std::unique_lock lock(mu_);
 				if (failure_) { unknown(); }
@@ -255,18 +250,12 @@ public:
 				if (served_) {
 					const parked p(*this, {group, 0, [](const void* r) { return (*static_cast<const Ready*>(r))(); }, &ready});
 					cv_.wait(lock, [&] { return failure_ || !served_ || !groups_.contains(group) || ready(); });
+					idle = false;
 					continue;
 				}
+				if (idle) { throw std::logic_error("strata: a turn-log wait with nothing to write"); }
 			}
-			bool wrote = false;
-			try {
-				wrote = turn();
-			} catch (...) {
-				const std::lock_guard lock(mu_);
-				if (failure_) { unknown(); }
-				throw;
-			}
-			if (!wrote && !ready()) { throw std::logic_error("strata: a turn-log wait with nothing to write"); }
+			idle = !inline_turn();
 		}
 	}
 	// From a sealer that handed out a record: wakes await_sealed().
@@ -321,6 +310,16 @@ public:
 	void writing(bool on) noexcept { on ? writers_.fetch_add(1, std::memory_order_relaxed) : writers_.fetch_sub(1, std::memory_order_relaxed); }
 
 private:
+	// A waiter's own turn, when no loop serves them: false when it wrote nothing.
+	bool inline_turn() {
+		try {
+			return turn();
+		} catch (...) {
+			const std::lock_guard lock(mu_);
+			if (failure_) { unknown(); }
+			throw;
+		}
+	}
 	// A writer blocked in await() (its sequence) or await_sealed() (its predicate), listed under mu_.
 	struct waiter {
 		std::uint64_t group, sequence;
