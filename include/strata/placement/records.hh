@@ -9,6 +9,7 @@
 //   "P" + path           a namespace (one per index), each `/` stored as byte 0: rf, settings
 //                        version, per shard its group id, incarnation and members (the first
 //                        the preferred leader)
+//   "S"                  the cluster settings repair reads: replace_after
 //
 // A value is a format byte, then LEB128 integers in their shortest form and byte strings as a
 // length and bytes; a decoder bounds every count by the bytes left, refuses trailing bytes and
@@ -49,6 +50,7 @@ inline constexpr char groups = 'G';
 inline constexpr char load = 'L';
 inline constexpr char node = 'N';
 inline constexpr char path = 'P';
+inline constexpr char settings = 'S';
 }  // namespace tag
 
 // The longest path: strata's key limit less the tag byte.
@@ -64,6 +66,7 @@ inline bool valid_path(std::string_view p) {
 
 inline std::string directory_key() { return std::string(1, tag::directory); }
 inline std::string groups_key() { return std::string(1, tag::groups); }
+inline std::string settings_key() { return std::string(1, tag::settings); }
 
 namespace detail {
 inline std::string id_key(char t, std::uint64_t id) {
@@ -139,6 +142,12 @@ struct node_record {
 	std::uint64_t directory_version = 0;  // the directory record's version this change wrote
 	std::string attributes;               // the application's (M1's admission fields)
 	bool operator==(const node_record&) const = default;
+};
+
+// The cluster settings, changed at runtime by a command (repair.hh reads them at each pass).
+struct settings_record {
+	std::uint64_t replace_after_ms = 300'000;  // a member down this long is replaced (D7)
+	bool operator==(const settings_record&) const = default;
 };
 
 struct load_record {
@@ -288,6 +297,20 @@ inline node_record decode_node(std::string_view in) {
 	return n;
 }
 
+inline std::string encode(const settings_record& s) {
+	std::string out(1, char(record_format));
+	codec::put(out, s.replace_after_ms);
+	return out;
+}
+inline settings_record decode_settings(std::string_view in) {
+	codec::reader r{in, "settings record"};
+	r.format();
+	settings_record s;
+	s.replace_after_ms = r.number();
+	r.end();
+	return s;
+}
+
 inline std::string encode(const load_record& l) {
 	std::string out(1, char(record_format));
 	codec::put(out, l.groups);
@@ -363,6 +386,8 @@ inline bool valid_record(std::string_view key, std::string_view value) {
 			decode_directory(value);
 		} else if (key == groups_key()) {
 			decode_groups(value);
+		} else if (key == settings_key()) {
+			decode_settings(value);
 		} else if (node_of(key)) {
 			decode_node(value);
 		} else if (load_of(key)) {
