@@ -10,6 +10,18 @@
 // A3: that close completes with the group's close run outside the write lease. close_blocking
 // refuses to run under the lease (it would wait on itself), and every step has a deadline: a
 // close that never ends fails the test, which exits rather than hangs.
+//
+// The other closes and opens through the catalog, each a case (argv[1]; none runs them all):
+// failed-open: a recover that fences (P_b > P_H) fails the pin; the group left the loop's table
+//   and went idle before its throw, so the catalog destroys it on its lane while another group
+//   writes on the loop.
+// attach: groups open on the catalog's lane while another writes on the loop; only open() joins
+//   the loop's table, on the loop.
+// sweep, bound, replace: the sweep's eviction, the wake bound's close and a fenced index's
+//   replace each close the group through close_payload; a reopen recovers it.
+// bare-commit-crash: the catalog's bare commit makes P_H durable over file-set bytes not synced;
+//   power goes off, and after a crash D16's replay rewrites them.
+// TSan runs every case (CI's linux-tsan, and the quest's TSan job).
 #include "blob_app.hh"
 #include "host_io.hh"
 #include "oracle.hh"
@@ -20,6 +32,7 @@
 #include "strata/core/owner.hh"
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -29,8 +42,14 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <span>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <thread>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -232,9 +251,13 @@ const j::AdmissionLimits admission{{256u << 20, 8192}, {256 * 1024, 3}, {64u << 
 constexpr cs::GroupId gid = 3;
 const std::array<char, 16> uuid{'c', 'a', 't', 'a', 'l', 'o', 'g'};
 
-group_type::config config() {
+// A key "g<id>" holds the group <id>.
+std::string key_of(cs::GroupId id) { return "g" + std::to_string(id); }
+cs::GroupId id_of(std::string_view key) { return cs::GroupId(std::stoul(std::string(key.substr(1)))); }
+
+group_type::config config(cs::GroupId id = gid) {
 	group_type::config c;
-	c.id = gid;
+	c.id = id;
 	c.options.configuration.local = 1;
 	c.options.configuration.voters = {1};
 	c.options.configuration.cluster[0] = 'C';
@@ -248,14 +271,81 @@ group_type::config config() {
 	c.options.limits.rpc_entries = 8;
 	c.options.timing = cs::Timing{20, 40, 100, 200, 60000};
 	c.options.scheduling = cs::WorkerLimits{16, 128};
-	c.identity = j::Identity{'C', 'A', 'T'};
+	c.identity = j::Identity{'C', 'A', char('0' + id % 64)};
 	return c;
 }
 
-// What survives a restart: the journal host's directory, the index's, the storage budget.
+// What survives a restart: the journal host's directory, each key's, the storage budget.
 struct disks {
-	fl::filesystem host, dir;
+	fl::filesystem host;
+	std::mutex mu;
+	std::map<std::string, std::unique_ptr<fl::filesystem>> dirs;
 	strata::byte_budget storage{std::uint64_t(1) << 30};
+	fl::filesystem& of(std::string_view key) {
+		std::lock_guard l(mu);
+		auto& fs = dirs[std::string(key)];
+		if (!fs) { fs = std::make_unique<fl::filesystem>(); }
+		return *fs;
+	}
+	// The key's directory lost: a fresh one in its place.
+	void lose(std::string_view key) {
+		std::lock_guard l(mu);
+		dirs[std::string(key)] = std::make_unique<fl::filesystem>();
+	}
+};
+
+// A directory whose segment files fail to open with `fail` (the host's error, not the medium's),
+// so a wake's promote fails (D5's bound). Files are the inner IO's, unwrapped.
+class segment_fault_io final : public j::IO {
+public:
+	segment_fault_io(fl::filesystem& fs, const std::atomic<int>& fail) : own_(fs), fail_(&fail) {}
+	using j::IO::acquire_owner;
+	j::FilesystemClass directory_filesystem() const override { return in().directory_filesystem(); }
+	j::DirectoryTrust directory_trust() const override { return in().directory_trust(); }
+	std::unique_ptr<j::OwnerLock> acquire_owner(bool create) override { return in().acquire_owner(create); }
+	std::unique_ptr<j::OwnerLock> acquire_directory_owner() override { return in().acquire_directory_owner(); }
+	std::unique_ptr<j::File> open_existing(std::string_view n) override {
+		check_segment(n);
+		return in().open_existing(n);
+	}
+	std::unique_ptr<j::File> open_existing_read_only(std::string_view n) override {
+		check_segment(n);
+		return in().open_existing_read_only(n);
+	}
+	void open_existing_read_only_into(std::string_view n, j::File& f) override { in().open_existing_read_only_into(n, f); }
+	bool open_reclaim_candidate_read_only_into(std::string_view n, j::File& f) override { return in().open_reclaim_candidate_read_only_into(n, f); }
+	std::unique_ptr<j::File> open_reclaim_candidate_read_only(std::string_view n) override { return in().open_reclaim_candidate_read_only(n); }
+	std::unique_ptr<j::File> open_reclaim_candidate(std::string_view n) override { return in().open_reclaim_candidate(n); }
+	std::unique_ptr<j::File> create_exclusive(std::string_view n) override { return in().create_exclusive(n); }
+	void replace(std::string_view s, std::string_view d) override { in().replace(s, d); }
+	void link(std::string_view s, std::string_view d) override { in().link(s, d); }
+	void remove(std::string_view n) override { in().remove(n); }
+	std::unique_ptr<j::DirectoryCursor> scan_directory() override { return in().scan_directory(); }
+	std::optional<j::EntryFootprint> entry_footprint(std::string_view n) override { return in().entry_footprint(n); }
+	std::optional<j::EntryInspection> inspect_entry(std::string_view n) override { return in().inspect_entry(n); }
+	void sync_directory() override { in().sync_directory(); }
+	void sync_files(std::span<j::File* const> f) override { in().sync_files(f); }
+	void sync_data_files(std::span<j::File* const> f) override { in().sync_data_files(f); }
+	void sync_files_and_directory(std::span<j::File* const> f) override { in().sync_files_and_directory(f); }
+	void order_files_and_directory(std::span<j::File* const> f) override { in().order_files_and_directory(f); }
+
+protected:
+	std::unique_ptr<j::OwnerLock> lock_owner(const j::OwnerLockOptions& o) override { return in().acquire_owner(o); }
+
+private:
+	void check_segment(std::string_view n) const {
+		if (const int e = fail_->load(); e && n.starts_with("seg-")) { throw std::system_error(e, std::generic_category(), "test: open " + std::string(n)); }
+	}
+	j::IO& in() { return own_; }  // through the base: faultfs's overrides may be protected
+	const j::IO& in() const { return own_; }
+	fl::io own_;
+	const std::atomic<int>* fail_;
+};
+
+// The catalog's knobs a case turns: by default no sweep closes, only shutdown's.
+struct tuning {
+	std::uint64_t sweep_ns = 3'600'000'000'000ull, close_idle_ns = 600'000'000'000ull, demote_idle_ns = 30'000'000'000ull;
+	bool defer_io = false;
 };
 
 // H: the group the slot's index is lent to.
@@ -304,12 +394,16 @@ struct process {
 	std::unique_ptr<timer_thread> timer;
 	std::unique_ptr<cat_t> cat;
 	// close_payload's record.
-	std::atomic<int> payload_closes{0};
+	std::atomic<int> payload_closes{0}, payload_calls{0};
 	std::atomic<std::uint64_t> closed_applied{0};
 	std::mutex record_mu;
 	std::string payload_error;
+	// open_payload's record: groups found in the loop's table before their open or after a failed one.
+	std::atomic<int> early_joins{0}, failed_stays{0}, failed_opens{0};
+	std::string open_error;
+	std::atomic<int> fail_segments{0};  // segment_fault_io's errno, for every key's directory
 
-	explicit process(disks& disk) : d(disk) {
+	explicit process(disks& disk, tuning knobs = {}) : d(disk) {
 		host = std::make_unique<j::Host>(std::make_shared<group_test::host_io>(d.host), j::Identity{'H', 'C', 'T'}, j::HostOptions{1, turn_options});
 		lp = std::make_unique<sg::loop>(loop_t.ref(), j::completion_ref::of(inline_io), *host, 0, 5);
 		task::spawn(loop_t.ref(), host->driver(0).run(j::completion_ref::of(inline_io), stop.token()), [this](std::exception_ptr) { turns_done.store(true); });
@@ -327,17 +421,34 @@ struct process {
 		h.timer = [t = timer.get()](std::uint64_t delay, std::function<void()> fn) { t->add(delay, std::move(fn)); };
 		h.index_options.keyed = true;
 		h.index_options.storage = &d.storage;
-		h.resolve = [this](const cat_t::opening& op) { return strata::counted_io::make(op.counts, [this] { return std::make_unique<fl::io>(d.dir); }); };
+		h.index_options.defer_io = knobs.defer_io;
+		h.resolve = [this](const cat_t::opening& op) {
+			auto* fs = &d.of(op.key);
+			return strata::counted_io::make(op.counts, [this, fs] { return std::make_unique<segment_fault_io>(*fs, fail_segments); });
+		};
 		h.open_index = [](j::IO& io, const blob::index_type::options& o, const cat_t::opening&) { return group_type::open_index(io, o, uuid); };
 		// On the catalog's lane: the group's open waits on the loop and the group's chore, both elsewhere.
+		// The loop's table is the loop's: the constructor leaves it alone, and a failed open has left
+		// it before it throws, so the lane may destroy the group.
 		h.open_payload = [this](const cat_t::opening& op, blob::index_type& ix, std::optional<hosted>& out) {
+			const auto id = id_of(op.key);
 			out.emplace();
 			out->io = op.io;
-			out->g = std::make_unique<group_type>(*lp, config(), *op.io, ix, app, chore_t.ref());
-			out->g->open_blocking();
+			out->g = std::make_unique<group_type>(*lp, config(id), *op.io, ix, app, chore_t.ref());
+			if (in_table(id)) { early_joins.fetch_add(1); }
+			try {
+				out->g->open_blocking();
+			} catch (...) {
+				failed_opens.fetch_add(1);
+				if (in_table(id)) { failed_stays.fetch_add(1); }
+				std::lock_guard l(record_mu);
+				open_error = what(std::current_exception());
+				throw;
+			}
 		};
 		// The group's close, outside the write lease, before the index's (D169).
 		h.close_payload = [this](hosted& p, blob::index_type&) {
+			payload_calls.fetch_add(1);
 			try {
 				p.g->close_blocking();
 				closed_applied.store(p.g->applied());
@@ -348,23 +459,76 @@ struct process {
 			}
 			payload_closes.fetch_add(1);
 		};
-		h.sweep_period_ns = 3'600'000'000'000ull;  // no sweep closes in this test: shutdown's alone
+		h.sweep_period_ns = knobs.sweep_ns;
+		h.close_idle_ns = knobs.close_idle_ns;
+		h.demote_idle_ns = knobs.demote_idle_ns;
 		cat = std::make_unique<cat_t>(std::move(h));
 		cat->start();
 	}
 
-	// Pins `key` from the test's thread, waiting for its open.
-	cat_t::pin pin(strata::open_intent intent = strata::open_intent::open) {
-		step("pin");
+	// Whether the loop's table holds `id`, read on the loop.
+	bool in_table(cs::GroupId id) {
+		std::mutex m;
+		std::condition_variable cv;
+		bool done = false, found = false;
+		task::spawn(loop_t.ref(), [](sg::loop& l, cs::GroupId g, bool& out) -> task::task<void> {
+			out = l.find(g) != nullptr;
+			co_return;
+		}(*lp, id, found), [&](std::exception_ptr) {
+			std::lock_guard l(m);
+			done = true;
+			cv.notify_one();  // under the lock: the waiter's frame outlives it
+		});
+		std::unique_lock l(m);
+		cv.wait(l, [&] { return done; });
+		return found;
+	}
+
+	// Pins `key` from the test's thread, waiting for its open; a failed open is `failed`'s, if given.
+	cat_t::pin pin(strata::open_intent intent = strata::open_intent::open, const std::string& key = key_of(gid), std::exception_ptr* failed = nullptr) {
+		step("pin " + key);
 		for (;;) {
-			auto r = cat->try_pin("g", strata::pin_kind::request, true, intent);
+			auto r = cat->try_pin(key, strata::pin_kind::request, true, intent);
 			if (r.status == cat_t::try_status::pinned) { return std::move(r.p); }
 			if (r.status == cat_t::try_status::failed) {
+				if (failed) {
+					*failed = r.error;
+					return {};
+				}
 				check(false, "the pin's open: " + what(r.error));
 				return {};
 			}
 			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		}
+	}
+	// The catalog's commit chore, as its bound, shutdown and replace closes run it: a bare strata
+	// commit under the lease, which syncs no file-set byte (D169). False when it threw. The lease
+	// is the group's chore's while it applies or checkpoints: tried again shortly.
+	bool bare_commit(cat_t::pin& p) {
+		for (int i = 0; i < 5000; ++i) {
+			const strata::chore_scope c{p.index().lease()};
+			if (!c) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				continue;
+			}
+			try {
+				p.index().commit();
+			} catch (...) {
+				return false;
+			}
+			return true;
+		}
+		return check(false, "the bare commit took the index's lease");
+	}
+	template <class F>
+	bool wait_for(const std::string& what_for, F&& done, int seconds = 30) {
+		step(what_for, seconds + 5);
+		const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+		while (!done()) {
+			if (std::chrono::steady_clock::now() >= until) { return check(false, what_for); }
+			std::this_thread::sleep_for(std::chrono::milliseconds(2));
+		}
+		return true;
 	}
 	bool write(group_type& g, const std::string& command) {
 		auto w = start(loop_t.ref(), g.propose(command));
@@ -387,6 +551,8 @@ struct process {
 	}
 	~process() {
 		step("the process ends");
+		check(early_joins.load() == 0, "a group joined the loop's table before its open: " + std::to_string(early_joins.load()));
+		check(failed_stays.load() == 0, "a failed open left its group in the loop's table: " + std::to_string(failed_stays.load()));
 		cat.reset();  // after shutdown: every slot closed, every chore finished
 		stop.request(task::cancel_reason::shutdown);
 		loop_t.wake();
@@ -416,7 +582,8 @@ values expected(int through) {
 	return v;
 }
 
-void run() {
+// A1, A2, A3.
+void borrow() {
 	disks d;
 	std::uint64_t applied_at_shutdown = 0;
 	{
@@ -502,12 +669,272 @@ void run() {
 	}
 }
 
+constexpr std::uint64_t ms = 1'000'000;
+
+// Writes entries from..to as P|<key>|v<i>.
+bool write_range(process& p, group_type& g, int from, int to) {
+	bool ok = true;
+	for (int i = from; i <= to; ++i) { ok = p.write(g, "P|" + key(i) + "|v" + std::to_string(i)) && ok; }
+	return ok;
+}
+
+// Proposes on `g` from its own thread until stopped: the loop finds `g` for each Committed notice.
+class writer {
+public:
+	writer(process& p, group_type& g) : t_([this, &p, &g] {
+		for (int i = 0; !stop_.load() && i < 4000; ++i) {
+			auto w = start(p.loop_t.ref(), g.propose("P|" + key(1 + i % 10) + "|w" + std::to_string(i)));
+			while (!w->done.load(std::memory_order_acquire)) { std::this_thread::sleep_for(std::chrono::microseconds(20)); }
+			if (w->error) { return; }
+			written_.fetch_add(1);
+		}
+	}) {}
+	~writer() { stop(); }
+	int stop() {
+		stop_.store(true);
+		if (t_.joinable()) { t_.join(); }
+		return written_.load();
+	}
+
+private:
+	std::atomic<bool> stop_{false};
+	std::atomic<int> written_{0};
+	std::thread t_;
+};
+
+// A recover that fences (strata's index lost under a bundle: P_b > P_H) fails the pin. The group
+// left the loop's table and went idle before open_blocking threw, so the lane destroys it while
+// another group on the loop writes; a second pin opens and fails the same way.
+void failed_open() {
+	disks d;
+	const std::string k = key_of(4);
+	{
+		process p(d);
+		auto pin = p.pin(strata::open_intent::create, k);
+		if (!pin) { return; }
+		write_range(p, *pin.payload().g, 1, 3);
+		pin.release();
+		(void)p.shut();  // its close publishes a bundle at 3
+	}
+	d.lose(k);
+	process p(d);
+	auto busy = p.pin(strata::open_intent::create, key_of(5));
+	if (!busy) { return; }
+	writer w(p, *busy.payload().g);
+	for (int i = 0; i < 2; ++i) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));  // past the failed slot's backoff
+		std::exception_ptr e;
+		auto pin = p.pin(strata::open_intent::open, k, &e);
+		if (!check(!pin, "the open over a lost index failed")) { break; }
+		check(what(e).find("P_b > P_H") != std::string::npos, "the pin fails on the bundle past strata's head: " + what(e));
+	}
+	check(p.failed_opens.load() == 2, "two pins opened the group and failed: " + std::to_string(p.failed_opens.load()));
+	check(w.stop() > 0, "the other group wrote meanwhile");
+	busy.release();
+	(void)p.shut();
+	std::printf("failed-open: %d opens failed, none left a group in the loop's table\n", p.failed_opens.load());
+}
+
+// Groups open on the catalog's lane while another writes on the loop: the constructor leaves the
+// loop's table alone and open() joins it on the loop.
+void attach() {
+	disks d;
+	process p(d);
+	auto first = p.pin(strata::open_intent::create, key_of(11));
+	if (!first) { return; }
+	writer w(p, *first.payload().g);
+	std::vector<cat_t::pin> pins;
+	for (cs::GroupId id = 12; id <= 16; ++id) {
+		auto pk = p.pin(strata::open_intent::create, key_of(id));
+		if (!pk) { break; }
+		pins.push_back(std::move(pk));
+	}
+	const int written = w.stop();
+	check(pins.size() == 5 && written > 0, "five groups opened while the first wrote: " + std::to_string(pins.size()) + ", " + std::to_string(written) + " writes");
+	for (auto& x : pins) { check(p.write(*x.payload().g, "P|a|v1"), "a group opened beside a writing one writes"); }
+	pins.clear();
+	first.release();
+	(void)p.shut();
+	check(p.payload_closes.load() == 6, "the shutdown closed every group through close_payload: " + std::to_string(p.payload_closes.load()));
+	std::printf("attach: %d writes on the first group while five opened\n", written);
+}
+
+// After a reopen: the close's bundle recovered, every value read, and one more write.
+void reopens(process& p, const std::string& k, std::uint64_t bundle, int values) {
+	auto pin = p.pin(strata::open_intent::open, k);
+	if (!pin) { return; }
+	auto& g = *pin.payload().g;
+	check(g.recovered().position == bundle, "the reopen recovers the bundle at " + std::to_string(bundle) + ": " + std::to_string(g.recovered().position));
+	const auto got = p.read(g);
+	check(got == expected(values), "the reopened group reads every value: " + show(got));
+	check(p.write(g, "P|n|v14"), "the reopened group writes");
+}
+
+// The sweep's eviction (the common close): an idle group with nothing uncommitted is closed through
+// close_payload, whose checkpoint covers everything applied.
+void sweep() {
+	disks d;
+	tuning t;
+	t.sweep_ns = 20 * ms, t.close_idle_ns = 100 * ms;
+	process p(d, t);
+	const std::string k = key_of(21);
+	std::uint64_t applied = 0;
+	{
+		auto pin = p.pin(strata::open_intent::create, k);
+		if (!pin) { return; }
+		write_range(p, *pin.payload().g, 1, 5);
+		applied = pin.payload().g->applied();
+		check(p.bare_commit(pin), "the host's commit: the sweep closes only an index with nothing uncommitted");
+	}
+	if (!p.wait_for("the sweep closes the idle group", [&] { return p.payload_calls.load() >= 1 && p.cat->table_size() == 0; })) { return; }
+	{
+		std::lock_guard l(p.record_mu);
+		check(p.payload_closes.load() == 1 && p.cat->stats().payload_close_failures == 0, "the sweep closed the group through close_payload: " + p.payload_error);
+	}
+	check(p.closed_applied.load() == applied, "the sweep's close covered everything applied");
+	check(p.cat->stats().pass_closes >= 1, "the close was the sweep's");
+	reopens(p, k, applied, 5);
+	(void)p.shut();
+	std::printf("sweep: closed at %llu applied, reopened from its bundle\n", (unsigned long long)applied);
+}
+
+// The wake bound's close (D5): a demoted slot whose wakes fail `wake_bound` times is closed through
+// close_payload, whose checkpoint covers everything applied.
+void bound() {
+	disks d;
+	tuning t;
+	t.defer_io = true;  // a demoted index owes a promote, which the wake runs
+	process p(d, t);
+	const std::string k = key_of(31);
+	std::uint64_t applied = 0;
+	std::uint32_t idx = 0;
+	{
+		auto pin = p.pin(strata::open_intent::create, k);
+		if (!pin) { return; }
+		write_range(p, *pin.payload().g, 1, 5);
+		applied = pin.payload().g->applied();
+		check(p.bare_commit(pin), "the host's commit: a segment for the wake to promote");
+		idx = pin.where().slot;
+	}
+	step("the demotion");
+	check(p.cat->begin_demote(idx), "the idle slot demotes");
+	if (!p.wait_for("the slot is owed", [&] { return cat_t::state_of(p.cat->word_of(idx)) == strata::slot_state::owed; })) { return; }
+	check(p.cat->index_of(idx)->promote_owed(), "the demoted index owes its promote");
+	p.fail_segments.store(EMFILE);
+	const bool reached = p.wait_for("the wakes fail to the bound", [&] {
+		if (auto r = p.cat->try_pin(k); r.status == cat_t::try_status::pinned) { return !check(false, "a wake promoted with its segments failing"); }
+		return p.cat->wake_failures_of(idx) >= 8;
+	});
+	p.fail_segments.store(0);
+	if (!reached) { return; }
+	if (!p.wait_for("the bound close begins", [&] { return p.cat->begin_bound_close(idx); })) { return; }
+	if (!p.wait_for("the bound close ends", [&] { return p.payload_calls.load() >= 1 && p.cat->table_size() == 0; })) { return; }
+	{
+		std::lock_guard l(p.record_mu);
+		check(p.payload_closes.load() == 1 && p.cat->stats().payload_close_failures == 0, "the bound close closed the group through close_payload: " + p.payload_error);
+	}
+	check(p.cat->stats().bound_closes == 1, "the close was the bound's");
+	check(p.closed_applied.load() == applied, "the bound close covered everything applied");
+	reopens(p, k, applied, 5);
+	(void)p.shut();
+	std::printf("bound: %u wakes failed, closed at %llu applied, reopened from its bundle\n", 8u, (unsigned long long)applied);
+}
+
+// A fenced index's replace close (F4): close_payload runs, the group's checkpoint cannot commit
+// over the fenced index (counted), and the reopen replays everything from the log (D16).
+void replace() {
+	disks d;
+	tuning t;
+	t.sweep_ns = 20 * ms, t.close_idle_ns = 100 * ms;
+	process p(d, t);
+	const std::string k = key_of(41);
+	{
+		auto pin = p.pin(strata::open_intent::create, k);
+		if (!pin) { return; }
+		write_range(p, *pin.payload().g, 1, 3);
+		check(p.bare_commit(pin), "the first commit");
+		write_range(p, *pin.payload().g, 4, 5);
+		d.of(k).add_fault({fl::op::sync, 1, EIO});  // the log's sync: a durability failure (SR4)
+		const bool committed = p.bare_commit(pin);
+		d.of(k).clear_faults();
+		check(!committed && pin.index().fenced(), "a failed sync under the host's commit fences the index");
+	}
+	if (!p.wait_for("the sweep replaces the fenced index", [&] { return p.cat->stats().replaces >= 1 && p.cat->table_size() == 0; })) { return; }
+	{
+		std::lock_guard l(p.record_mu);
+		check(p.payload_calls.load() == 1, "the replace close ran close_payload: " + std::to_string(p.payload_calls.load()));
+		check(p.payload_closes.load() == 0 && p.cat->stats().payload_close_failures == 1, "the group's close over a fenced index fails, counted: " + p.payload_error);
+	}
+	reopens(p, k, 0, 5);
+	(void)p.shut();
+	std::printf("replace: the fenced index replaced, its group closed through close_payload, all replayed\n");
+}
+
+// The catalog's bare commit makes P_H durable over file-set bytes no sync covered (D169); power goes
+// off, so the shutdown's checkpoint fails. After a crash, the index stands at P_H with no bundle,
+// and D16's replay from P_b rewrites the file effects strata skips.
+void bare_commit_crash(std::uint64_t seed) {
+	disks d;
+	const std::string k = key_of(51), at = "seed " + std::to_string(seed) + ": ";
+	{
+		process p(d);
+		auto pin = p.pin(strata::open_intent::create, k);
+		if (!pin) { return; }
+		write_range(p, *pin.payload().g, 1, 5);
+		check(pin.index().uncommitted() && p.bare_commit(pin), at + "the bare commit over unsynced file effects");
+		d.of(k).power_off_after(0);
+		pin.release();
+		const auto r = p.shut();
+		check(r.uncommitted.size() == 1 && r.uncommitted[0] == k, at + "the shutdown names the key whose close failed");
+	}
+	d.host.crash(seed);
+	d.of(k).crash(seed * 3 + 1);
+	{
+		fl::io io(d.of(k));
+		blob::index_type::options o;
+		o.keyed = true;
+		o.storage = &d.storage;
+		auto ix = group_type::open_index(io, o, uuid);
+		check(ix.applied().index == 5, at + "the bare commit's P_H is durable: " + std::to_string(ix.applied().index));
+		ix.close();
+	}
+	process p(d);
+	auto pin = p.pin(strata::open_intent::open, k);
+	if (!pin) { return; }
+	auto& g = *pin.payload().g;
+	check(g.recovered().position == 0, at + "no bundle: " + std::to_string(g.recovered().position));
+	const auto got = p.read(g);
+	check(got == expected(5), at + "every acknowledged value after the crash: " + show(got));
+	pin.release();
+	(void)p.shut();
+}
+
+void bare_commit_crashes() {
+	for (std::uint64_t seed = 1; seed <= 16; ++seed) { bare_commit_crash(seed); }
+	std::printf("bare-commit-crash: 16 seeds recovered every value\n");
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
 	watchdog w;
 	dog = &w;
-	run();
+	const std::string only = argc > 1 ? argv[1] : "";
+	const std::pair<const char*, void (*)()> cases[] = {
+		{"borrow", borrow}, {"failed-open", failed_open}, {"attach", attach}, {"sweep", sweep}, {"bound", bound}, {"replace", replace}, {"bare-commit-crash", bare_commit_crashes},
+	};
+	bool ran = false;
+	for (const auto& [name, fn] : cases) {
+		if (!only.empty() && only != name) { continue; }
+		ran = true;
+		const int before = failures;
+		fn();
+		std::printf("group-catalog %s: %s\n", name, failures == before ? "ok" : "FAIL");
+	}
+	if (!ran) {
+		std::fprintf(stderr, "group-catalog: no case %s\n", only.c_str());
+		return 2;
+	}
 	step("exit");
 	if (failures) {
 		std::printf("group-catalog: %d failure(s)\n", failures);
