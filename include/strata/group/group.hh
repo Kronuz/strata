@@ -175,14 +175,13 @@ public:
 		  handoff_after_(c.options.timing.election_max * 1'000'000), opening_(std::make_unique<config>(std::move(c))), files_(directory), app_(&app), chore_(chore), ix_(&index) {
 		handoff_.self = this;
 		handoff_.fire = &handoff_fired;
-		loop_->attach(id_, *this);
 	}
 	group(const group&) = delete;
 	group& operator=(const group&) = delete;
-	// Destroyed with its chore idle and no call in flight: after close(), or once fenced and the
-	// chore has drained (a stopped process).
-	// A closed group left its loop on the loop, so a host may destroy it on any thread (the
-	// catalog's retire does).
+	// Destroyed with its chore idle and no call in flight: never opened, after close() or a failed
+	// open(), or once fenced and the chore has drained (a stopped process). Only open() joins the
+	// loop's table and close() or a failed open() leaves it, both on the loop, so a host may
+	// destroy a group it never opened, closed or failed to open on any thread (the catalog does).
 	~group() override {
 		if (!attached_) { return; }
 		if (handoff_.armed()) { loop_->scheduler().cancel(handoff_); }
@@ -192,17 +191,22 @@ public:
 	cs::GroupId id() const noexcept { return id_; }
 	loop& owner() const noexcept { return *loop_; }
 
-	// Opens the group: recovers it when the host's table holds it, else creates it. On the loop.
-	// A failed open fences the group and closes its row, so the id opens again on this Driver.
-	// Started on the loop, its Driver call enters before a request started after it, which so
-	// rides the reopen's turn (consensus quiescence.md).
+	// Opens the group: joins the loop's table, then recovers it when the host's table holds it,
+	// else creates it. On the loop. A failed open fences the group, closes its row, so the id opens
+	// again on this Driver, and tears down as close() does before it throws. Started on the loop,
+	// its Driver call enters before a request started after it, which so rides the reopen's turn
+	// (consensus quiescence.md).
 	task::task<void> open() {
 		if (task::current() != loop_->scheduler()) { co_await task::schedule_on{loop_->scheduler()}; }
 		if (!opening_) { throw std::logic_error("strata::group: the group was opened"); }
+		loop_->attach(id_, *this);  // another group with this id: refused, nothing begun
+		attached_ = true;
 		auto& driver = loop_->driver();
-		driver.open(id_, std::move(opening_->options));
 		std::exception_ptr failed;
+		bool row = false;
 		try {
+			driver.open(id_, std::move(opening_->options));
+			row = true;
 			// Recovery goes first: the ranges Core delivers meanwhile wait behind it.
 			hold_.store(true);
 			std::optional<bundle> restored;
@@ -237,13 +241,17 @@ public:
 		}
 		opening_.reset();
 		if (!failed) { co_return; }
+		closing_.store(true);
 		fence_local(error_text(failed));
 		co_await task::schedule_on{loop_->scheduler()};
 		// The open's error is the answer; a close that fails too leaves the row, which a reopen
 		// then refuses ("open on this Driver").
-		try {
-			co_await driver.close(id_);
-		} catch (...) {}
+		if (row) {
+			try {
+				co_await driver.close(id_);
+			} catch (...) {}
+		}
+		co_await leave();
 		std::rethrow_exception(failed);
 	}
 
@@ -323,11 +331,7 @@ public:
 		} catch (...) {
 			if (!failed) { failed = std::current_exception(); }
 		}
-		if (task::current() != loop_->scheduler()) { co_await task::schedule_on{loop_->scheduler()}; }
-		if (handoff_.armed()) { loop_->scheduler().cancel(handoff_); }
-		loop_->detach(id_);
-		attached_ = false;
-		co_await tear_down();
+		co_await leave();
 		if (failed) { std::rethrow_exception(failed); }
 		if (fenced_.load()) { throw group_fenced("strata::group: closed fenced: " + fence_reason()); }
 	}
@@ -514,8 +518,17 @@ private:
 	};
 	idle_awaiter chore_idle() { return idle_awaiter{this, {}, {}}; }
 
-	// close()'s end, on the loop: items refused from here, the queue answered `closed`, every
-	// waiter failed; once the chore is idle the file set closes, exclusive by then.
+	// The end of close() and of a failed open(): the group leaves the loop's table on the loop and
+	// tears down, so the host may destroy it on any thread once it returns.
+	task::task<void> leave() {
+		if (task::current() != loop_->scheduler()) { co_await task::schedule_on{loop_->scheduler()}; }
+		if (handoff_.armed()) { loop_->scheduler().cancel(handoff_); }
+		loop_->detach(id_);
+		attached_ = false;
+		co_await tear_down();
+	}
+	// On the loop: items refused from here, the queue answered `closed`, every waiter failed; once
+	// the chore is idle the file set closes, exclusive by then.
 	task::task<void> tear_down() {
 		work_queue left;
 		{
@@ -534,7 +547,8 @@ private:
 	}
 
 	void blocking(task::task<void> work, const char* what) {
-		if (loop_->scheduler().runs_here() || chore_.runs_here() || ix_->lease().held_here()) {
+		const auto here = task::current();  // a scheduler pumped inline is not runs_here()
+		if (loop_->scheduler().runs_here() || chore_.runs_here() || here == loop_->scheduler() || here == chore_ || ix_->lease().held_here()) {
 			throw std::logic_error(std::string("strata::group: a blocking ") + what + " on the loop, the group's chore or under the index's write lease waits on itself");
 		}
 		std::mutex m;
@@ -1043,7 +1057,7 @@ private:
 	std::uint64_t replacement_pool_;   // the admission's pool that reservation comes from
 	std::uint64_t handoff_after_;      // one election timeout, ns: a stalled leader's hand-off
 	handoff_timer handoff_;            // armed on the loop only while stalled
-	bool attached_ = true;             // in the loop's table: the loop's, until close() leaves it
+	bool attached_ = false;            // in the loop's table: the loop's, from open() until close() or its failure
 	std::unique_ptr<config> opening_;  // what open() needs, freed once it returns
 	std::optional<std::string> closed_record_;  // the loop's: taken at close
 	file_set files_;

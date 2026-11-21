@@ -22,8 +22,9 @@
 // closed state it resumes its term, no election, and with `reopen-turn` a reopen and the write
 // issued with it share one turn: as many barriers as a write to an open group (A7).
 //
-// failed-open: a reopen over a lost directory fails closed (P_b > P_H) and closes its row; the
-// same process then reopens the group over its directory and reads every acknowledged entry.
+// failed-open: a reopen over a lost directory fails closed (P_b > P_H), closes its row and leaves
+// the loop's table; the same process then reopens the group over its directory and reads every
+// acknowledged entry.
 // `group_lifetime_test [held|points|reopen|reopen-turn|failed-open]`.
 #include "blob_app.hh"
 #include "group_catalog_borrow.hh"
@@ -629,6 +630,7 @@ void failed_open() {
 	auto p = std::make_unique<process>(d, app);
 	const auto open_group = [&](fl::filesystem& dir) {
 		p->g.emplace(*p->lp, config(gid, d.storage), std::make_unique<fl::io>(dir), d.storage, uuid(gid), app, task::scheduler_ref::of(p->chore_s));
+		check(!p->lp->find(gid), "the constructor leaves the loop's table to open()");
 		auto o = start(p->ref(), p->g->open());
 		p->pump([&] { return o->done.load(); });
 		return o->error;
@@ -650,6 +652,7 @@ void failed_open() {
 	check(error != nullptr, "an open over the lost directory fails closed");
 	check(what(error).find("P_b > P_H") != std::string::npos, "it fails on the bundle past strata's head: " + what(error));
 	check(p->g->fenced(), "the failed group is fenced");
+	check(!p->lp->find(gid), "the failed open left the loop's table");
 	check(p->lp->driver().groups() == 0, "the failed open closed its row: " + std::to_string(p->lp->driver().groups()) + " rows");
 	const auto again = open_group(d.dir);
 	check(!again, "the same process reopens the group: " + what(again));
