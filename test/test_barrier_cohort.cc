@@ -1,9 +1,10 @@
 // Group commit (docs/design/rocksdb-parity.md D5; turn-log-parity A4): K writers on I indexes of a
-// host with L loops, one served turn log each, commit over slow barriers, counted per writer. In
-// a closed loop, once the writers fall into step, each commit rides the barrier after its previous
-// acknowledgement, never the one after: writers sharing an index (one group) too, on one log and
-// on a log per loop. Writers that think past the cohort bound arrive during a barrier, and each
-// commit rides at most the barrier in flight at its join and the next.
+// host with L loops, one served turn log each, commit over slow barriers, counted per writer from
+// the turns the log records, not from time. A writer a turn released rides the next turn unless
+// it was not back when that turn started, and a turn starts without a writer it released only
+// once its cohort wait runs out: so the turns released writers missed, summed per log, are at
+// most the log's late arrivals. Writers sharing an index (one group) too, on one log and on a log
+// per loop, and writers that think past the cohort bound, joining during a barrier.
 // Usage: test_barrier_cohort [K I L think] (default: every configuration in main).
 #include "kv_test.hh"
 #include "strata/core/turn_seal.hh"
@@ -22,7 +23,7 @@ namespace {
 namespace jr = kronuz::journal;
 
 constexpr std::uint64_t command_bytes = 32 << 10;
-constexpr int rounds = 24, settle = 3;  // the first rounds fall into step from a ragged start
+constexpr int rounds = 24;
 constexpr auto barrier = std::chrono::milliseconds(64);
 
 jr::Identity host_identity() {
@@ -77,7 +78,6 @@ void run(const config& c) {
 	std::vector<std::unique_ptr<faultfs::filesystem>> fss;
 	std::vector<std::unique_ptr<faultfs::io>> ios;
 	std::vector<kv_index> ixs;
-	std::vector<turn_sealer*> logs;
 	ixs.reserve(std::size_t(c.indexes));
 	std::uint64_t group = 0;
 	for (int i = 0; i < c.indexes; ++i) {
@@ -91,7 +91,6 @@ void run(const config& c) {
 		o.log_group = group;
 		o.command_bytes = command_bytes;
 		ixs.push_back(kv_index::create(*ios.back(), o, uuid_of(("cohort-" + std::to_string(i)).c_str())));
-		logs.push_back(sealers[loop].get());
 	}
 	for (auto& s : sealers) {
 		while (s->turn()) {}  // the joins' records
@@ -100,10 +99,9 @@ void run(const config& c) {
 	std::vector<std::thread> loops;
 	for (auto& s : sealers) { loops.emplace_back([s = s.get()] { s->serve(); }); }
 
-	// waited[w][r]: the turns writer w's log wrote between its acknowledgement r - 1 (its start
-	// for r = 0) and acknowledgement r; with `think`, between write r's join and its
-	// acknowledgement.
-	std::vector<std::vector<std::uint64_t>> waited(static_cast<std::size_t>(c.writers), std::vector<std::uint64_t>(rounds));
+	// acks[w][r]: the turn that made writer w's write r durable, and whether it released the
+	// writer from a wait.
+	std::vector<std::vector<turn_sealer::ack>> acks(std::size_t(c.writers), std::vector<turn_sealer::ack>(rounds));
 	std::vector<std::mutex> owners(std::size_t(c.indexes));  // writers sharing an index apply in turn
 	std::latch start(c.writers);
 	std::vector<std::thread> ts;
@@ -111,17 +109,14 @@ void run(const config& c) {
 		ts.emplace_back([&, w] {
 			const std::size_t i = std::size_t(w % c.indexes);
 			kv_index& ix = ixs[i];
-			turn_sealer& log = *logs[i];
 			const std::string key = "w" + std::to_string(w);
 			std::minstd_rand rng(std::uint32_t(w) + 1);
 			start.arrive_and_wait();
-			std::uint64_t last = log.turns_written();
 			for (int r = 0; r < rounds; ++r) {
 				if (c.think) {
 					// 1/8 to 3/4 of a barrier: past the cohort bound (1/16), so the next turn
 					// starts without this writer and it joins during the barrier.
 					std::this_thread::sleep_for(barrier / 8 + barrier * int(rng() % 64) / 102);
-					last = log.turns_written();
 				}
 				files::position at;
 				{
@@ -130,9 +125,7 @@ void run(const config& c) {
 					at = ix.applied();
 				}
 				ix.await_durable(at);
-				const std::uint64_t now = log.turns_written();
-				waited[std::size_t(w)][std::size_t(r)] = now - last;
-				last = now;
+				acks[std::size_t(w)][std::size_t(r)] = turn_sealer::last_ack();
 				// Acknowledged: durable through its position, and the writer reads its write.
 				const std::lock_guard own(owners[i]);
 				const auto got = ix.get(key);
@@ -146,30 +139,44 @@ void run(const config& c) {
 	for (auto& t : loops) { t.join(); }
 	log_fs.sync_latency({});
 
-	std::uint64_t hist[4] = {}, turns = 0;
+	// Per log, the turns its released writers missed: write r, acknowledged d turns after write
+	// r - 1's acknowledgement released the writer, missed d - 1. A write after an acknowledgement
+	// that released nothing (its turn was written before the writer waited) owed no arrival.
+	std::vector<std::uint64_t> missed(c.loops), unowed(c.loops);
+	std::uint64_t hist[4] = {}, turns = 0, late = 0, owed_none = 0;
 	for (auto& s : sealers) { turns += s->turns_written(); }
 	for (int w = 0; w < c.writers; ++w) {
+		const std::uint32_t loop = std::uint32_t(w % c.indexes) % c.loops;
 		std::printf("  writer %d:", w);
-		for (int r = 0; r < rounds; ++r) {
-			const std::uint64_t n = waited[std::size_t(w)][std::size_t(r)];
-			std::printf(" %llu", (unsigned long long)n);
-			if (c.think || r >= settle) { ++hist[std::min<std::uint64_t>(n, 3)]; }
+		for (int r = 1; r < rounds; ++r) {
+			const auto& prev = acks[std::size_t(w)][std::size_t(r - 1)];
+			const auto& now = acks[std::size_t(w)][std::size_t(r)];
+			CHECK(now.turn > prev.turn);  // each write rides a turn after the last one's
+			const std::uint64_t d = now.turn - prev.turn;
+			std::printf(" %llu%s", (unsigned long long)d, prev.released ? "" : "*");
+			++hist[std::min<std::uint64_t>(d, 3)];
+			if (!prev.released) {
+				++unowed[loop];
+			} else if (d > 1) {
+				missed[loop] += d - 1;
+			}
 		}
 		std::printf("\n");
 	}
 	const char* name = c.think ? " think" : "";
-	std::printf("K=%d I=%d L=%u%s: %llu commits took 1 turn, %llu 2, %llu 3 or more; %llu turns\n", c.writers, c.indexes, c.loops, name, (unsigned long long)hist[1],
-		(unsigned long long)hist[2], (unsigned long long)hist[3], (unsigned long long)turns);
 	const int before = failures;
-	if (c.think) {
-		// Each commit rides the barrier in flight at its join, if any, and the next: never a third.
-		CHECK(hist[0] == 0 && hist[3] == 0);
-	} else {
-		// Each writer's commit rides exactly the next barrier: none waits a second one, and none
-		// shares a barrier with its previous acknowledgement.
-		CHECK(hist[0] == 0 && hist[2] == 0 && hist[3] == 0);
-		CHECK(hist[1] == std::uint64_t(c.writers) * std::uint64_t(rounds - settle));
+	for (std::uint32_t l = 0; l < c.loops; ++l) {
+		const std::uint64_t allowed = sealers[l]->late_arrivals();
+		late += allowed;
+		owed_none += unowed[l];
+		if (missed[l] > allowed) {
+			std::fprintf(stderr, "  loop %u: released writers missed %llu turns, %llu late arrivals\n", l, (unsigned long long)missed[l], (unsigned long long)allowed);
+		}
+		CHECK(missed[l] <= allowed);
 	}
+	std::printf("K=%d I=%d L=%u%s: %llu commits took 1 turn, %llu 2, %llu 3 or more (%llu marked *: owed none); %llu late arrivals; %llu turns\n", c.writers, c.indexes,
+		c.loops, name, (unsigned long long)hist[1], (unsigned long long)hist[2], (unsigned long long)hist[3], (unsigned long long)owed_none, (unsigned long long)late,
+		(unsigned long long)turns);
 	if (failures != before) { std::fprintf(stderr, "K=%d I=%d L=%u%s failed\n", c.writers, c.indexes, c.loops, name); }
 	std::fflush(stdout);
 }

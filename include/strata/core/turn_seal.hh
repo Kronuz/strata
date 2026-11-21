@@ -177,6 +177,7 @@ public:
 		if (opened) { turns_.wake(); }
 		const std::lock_guard lock(mu_);
 		woken_ = woken_ || opened;
+		--owing_;
 		if (o.turn == turns_written_) { ++arrivals_; }
 		cv_.notify_all();
 	}
@@ -185,11 +186,16 @@ public:
 	bool turn() {
 		const std::lock_guard turn(turn_mu_);
 		std::vector<std::pair<std::uint64_t, entry>> groups;
+		std::size_t late = 0;
 		{
 			const std::lock_guard lock(mu_);
 			if (failure_) { std::rethrow_exception(failure_); }
 			woken_ = false;
 			groups.assign(groups_.begin(), groups_.end());
+			// Released writers not back as this turn starts: the last turn's, once its cohort wait
+			// ran out, and any an earlier turn released.
+			const std::size_t missing = released_ - std::min(arrivals_, released_);
+			late = owing_ - std::min(missing, owing_) + (expired_ ? missing : 0);
 		}
 		const std::uint64_t before = turns_.log().last_turn();
 		const auto start = std::chrono::steady_clock::now();
@@ -212,12 +218,18 @@ public:
 		}
 		const std::lock_guard lock(mu_);
 		for (const auto& [group, e] : groups) {
-			if (auto it = groups_.find(group); it != groups_.end() && it->second.done == e.done) { it->second.durable = e.durable; }
+			if (auto it = groups_.find(group); it != groups_.end() && it->second.done == e.done && it->second.durable != e.durable) {
+				it->second.durable = e.durable;
+				it->second.turn = turns_written_ + 1;
+			}
 		}
 		last_barrier_ = barrier;
+		late_ += late;
 		++turns_written_;
 		cohort_ = released_writers();
+		owing_ += released_;
 		arrivals_ = 0;
+		expired_ = false;
 		cv_.notify_all();
 		return true;
 	}
@@ -226,6 +238,7 @@ public:
 	// journal::run's blocking entry does. A failed turn throws outcome_unknown (D9); a group that
 	// closes first, or a sequence a closed life retired, throws group_closed, as durable() does.
 	void await(std::uint64_t group, std::uint64_t sequence) {
+		std::uint64_t released = 0;
 		for (;;) {
 			{
 				std::unique_lock lock(mu_);
@@ -235,7 +248,10 @@ public:
 					if (it == groups_.end() && !closed_.contains(group)) { throw std::logic_error("strata: a turn-log wait on a group with no sealer"); }
 					throw kronuz::journal::group_closed(group, sequence);
 				}
-				if (it->second.durable >= sequence) { return; }
+				if (it->second.durable >= sequence) {
+					acked_here() = {released ? released : it->second.turn, released != 0};
+					return;
+				}
 				if (served_) {
 					parked p(*this, {group, sequence});
 					cv_.wait(lock, [&] {
@@ -243,6 +259,7 @@ public:
 						return failure_ || !served_ || at == groups_.end() || sequence <= retired_locked(group) || at->second.durable >= sequence;
 					});
 					p.owe();
+					released = p.w.released;
 					continue;
 				}
 			}
@@ -309,7 +326,7 @@ public:
 				// D5: the next turn waits for the joins of the writers this one released, at
 				// most 1/16 of its barrier, so they ride it rather than the one after.
 				std::unique_lock lock(mu_);
-				cv_.wait_for(lock, last_barrier_ / 16, [&] { return stopping_ || arrivals_ >= cohort_; });
+				expired_ = !cv_.wait_for(lock, last_barrier_ / 16, [&] { return stopping_ || arrivals_ >= cohort_; });
 			}
 			std::unique_lock lock(mu_);
 			cv_.wait(lock, [&] { return woken_ || stopping_; });
@@ -330,6 +347,20 @@ public:
 		const std::lock_guard lock(mu_);
 		return turns_written_;
 	}
+	// The released writers each written turn started without, summed (D5, tests): those its
+	// cohort wait gave up on at its bound, and those an earlier turn released. A writer the turn
+	// waited for and started without, its bound not run out, is never counted.
+	std::uint64_t late_arrivals() const {
+		const std::lock_guard lock(mu_);
+		return late_;
+	}
+	// This thread's last await() (tests): the turn that made it durable, and whether that turn
+	// released it from a wait (then it owed the next turn an arrival).
+	struct ack {
+		std::uint64_t turn = 0;
+		bool released = false;
+	};
+	static ack last_ack() noexcept { return acked_here(); }
 	std::uint32_t block_bytes() const noexcept { return block_; }
 	// The retention window, retain_segments - 1 segments, and the groups that logged commands
 	// since their last checkpoint, which share it (rocksdb-parity D2 item 2).
@@ -368,19 +399,23 @@ private:
 		thread_local owed o;
 		return o;
 	}
-	// Under mu_, at a turn's end: the waiting writers it released, each marked with the turn.
-	// Each joins a record when it returns (joined()); a writer in await_sealed() counts once its
-	// record sealed.
+	static ack& acked_here() noexcept {
+		thread_local ack a;
+		return a;
+	}
+	// Under mu_, at a turn's end: the waiting writers it released, each marked with the turn, in
+	// released_, and the cohort the next turn waits for, one per writer. Each joins a record when
+	// it returns (joined()); a writer in await_sealed() counts once its record sealed.
 	std::size_t released_writers() {
-		std::size_t n = 0;
+		released_ = 0;
 		for (waiter* w : waiters_) {
 			const auto it = groups_.find(w->group);
 			if (w->ready ? w->ready(w->arg) : it != groups_.end() && it->second.durable >= w->sequence) {
 				w->released = turns_written_;
-				++n;
+				++released_;
 			}
 		}
-		return n;
+		return released_;
 	}
 	std::uint64_t retired_locked(std::uint64_t group) const {
 		const auto it = closed_.find(group);
@@ -402,6 +437,7 @@ private:
 		std::shared_ptr<watcher> done;
 		const void* owner = nullptr;
 		std::uint64_t durable = 0;
+		std::uint64_t turn = 0;  // the turn that last moved `durable`
 	};
 	kronuz::journal::Host& host_;
 	kronuz::journal::TurnDriver& turns_;
@@ -418,8 +454,9 @@ private:
 	std::vector<waiter*> waiters_;
 	std::chrono::steady_clock::duration last_barrier_{};
 	std::size_t cohort_ = 0, arrivals_ = 0;  // D5: the writers the last turn released, and those back since
-	std::uint64_t turns_written_ = 0;
-	bool woken_ = false, served_ = false, stopping_ = false;
+	std::size_t released_ = 0, owing_ = 0;  // the writers the last turn released; all released, not back
+	std::uint64_t turns_written_ = 0, late_ = 0;
+	bool woken_ = false, served_ = false, stopping_ = false, expired_ = false;
 };
 
 }  // namespace strata
