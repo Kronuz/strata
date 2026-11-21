@@ -167,12 +167,12 @@ void move_under_lease() {
 
 // --- S2: close_ready() ----------------------------------------------------------------------
 
-std::uint64_t disk_bytes(const faultfs::filesystem& fs) {
+std::uint64_t disk_bytes(const fl::filesystem& fs) {
 	std::uint64_t n = 0;
 	for (const auto& name : fs.list()) { n += fs.view(name).size(); }
 	return n;
 }
-std::size_t segment_files(const faultfs::filesystem& fs) {
+std::size_t segment_files(const fl::filesystem& fs) {
 	std::size_t n = 0;
 	for (const auto& name : fs.list()) { n += name.starts_with("seg-"); }
 	return n;

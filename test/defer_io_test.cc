@@ -56,7 +56,7 @@ bool accepted(const verdict& v) { return v.result == verdict::accepted; }
 
 // A program's device calls: how many IO and File calls `f` made.
 template <class F>
-std::uint64_t calls_in(const faultfs::filesystem& fs, F&& f) {
+std::uint64_t calls_in(const fl::filesystem& fs, F&& f) {
 	const std::uint64_t before = fs.calls();
 	f();
 	return fs.calls() - before;
@@ -84,8 +84,8 @@ kv_index::options base(bool defer) {
 // answer is flush_owed, nothing applied, no device call, and the position unmoved: the same
 // transaction at the same position is accepted after refresh(). Without it apply refreshes inline.
 void flush_owed(bool defer) {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	kv_index::options o = base(defer);
 	o.buffer_share = 4096;
 	auto ix = kv_index::create(io, o, uuid_of("flush-owed"));
@@ -120,8 +120,8 @@ void flush_owed(bool defer) {
 // record lane it cannot fit) is invalid on an empty buffer, and after at most one flush_owed on a
 // buffer that holds something; it never repeats once refresh() emptied the buffer.
 void oversize_ends() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	kv_index::options o = base(true);
 	o.buffered_docs_cap = 2;
 	auto ix = kv_index::create(io, o, uuid_of("oversize"));
@@ -145,8 +145,8 @@ void oversize_ends() {
 	// A lane that cannot hold the transaction even when empty.
 	kv_index::options l = base(true);
 	l.lane_chunks_cap = 1;
-	faultfs::filesystem fs2;
-	faultfs::io io2(fs2);
+	fl::filesystem fs2;
+	fl::io io2(fs2);
 	auto small = kv_index::create(io2, l, uuid_of("oversize-lane"));
 	std::vector<operation> many;
 	for (int i = 0; i < 100000; ++i) { many.push_back(replace(key_of(std::size_t(i)), "v")); }
@@ -164,8 +164,8 @@ void oversize_ends() {
 
 // Rejected records in the buffer count as something to flush, and one refresh() clears them.
 void rejected_buffer_ends() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	kv_index::options o = base(true);
 	o.buffer_share = 1;  // any buffered byte is past it
 	auto ix = kv_index::create(io, o, uuid_of("rejected"));
@@ -190,8 +190,8 @@ void rejected_buffer_ends() {
 // with no device call, reclaim_for_space() frees them, and the retry is accepted. Returns the
 // device calls apply made while it answered drain_owed (or drained inline).
 struct drain_world {
-	faultfs::filesystem fs;
-	faultfs::io io{fs};
+	fl::filesystem fs;
+	fl::io io{fs};
 	byte_budget storage;
 	kv_index::options o;
 	std::optional<kv_index> ix;
@@ -278,7 +278,7 @@ void drain_ends() {
 	{
 		drain_world w(true, 150 * 1024);
 		w.obsolete();
-		w.fs.add_fault({faultfs::op::remove, 1, EIO, false});  // the first removal fails; the queue keeps its file
+		w.fs.add_fault({fl::op::remove, 1, EIO, false});  // the first removal fails; the queue keeps its file
 		const verdict v = w.until_short(100);
 		CHECK(v.result == verdict::drain_owed);
 		(void)w.ix->reclaim_for_space();
@@ -328,8 +328,8 @@ void merge_publication_owed(bool defer) {
 	WorkPool pool(po);
 	work_pool_executor ex(pool);
 	reader_registry reg(4);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	kv_index::options o = base(defer);
 	o.background = &ex;
 	o.readers = &reg;
@@ -368,8 +368,8 @@ void merge_publication_owed(bool defer) {
 // with defer_io the apply reads nothing and retention stays blocked until check_in().
 void retention_read_owed(bool defer) {
 	reader_registry reg(4);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	kv_index::options o = base(defer);
 	o.readers = &reg;
 	o.retained_predecessors = 1;
@@ -396,7 +396,7 @@ void retention_read_owed(bool defer) {
 		CHECK(index_detail::manifest_name(*index_detail::log_holding(io)) != pinned_log);
 		second.close();
 	}
-	fs.add_media_fault(pinned_log, faultfs::media::read_error, 0, ~std::uint64_t(0), 1);
+	fs.add_media_fault(pinned_log, fl::media::read_error, 0, ~std::uint64_t(0), 1);
 	auto ix = kv_index::open(io, o);
 	CHECK(!ix.retention_blocked());  // the open runs no retention (manifest-log D6.6)
 	CHECK(accepted(ix.apply(tx({replace("p", "1")}), {})));
@@ -427,8 +427,8 @@ void retention_read_owed(bool defer) {
 // with no further write; the idle task runs it.
 void reclaim_after_release() {
 	reader_registry reg(4);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	kv_index::options o = base(true);
 	o.readers = &reg;
 	o.reclaim_step = 4096;
@@ -471,8 +471,8 @@ void default_path_unchanged() {
 		return h;
 	};
 	std::string verdicts;
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	byte_budget storage(150 * 1024);
 	kv_index::options o = base(false);
 	o.identity_seed = 7;
@@ -521,8 +521,8 @@ void chore_waits_on_merge_chore(unsigned threads, unsigned reserve, unsigned wid
 	po.name_format = "dio{:02}";
 	WorkPool pool(po);
 	work_pool_executor ex(pool, width);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	kv_index::options o = base(true);
 	o.background = &ex;
 	o.policy.segments_per_tier = 2;
@@ -562,8 +562,8 @@ void chore_waits_on_merge_chore(unsigned threads, unsigned reserve, unsigned wid
 // them at open, so apply's first read of an existing segment makes no device call.
 void lazy_segments_refused() {
 	for (bool defer : {true, false}) {
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		kv_index::options o = base(defer);
 		o.auto_merge = false;
 		o.buffer_share = 1 << 20;

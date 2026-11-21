@@ -3,7 +3,7 @@
 //   field_table 2000 100000
 // Written bytes are the sum, over every log the run created, of the log's largest size (a log
 // only grows); resident bytes are the heap the table holds, from a counting allocator.
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 #include "strata/core/index.hh"
 
 #include <atomic>
@@ -34,14 +34,16 @@ void operator delete(void* p) noexcept {
 }
 void operator delete(void* p, std::size_t) noexcept { operator delete(p); }
 
+namespace fl = kronuz::faultlab;
+
 using namespace strata;
 using index_t = basic_index<document_layout>;
 
 int main(int argc, char** argv) {
 	for (int a = 1; a < argc; ++a) {
 		const std::size_t n = std::strtoull(argv[a], nullptr, 10);
-		faultfs::filesystem fs;
-		faultfs::io io{fs};
+		fl::filesystem fs;
+		fl::io io{fs};
 		index_t::options o;
 		o.keyed = true;
 		o.auto_merge = false;

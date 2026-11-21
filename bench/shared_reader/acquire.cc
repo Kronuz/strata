@@ -5,7 +5,7 @@
 // comparison arm, a shared_ptr loaded atomically (Lucene's acquire shape, rejected alternative 1).
 // Views and publication come in step 1's item 3; here the pointer is published once.
 //   acquire [threads...] [seconds per arm]   default: 1 2 4 8, 1 s
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 #include "strata/core/hazard.hh"
 #include "strata/core/index.hh"
 
@@ -19,6 +19,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+namespace fl = kronuz::faultlab;
 
 using namespace strata;
 using kv_index = basic_index<document_layout>;
@@ -83,8 +85,8 @@ int main(int argc, char** argv) {
 	}
 	if (counts.empty()) { counts = {1, 2, 4, 8}; }
 
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	kv_index::options o;
 	o.keyed = true;
 	auto ix = kv_index::create(io, o, std::array<char, 16>{'s', 'r', '-', 'a', 'c', 'q'});

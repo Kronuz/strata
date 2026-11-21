@@ -132,7 +132,7 @@ private:
 
 class wio final : public kronuz::journal::IO {
 public:
-	wio(faultfs::io& in, hooks& h) : in_(&in), h_(&h) {}
+	wio(fl::io& in, hooks& h) : in_(&in), h_(&h) {}
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_owner(bool c) override { return in_->acquire_owner(c); }
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_owner() override { return in_->acquire_directory_owner(); }
 	kronuz::journal::FilesystemClass directory_filesystem() const override { return in_->directory_filesystem(); }
@@ -159,7 +159,7 @@ public:
 	void sync_directory() override { in_->sync_directory(); }
 
 private:
-	faultfs::io* in_;
+	fl::io* in_;
 	hooks* h_;
 };
 
@@ -171,8 +171,8 @@ std::string key_of(std::size_t i) {
 
 // A filesystem, its wrapper and a registry, shared by the cases.
 struct fixture {
-	faultfs::filesystem fs;
-	faultfs::io inner{fs};
+	fl::filesystem fs;
+	fl::io inner{fs};
 	hooks h;
 	wio io{inner, h};
 	reader_registry reg{64};

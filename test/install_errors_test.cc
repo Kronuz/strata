@@ -30,7 +30,7 @@ struct map_fails : J::File {
 	std::shared_ptr<const J::Mapping> map() override { throw std::system_error(code, std::generic_category(), "probe: map"); }
 };
 
-// Forwards to faultfs::io; while armed, fails `budget` times opening (or mapping) a segment file
+// Forwards to faultfs's io; while armed, fails `budget` times opening (or mapping) a segment file
 // created during the install.
 struct host_io : J::IO {
 	J::IO& in;
@@ -127,8 +127,8 @@ std::string random_value() {
 
 // A reopen failing `times` (2: both of read_checked's tries) with errno `code` at `w`.
 void reopen_fails(where w, int code, int times) {
-	faultfs::filesystem fss, fst;
-	faultfs::io ios(fss), raw(fst);
+	fl::filesystem fss, fst;
+	fl::io ios(fss), raw(fst);
 	host_io iot(raw);
 	auto S = kv_index::create(ios, base(), uuid_of("S"));
 	const std::string big = random_value();
@@ -167,8 +167,8 @@ void reopen_fails(where w, int code, int times) {
 
 // A copy damaged in the write, `at` bytes into its first large write.
 void damaged_copy(bool mapped, std::size_t at) {
-	faultfs::filesystem fss, fst;
-	faultfs::io ios(fss), iot(fst);
+	fl::filesystem fss, fst;
+	fl::io ios(fss), iot(fst);
 	auto S = kv_index::create(ios, base(), uuid_of("S"));
 	const std::string big = random_value();
 	const model_t model = fill(S, 3, big);
@@ -218,7 +218,7 @@ void damaged_copy(bool mapped, std::size_t at) {
 }  // namespace
 
 int main() {
-	const char* m = std::getenv("STRATA_FAULTFS_MAP");
+	const char* m = std::getenv("FAULTLAB_MAP");
 	const bool mapped = m && m[0] == '1';
 	if (mapped) {  // the reopen is mapped-only
 		for (const where w : {where::open, where::map}) {

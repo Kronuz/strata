@@ -20,7 +20,7 @@ and its successor, Elysian.
 ## ✨ Highlights
 
 - **Immutable segments** with crash-safe commits, verified against power loss,
-  disk-full, and media faults (`faultfs`).
+  disk-full, and media faults (faultlab's `faultfs`).
 - **Layouts of plugins.** The core folds over a layout's plugins and never names a
   search type: `keys` (a sorted key dictionary and a fuse filter) and `stored`
   (records in LZ4 or zstd blocks) are the core's own, and prospect adds the
