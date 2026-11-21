@@ -417,7 +417,9 @@ void visible() {
 	fl::io io(fs);
 	host h(io, s);
 	std::thread loop([&] { h.sealer.serve(); });
-	std::uint64_t reads = 0, seen = 0, exposed = 0;
+	// The reader's counts: the main thread polls `seen` while the reader runs.
+	std::atomic<std::uint64_t> reads{0}, seen{0}, torn{0};
+	std::uint64_t exposed = 0;
 	{
 		kv_index ix = kv_index::create(io, logged_options(h.sealer, s.command), uuid_of("visible"));
 		CHECK(ix.apply(small("a", 1), {}).result == verdict::accepted);
@@ -435,7 +437,7 @@ void visible() {
 					earliest.store(std::min(earliest.load(), h.sealer.sequence(group)));
 					++seen;
 				}
-				CHECK(live.at.get("v0").has_value() == live.at.get("v59").has_value());  // whole or nothing
+				torn += live.at.get("v0").has_value() != live.at.get("v59").has_value();  // whole or nothing
 				++reads;
 			} while (!stop.load());
 		});
@@ -448,12 +450,12 @@ void visible() {
 		reader.join();
 		fs.sync_latency({});
 		exposed = earliest.load() < last;
-		CHECK(seen > 0);
+		CHECK(seen > 0 && torn == 0);
 		ix.commit();
 	}
 	h.sealer.stop();
 	loop.join();
-	std::printf("visible: %llu reads, %llu saw the transaction, exposed early: %llu\n", (unsigned long long)reads, (unsigned long long)seen, (unsigned long long)exposed);
+	std::printf("visible: %llu reads, %llu saw the transaction, exposed early: %llu\n", (unsigned long long)reads.load(), (unsigned long long)seen.load(), (unsigned long long)exposed);
 	CHECK(exposed == 0);
 }
 
