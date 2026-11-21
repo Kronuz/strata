@@ -390,8 +390,8 @@ Owners: strata core (`files.hh`, `faultfs.hh`), `completion` (the I/O contract),
 
 ### 5.4 faultfs: power loss and fault injection
 - Explains: an `IO` implementation that loses unsynced writes at any barrier, fails reads and writes, and damages bytes; how one model covers segments, manifests, and the journal.
-- Sources: `include/strata/core/faultfs.hh`, `test/faultfs_test.cc`, `S:design/phase-3.md` "faultfs (D19)", `S:gates/phase-3-lifecycle.md`, `S:reviews/phase-3-lifecycle.md`.
-- Commits: none recorded here (start from `git log -- include/strata/core/faultfs.hh`).
+- Sources: faultlab's `include/faultlab/faultfs.h` and `test/faultfs_test.cc` (strata kept its own copy until strata:e8645287), `S:design/phase-3.md` "faultfs (D19)", `S:gates/phase-3-lifecycle.md`, `S:reviews/phase-3-lifecycle.md`.
+- Commits: none recorded here (start from `git log --follow` on strata's deleted copy, before strata:e8645287, then faultlab's log).
 - Note: MISSING -> strata `docs/mechanisms/faultfs.md`.
 
 ### 5.5 Media faults: transient versus damage, fencing, heal
@@ -827,7 +827,7 @@ work with a ledger and a perf record only.
 | 23 | The linear acronym scan | 7.2 | review | `lib:analysis` `analysis.hh`; analysis:9b15abf |
 | 24 | Tuple inverter and stage 1 | 3.2, 3.3 | design | `P:perf/inverter.md`; `S:research/indexing.md` |
 | 25 | Reordering at merge | 4.4 | design | `S:design/reordering.md`; prospect `bisection.hh` |
-| 26 | faultfs, media faults, directory lock, integrity levels | 5.3-5.6 | design | `include/strata/core/faultfs.hh`; `S:design/media-faults.md` |
+| 26 | faultfs, media faults, directory lock, integrity levels | 5.3-5.6 | design | faultlab's `include/faultlab/faultfs.h`; `S:design/media-faults.md` |
 | 27 | Key-ordered blocks (format 14) and the scan cursor | 2.6 | design/perf | `S:design/format-14-kv.md` D1, D3; strata:89f9fd7 |
 | 28 | Residency and verified regions | 6.1, 6.2 | design | `lib:residency` `residency.hh`; `S:perf/p15-region-size.md` |
 | 29 | Query seam and search seam | 10.4, 10.5 | design | `X:status/engine-query.md`; `X:status/engine-search.md` |
