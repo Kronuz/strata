@@ -23,6 +23,7 @@ One strata index holds every record. A key is a tag byte and the record's name:
 | `L` + id, 8 B big-endian | a node's load | groups (memberships, witnesses included), preferred leaderships |
 | `N` + id, 8 B big-endian | a node | name, addresses, certificate pin, state (`active`, `leaving`, `retired`), directory version, attributes |
 | `P` + path | a namespace, one per index | `rf`, settings version, per shard: group id, incarnation, members (node, role) |
+| `S` | the cluster settings | `replace_after` in ms (repair's; placement-repair.md); put, never erased |
 
 - **Paths.** A path is 1 to `max_path` bytes (strata's key limit, `format::max_term_bytes`, less
   the tag) of `/`-separated names, none empty, no NUL, no leading or trailing `/`. Its key stores

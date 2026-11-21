@@ -29,12 +29,13 @@ void round_trip(D decode, std::string_view in) {
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size) {
 	if (size == 0) { return 0; }
 	const std::string_view in(reinterpret_cast<const char*>(data) + 1, size - 1);
-	switch (data[0] % 6) {
+	switch (data[0] % 7) {
 	case 0: round_trip(sp::decode_directory, in); break;
 	case 1: round_trip(sp::decode_groups, in); break;
 	case 2: round_trip(sp::decode_node, in); break;
 	case 3: round_trip(sp::decode_load, in); break;
 	case 4: round_trip(sp::decode_namespace, in); break;
+	case 6: round_trip(sp::decode_settings, in); break;
 	default:
 		try {
 			const auto c = sp::decode_command(in);
