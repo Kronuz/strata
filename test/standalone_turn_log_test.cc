@@ -1196,8 +1196,10 @@ void t6() {
 		const std::uint64_t base = h.table.entry(group)->base;
 		kv_index ix = kv_index::open(io, logged_options(h.sealer));
 		CHECK(state_of(ix) == prefixes_of(0, n, 0).back());
-		CHECK(h.table.status(group) == jr::GroupStatus::stored && h.sealer.turn() && h.driver.sequence(group) == base + 1);
-		CHECK(ix.apply(tx({replace("k0", "z")}), {}).result == verdict::accepted && ix.applied().index == base + 2);
+		// A new host's table retires the close's sequence + 1, so the record restages past it.
+		CHECK(h.sealer.retired(group) == base + 1);
+		CHECK(h.table.status(group) == jr::GroupStatus::stored && h.sealer.turn() && h.driver.sequence(group) == base + 2);
+		CHECK(ix.apply(tx({replace("k0", "z")}), {}).result == verdict::accepted && ix.applied().index == base + 3);
 	}
 	{
 		// Another host: its table and log live elsewhere, and its identity differs.
@@ -1308,7 +1310,8 @@ void t6w() {
 			while (h.sealer.turn()) {}
 			CHECK(ix.apply(tx({replace("k0", "a")}), {}).result == verdict::accepted);
 			old = ix.applied();
-			// The waiter blocks on turns this thread writes; the close on another thread leaves.
+			// The waiter blocks on turns another thread writes; this thread, the one that touched the
+			// host's table first (journal checks it in debug builds), closes the index.
 			h.sealer.served(true);
 			std::atomic<int> outcome{0};  // 1 returned, 2 index_closed, 3 anything else
 			std::atomic<bool> closed{false};
@@ -1323,13 +1326,13 @@ void t6w() {
 				}
 			});
 			CHECK(until([&] { return h.sealer.waiting() == 1; }, [] {}));
-			std::thread owner([&] {
-				ix.close();
-				closed = true;
-			});
-			CHECK(until([&] { return closed.load(); }, [&] { h.sealer.turn(); }));
-			owner.join();
+			bool turned = false;
+			std::thread loop([&] { turned = until([&] { return closed.load(); }, [&] { h.sealer.turn(); }); });
+			ix.close();
+			closed = true;
+			loop.join();
 			waiter.join();
+			CHECK(turned);
 			// Either the barrier returned it first or the close did: never anything else.
 			CHECK(outcome == 1 || outcome == 2);
 			h.sealer.served(false);

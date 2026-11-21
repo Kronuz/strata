@@ -12,7 +12,7 @@ FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_
 FetchContent_Declare(hashes GIT_REPOSITORY https://github.com/Kronuz/hashes.git GIT_TAG e3bf5b6167775f26dd14f89f210f687b0253241b)
 FetchContent_Declare(crc32c GIT_REPOSITORY https://github.com/Kronuz/crc32c.git GIT_TAG 0d5460d277170e92f33ffc148746f1a7c03eabe1)
 FetchContent_Declare(termdict GIT_REPOSITORY https://github.com/Kronuz/termdict.git GIT_TAG d7f5954ae84177c1587cc69a16a18d7911ee0501)
-FetchContent_Declare(varint GIT_REPOSITORY https://github.com/Kronuz/varint.git GIT_TAG ac6003e1ca12a2e52f6cf086d8a328d17672a558)
+FetchContent_Declare(varint GIT_REPOSITORY https://github.com/Kronuz/varint.git GIT_TAG efed272ffb834d97e5d7424bb8f2fba5779938d4)
 FetchContent_Declare(residency GIT_REPOSITORY https://github.com/Kronuz/residency.git GIT_TAG a0f7af930a30927cd1fe9c56bde254c29c3ba862)
 # Stored blocks are LZ4 or zstd (format-14-kv D1d), through compressors' one-shot block codecs.
 set(COMPRESSORS_DEFLATE OFF CACHE BOOL "" FORCE)
@@ -27,14 +27,16 @@ FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefil
 # coroutine seam, is what journal's turn driver runs on (no Asio).
 set(COMPLETION_TASK ON CACHE BOOL "" FORCE)
 set(COMPLETION_ASIO OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG 7731315d0660a953f7b3bf956df3127d5a525a03)
+FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG d8b538c6778f0a1b969e42c8428995d1d29d4731)
 # The manifest log's block framing (manifest-log D2), and the turn log, its driver and host that a
-# logged index writes through (standalone-turn-log D1).
-FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.git GIT_TAG cc95ba636dee73b494daef7bbd8d341505aea9a1)
+# logged index writes through (standalone-turn-log D1); strata::group runs on the drivers.
+FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.git GIT_TAG 9e11713edbb6e31681e1ae7a3f8f18f15eb7eaac)
 # Background work's threaded executor: one WorkPool per node, a WorkGroup per index.
 FetchContent_Declare(workpool GIT_REPOSITORY https://github.com/Kronuz/workpool.git GIT_TAG 640c66bfebccae811377670a265b62f4878ede8a)
+# strata::group's replication: consensus's Driver (docs/DRIVER.md, contract consensus:driver).
+FetchContent_Declare(consensus GIT_REPOSITORY https://github.com/Kronuz/consensus.git GIT_TAG b8de3b81064405e4fa9a384cf3670a679f484b48)
 # fst is termdict's; strata pins it so the dictionary's bytes do not drift.
-FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict compressors fusefilter completion workpool journal)
+FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict compressors fusefilter completion workpool journal consensus)
 
 # strata::core: the lifecycle (index, segments, manifests, merges, checkpoints, budgets, files),
 # the keys and stored sections, and the document layout. Search is prospect
@@ -44,6 +46,12 @@ target_include_directories(strata_core INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/in
 target_compile_features(strata_core INTERFACE cxx_std_20)
 target_link_libraries(strata_core INTERFACE hashes::hashes crc32c::crc32c residency::residency varint::varint termdict::termdict fusefilter::fusefilter compressors::compressors completion::completion journal::journal task::task workpool::workpool)
 add_library(strata::core ALIAS strata_core)
+
+# strata::group (header-only): one replication group per shard on consensus's Driver, with its
+# checkpoint bundle and file set (docs/mechanisms/replication-group.md).
+add_library(strata_group INTERFACE)
+target_link_libraries(strata_group INTERFACE strata::core consensus::consensus)
+add_library(strata::group ALIAS strata_group)
 
 # Core links none of prospect's libraries, directly or through the libraries it links (fst reaches it
 # through termdict; docset, bitpack, analysis, unicode, snowball are search's alone).
@@ -98,6 +106,34 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(faultfs_test test/faultfs_test.cc)
   target_link_libraries(faultfs_test PRIVATE strata::core)
   add_test(NAME faultfs COMMAND faultfs_test)
+  # strata::group's lone voter crashed at every point (quest group-core A1).
+  add_executable(group_lone_voter_test test/group/lone_voter_test.cc)
+  target_link_libraries(group_lone_voter_test PRIVATE strata::group)
+  add_test(NAME group_crash_lone_voter COMMAND group_lone_voter_test)
+  set_tests_properties(group_crash_lone_voter PROPERTIES TIMEOUT 1500)
+  # Three and five voters in process: one crash per schedule, space short on two replicas (A2).
+  add_executable(group_voters_test test/group/voters_test.cc)
+  target_link_libraries(group_voters_test PRIVATE strata::group)
+  add_test(NAME group_voters COMMAND group_voters_test)
+  set_tests_properties(group_voters PROPERTIES TIMEOUT 1500)
+  # What an idle open group holds, on real directories (A6); frames counted, the frame pool off
+  # so a freed frame leaves the heap count (the pool's cache is per thread, not per group).
+  add_executable(group_footprint_test test/group/footprint_test.cc)
+  find_package(Backtrace)  # libexecinfo on FreeBSD, libc elsewhere
+  target_link_libraries(group_footprint_test PRIVATE strata::group ${Backtrace_LIBRARIES})
+  target_compile_definitions(group_footprint_test PRIVATE TASK_COUNT_FRAMES=1 TASK_FRAME_POOL=0)
+  add_test(NAME group_footprint COMMAND group_footprint_test)
+  set_tests_properties(group_footprint PROPERTIES SKIP_RETURN_CODE 77)  # a sanitizer owns operator new
+  # The file set beside strata in one directory, each leaving the other's names alone (A6, D111).
+  add_executable(group_file_set_test test/group/file_set_test.cc)
+  target_link_libraries(group_file_set_test PRIVATE strata::group)
+  add_test(NAME group_file_set COMMAND group_file_set_test)
+  # Apply off the loop, close and capture against apply (A5, A10); threads under TSan.
+  add_executable(group_lifetime_test test/group/lifetime_test.cc)
+  target_link_libraries(group_lifetime_test PRIVATE strata::group)
+  add_test(NAME group_lifetime COMMAND group_lifetime_test)
+  set_tests_properties(group_lifetime PROPERTIES TIMEOUT 1500)
+  add_test(NAME group_lifetime_reopen_turn COMMAND group_lifetime_test reopen-turn)
   add_executable(core_kv_test test/core_kv_test.cc)
   target_link_libraries(core_kv_test PRIVATE strata::core)
   add_test(NAME core_kv COMMAND core_kv_test)

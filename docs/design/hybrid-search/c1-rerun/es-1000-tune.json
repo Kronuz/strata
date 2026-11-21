@@ -1,0 +1,36 @@
+{
+ "system": "es",
+ "tenants": 1000,
+ "bar": 0.95,
+ "queries": 200,
+ "tried": [
+  {
+   "knob": {
+    "num_candidates": 50
+   },
+   "recall10": 0.3545
+  },
+  {
+   "knob": {
+    "num_candidates": 1000
+   },
+   "recall10": 0.624
+  },
+  {
+   "knob": {
+    "num_candidates": 1000,
+    "rescore_vector": {
+     "oversample": 20
+    }
+   },
+   "recall10": 0.9695
+  }
+ ],
+ "knob": {
+  "num_candidates": 1000,
+  "rescore_vector": {
+   "oversample": 20
+  }
+ },
+ "met": true
+}

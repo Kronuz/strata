@@ -1,0 +1,37 @@
+{
+ "system": "qdrant",
+ "tenants": 100,
+ "per_tenant": 1000,
+ "dim": 768,
+ "host": "dg-linux",
+ "os": "Linux 6.8.0-149-generic",
+ "cpus": 8,
+ "env": "linux-vm",
+ "free_gb_before": 45.6,
+ "start_s": 0.5,
+ "version": "1.20.0",
+ "load_s": 95.5,
+ "tune": {
+  "system": "qdrant",
+  "tenants": 100,
+  "bar": 0.95,
+  "queries": 200,
+  "tried": [
+   {
+    "knob": {
+     "hnsw_ef": 128
+    },
+    "recall10": 1.0
+   }
+  ],
+  "knob": {
+   "hnsw_ef": 128
+  },
+  "met": true
+ },
+ "resets": 0,
+ "disk": {
+  "mb": 368,
+  "files": 107
+ }
+}

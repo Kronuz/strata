@@ -1,0 +1,61 @@
+{
+ "system": "pg",
+ "tenants": 1000,
+ "per_tenant": 1000,
+ "dim": 768,
+ "queries": 1000,
+ "host": "dg-linux",
+ "os": "Linux 6.8.0-149-generic",
+ "cpus": 8,
+ "env": "linux-vm",
+ "in_process": false,
+ "knob": {},
+ "disk": {
+  "mb": 5062,
+  "files": 1045
+ },
+ "start_s": 0.51,
+ "version": "PostgreSQL 17.12 (Debian 17.12-1.pgdg12+1) on x86_64-pc-linux-gnu pgvector 0.8.7",
+ "idle_start": {
+  "rss_mb": 31.762,
+  "anon_mb": 4.297,
+  "cache_mb": 50.707,
+  "cpu_s": 0.315635,
+  "idle_s": 30.0,
+  "idle_cpu_s": 0.0456
+ },
+ "cache_dropped": true,
+ "cold": {
+  "p50": 12.605,
+  "p99": 20.054,
+  "max": 43.602,
+  "n": 1000,
+  "recall10": 1.0,
+  "short": 0
+ },
+ "warm1": {
+  "p50": 5.215,
+  "p99": 6.471,
+  "max": 6.802,
+  "n": 1000,
+  "recall10": 1.0,
+  "short": 0
+ },
+ "warm2": {
+  "p50": 5.297,
+  "p99": 7.375,
+  "max": 8.082,
+  "n": 1000,
+  "recall10": 1.0,
+  "short": 0
+ },
+ "idle_after": {
+  "rss_mb": 163.516,
+  "anon_mb": 5.797,
+  "cache_mb": 4176.738,
+  "cpu_s": 18.192613,
+  "idle_s": 30.0,
+  "idle_cpu_s": 0.01
+ },
+ "resets": 0
+}

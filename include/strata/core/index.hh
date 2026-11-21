@@ -479,7 +479,7 @@ struct log_state {
 	std::uint64_t last_checkpoint = 0;
 	std::string checkpoint_payload;
 
-	// Records of a group one turn seals: journal calls a sealer once per turn for one record.
+	// Records of a group one turn seals: seal() hands one, the driver's repeat calls get nothing.
 	static constexpr std::size_t turn_records = 1;
 	struct joined {
 		bool opened = false;    // it opened a record, so the loop is woken
@@ -508,10 +508,12 @@ struct log_state {
 		applied = at;
 		return {opened, 0};
 	}
-	// The sealer (D3), called once per turn by the driver: the next whole record, oldest first,
-	// if it frames within `room` (turn_framed_bytes bounds the driver's record_cost).
+	// The sealer (D3), called by the driver each turn: the next whole record, oldest first, if it
+	// frames within `room` (turn_framed_bytes bounds the driver's record_cost), and none while the
+	// last one handed is not durable, so a turn takes turn_records of the group (D4's window).
 	std::optional<kronuz::journal::TurnRecord> seal(std::uint64_t room, bool first) {
 		const std::lock_guard lock(mu);
+		if (handed.load(std::memory_order_relaxed) > synced.load(std::memory_order_relaxed)) { return std::nullopt; }
 		kronuz::journal::TurnRecord r;
 		r.group = group;
 		r.kind = kronuz::journal::TurnRecordKind::Batch;
@@ -837,6 +839,30 @@ public:
 	static basic_index create(kronuz::journal::IO& io, const options& opts, const std::array<char, 16>& uuid) {
 		basic_index ix = create_deferred(io, opts, uuid);
 		ix.commit();  // generation 1 (D3-C)
+		return ix;
+	}
+
+	// A create that writes nothing until its first commit (D3-C): the directory lock, an
+	// interrupted create's residue cleared, the state of an empty index in memory. Until that
+	// commit an open finds no index here (strata::group recreates it from its log, D112).
+	static basic_index create_deferred(kronuz::journal::IO& io, const options& opts, const std::array<char, 16>& uuid) {
+		basic_index ix(io);
+		const lease_scope leased{ix.lease_};
+		ix.lock_directory(opts);
+		ix.clear_uncreated();
+		ix.cur_.uuid = uuid;
+		ix.m_.uuid = uuid;
+		// Every structure the index's layout builds, keys only in a keyed index (F4, F20), and
+		// index_sort's key order with keys in a key-ordered layout (format-14-kv D1a).
+		ix.cur_.configured = segment::readable & ~(opts.keyed ? 0 : format::bit::keys) & ~format::bit::index_sort;
+		if (segment_policy<Layout>::key_order && (ix.cur_.configured & format::bit::keys)) { ix.cur_.configured |= format::bit::index_sort; }
+		ix.opts_ = opts;
+		if (ix.opts_.defer_io) { ix.opts_.eager_segments = true; }  // a first-read map would be I/O inside apply()
+		ix.seed_identities();
+		if (opts.budget) { ix.permit_ = opts.budget->open(); }
+		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
+		ix.start_merges();
+		ix.attach_log(true);
 		return ix;
 	}
 
@@ -5700,29 +5726,6 @@ private:
 	}
 
 	// --- recovery ---------------------------------------------------------------------------
-
-	// A create that writes nothing until its first commit (D3-C): the directory lock, an
-	// interrupted create's residue cleared, the state of an empty index in memory.
-	static basic_index create_deferred(kronuz::journal::IO& io, const options& opts, const std::array<char, 16>& uuid) {
-		basic_index ix(io);
-		const lease_scope leased{ix.lease_};
-		ix.lock_directory(opts);
-		ix.clear_uncreated();
-		ix.cur_.uuid = uuid;
-		ix.m_.uuid = uuid;
-		// Every structure the index's layout builds, keys only in a keyed index (F4, F20), and
-		// index_sort's key order with keys in a key-ordered layout (format-14-kv D1a).
-		ix.cur_.configured = segment::readable & ~(opts.keyed ? 0 : format::bit::keys) & ~format::bit::index_sort;
-		if (segment_policy<Layout>::key_order && (ix.cur_.configured & format::bit::keys)) { ix.cur_.configured |= format::bit::index_sort; }
-		ix.opts_ = opts;
-		if (ix.opts_.defer_io) { ix.opts_.eager_segments = true; }  // a first-read map would be I/O inside apply()
-		ix.seed_identities();
-		if (opts.budget) { ix.permit_ = opts.budget->open(); }
-		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
-		ix.start_merges();
-		ix.attach_log(true);
-		return ix;
-	}
 
 	// Whether names are only what an interrupted create leaves: the first log's temporary.
 	static bool uncreated(const std::vector<std::string>& names) {
