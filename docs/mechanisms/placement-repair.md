@@ -22,8 +22,9 @@ so a lost or refused step (a promotion consensus answers `NotReady`) is planned 
 ## What a pass reads
 
 - **Records.** Each namespace's shards and `rf`, the nodes' states and loads, and the settings
-  record `S` (`replace_after_ms`, default 300 s). The setting is read at every pass, so
-  `set_replace_after` takes effect at the next one, with no restart.
+  record, key `S`: a format byte and `replace_after` in LEB128 milliseconds (absent: 300 s); a
+  command may put it, never erase it. The setting is read at every pass, so `set_replace_after`
+  takes effect at the next one, with no restart.
 - **The keepalive table** (D6): `down_since` per node, volatile at the root leader. A node is
   *lost* once down for `replace_after`, or when its state is not `active` (a drain).
 - **A report per group**: the membership in force at its leader, the leader's incarnation, and
@@ -66,6 +67,12 @@ D7's orders fall out of these rules:
 | rf 2 | 1 | witness removed; data voter removed |
 | replace | | learner, promoted beside the lost member (3 + 1, 2 + 2 or n + 1), which consensus removes |
 
+A lost member no removal drops leaves through a window whatever the target: 2 + witness with a
+lost data voter, stepping down to `rf 1`, can neither remove that voter (one data voter beside a
+witness breaks D9's shapes) nor the witness (one up voter of two loses the quorum), so a learner
+joins, is promoted beside the lost voter (3 + 1), and the shard then shrinks from healthy members.
+The learner joins only when that promotion would be valid, so none joins only to be removed.
+
 With no free node, a lost voter leaves when the rest keep a quorum and the shard runs short (three
 voters on two usable nodes become a voter and a learner); a 2 + witness group with a lost data
 voter and no free node waits, as removing either member would break D9's shapes or its quorum.
@@ -92,7 +99,8 @@ root's records by catching up from the log, or by install once group-heal binds 
   that applies each step as consensus would, D7's 1, 2, 3, 2, 1 with exact memberships, a
   replacement at replace_after and not before (3 voters, 2 + witness's data voter and witness),
   replace_after read from the root's record as it changes, a drain whose transfer precedes the
-  change that retires the leader, an `rf = 1` group that waits, a shard with no node to grow on,
+  change that retires the leader, an `rf = 1` group that waits, a shard with no node to grow on, 2 + witness stepping down
+  to `rf 1` past a lost data voter,
   leader balance deferred while a command is open; and 3,000 seeded clusters of 1 to 8 nodes,
   each changed four times (nodes lost or drained, rf from 1 to 5): every change valid with a
   quorum of up voters, and at rest every shard at its shape with the preferred leader leading,
