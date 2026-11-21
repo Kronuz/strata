@@ -9,10 +9,12 @@
 #include "strata/group/answer.hh"
 #include "strata/group/bundle.hh"
 #include "strata/group/file_set.hh"
+#include "strata/group/install.hh"
 
 #include "consensus/driver.h"
 
 #include <atomic>
+#include <charconv>
 #include <coroutine>
 #include <functional>
 #include <map>
@@ -53,13 +55,17 @@ concept application = requires(A& a, const typename A::state& s, typename A::sta
 	{ a.decode(bytes) } -> std::same_as<typename A::state>;
 };
 
-// A group a loop dispatches its Sink's notices to; every call is on the loop.
+// A group a loop dispatches its Sink's notices to; every call is on the loop. An image is
+// borrowed for the call only (DRIVER.md, Install).
 class member {
 public:
 	virtual ~member() = default;
 	virtual void committed(cs::Committed range) = 0;
 	virtual void fenced(std::string reason) = 0;
-	virtual void install_needed(cs::NodeId peer) = 0;
+	virtual void install_needed(cs::NodeId peer, cs::SnapshotKey key) = 0;
+	virtual void install_released(cs::NodeId peer, cs::SnapshotKey key, cs::SnapshotReleaseReason reason) = 0;
+	virtual void validate(cs::Token token, cs::LogBoundary boundary, cs::NodeId source, jn::ArtifactReader& image) = 0;
+	virtual void activate(cs::Token token, cs::LogBoundary boundary, jn::ArtifactReader& image) = 0;
 };
 
 class loop;
@@ -70,12 +76,14 @@ struct dispatch {
 	void operator()(cs::GroupId, cs::Send) const;
 	void operator()(cs::GroupId, cs::Committed) const;
 	void operator()(cs::GroupId, cs::RoleChanged) const {}
-	void operator()(cs::GroupId, cs::ActivateInstall) const;
+	void operator()(cs::GroupId, cs::SendTransfer) const;
+	void operator()(cs::GroupId, cs::ValidateImage) const;
+	void operator()(cs::GroupId, cs::ActivateImage) const;
 	void operator()(cs::GroupId, cs::CheckpointPublished) const {}
 	void operator()(cs::GroupId, cs::RepairCompleted) const {}
 	void operator()(cs::GroupId, cs::SnapshotNeeded) const;
 	void operator()(cs::GroupId, cs::SnapshotTransmit) const {}
-	void operator()(cs::GroupId, cs::SnapshotReleased) const {}
+	void operator()(cs::GroupId, cs::SnapshotReleased) const;
 	void operator()(cs::GroupId, cs::Fenced) const;
 };
 
@@ -99,6 +107,12 @@ public:
 	// The host's view of a group's followers (health): one applied through `index`, if it knows
 	// one. A leader stalled on space hands leadership to it (D3); unset, it hands off to no one.
 	std::function<std::optional<cs::NodeId>(cs::GroupId, cs::Index)> applied_past;
+	// Install (docs/mechanisms/group-install.md). The transport's transfer frames, a data frame on
+	// the Bulk connection (consensus transport::send_transfer); and the fetch lane (consensus
+	// transport/fetch.h): `name`, below the group's own routing, from the replica of `peer`, the
+	// incarnation that sent the image. `done` may run on any thread. Unset, installs fail and retry.
+	std::function<void(cs::GroupId, cs::SendTransfer)> send_transfer;
+	std::function<void(cs::GroupId, cs::NodeId peer, std::string name, fetch_done done)> fetch;
 
 	void attach(cs::GroupId id, member& m) {
 		if (!members_.emplace(id, &m).second) { throw std::logic_error("strata::group: the group is attached to this loop"); }
@@ -124,10 +138,27 @@ inline void dispatch::operator()(cs::GroupId id, cs::Committed c) const {
 	if (auto* m = owner->find(id)) { m->committed(std::move(c)); }
 }
 inline void dispatch::operator()(cs::GroupId id, cs::SnapshotNeeded s) const {
-	if (auto* m = owner->find(id)) { m->install_needed(s.peer); }
+	if (auto* m = owner->find(id)) { m->install_needed(s.peer, s.key); }
 }
-inline void dispatch::operator()(cs::GroupId id, cs::ActivateInstall a) const {
-	owner->driver().activation_failed(id, a.token, "strata::group: install is not built yet (group-install)");
+inline void dispatch::operator()(cs::GroupId id, cs::SnapshotReleased s) const {
+	if (auto* m = owner->find(id)) { m->install_released(s.peer, s.key, s.reason); }
+}
+inline void dispatch::operator()(cs::GroupId id, cs::SendTransfer t) const {
+	if (owner->send_transfer) { owner->send_transfer(id, std::move(t)); }
+}
+inline void dispatch::operator()(cs::GroupId id, cs::ValidateImage v) const {
+	if (auto* m = owner->find(id)) {
+		m->validate(v.token, v.boundary, v.source, v.image);
+	} else {
+		owner->driver().validation_failed(id, v.token);
+	}
+}
+inline void dispatch::operator()(cs::GroupId id, cs::ActivateImage a) const {
+	if (auto* m = owner->find(id)) {
+		m->activate(a.token, a.boundary, a.image);
+	} else {
+		owner->driver().activation_failed(id, a.token, "strata::group: no group to activate the install");
+	}
 }
 inline void dispatch::operator()(cs::GroupId id, cs::Fenced f) const {
 	if (auto* m = owner->find(id)) { m->fenced(std::move(f.reason)); }
@@ -196,14 +227,7 @@ public:
 				// With the last close's record, a matching one resumes its term with no election.
 				co_await driver.recover(
 					id_,
-					[&](jn::ArtifactReader& r) {
-						std::string bytes(std::size_t(r.descriptor().length), '\0');
-						for (std::size_t at = 0; at < bytes.size();) {
-							const auto n = std::min<std::size_t>(bytes.size() - at, 65536);
-							at += r.read_at(at, std::span<char>(bytes.data() + at, n));
-						}
-						restored = decode(bytes);
-					},
+					[&](jn::ArtifactReader& r) { restored = decode(read_image(r)); },
 					std::move(opening_->closed));
 			} else {
 				co_await driver.create(id_, opening_->identity);
@@ -298,6 +322,7 @@ public:
 				closed_ = true;
 			}
 			fail_waiters(std::make_exception_ptr(cs::closed{}));
+			release_pins_held();
 			if (ix_) { ix_->close(); ix_.reset(); }
 			files_.close();
 			dir_.reset();
@@ -324,8 +349,8 @@ public:
 		return stalled_;
 	}
 	bool fenced() const noexcept { return fenced_.load(); }
-	// Peers this leader's log no longer reaches: they catch up only by install (group-install),
-	// which this group does not serve, so they stay behind until it lands.
+	// Peers this leader's log no longer reaches, until their install ends (installed or caught
+	// up): each installs this leader's latest bundle from its pin.
 	std::set<cs::NodeId> installs_needed() const {
 		std::lock_guard lock(mu_);
 		return installs_needed_;
@@ -338,7 +363,31 @@ public:
 	index_type& strata() { return *ix_; }
 	file_set& files() noexcept { return files_; }
 	const state_type& state() const noexcept { return state_; }
+	// The replica's latest bundle: the one it restored or installed, then each it published.
 	const bundle& recovered() const noexcept { return recovered_; }
+	// Installs this replica activated, and the boundary of the last one (0: none).
+	std::uint64_t installs() const noexcept { return installs_.load(); }
+	cs::Index installed_at() const noexcept { return installed_at_.load(); }
+	// The fetch lane's answer for `name`, below the group's routing (install's serve): the pin of
+	// a bundle this leader pinned, or up to 64 KiB of one of its files; nullopt for anything else,
+	// a pin released, or a read that fails. On any thread, while the group lives.
+	std::optional<std::string> serve(std::string_view name) const {
+		cs::Index position = 0;
+		const auto slash = name.find('/');
+		if (slash == std::string_view::npos || std::from_chars(name.data(), name.data() + slash, position).ptr != name.data() + slash) { return std::nullopt; }
+		std::shared_ptr<const pinned> p;
+		{
+			std::lock_guard lock(mu_);
+			if (closed_) { return std::nullopt; }
+			if (auto it = pins_.find(position); it != pins_.end()) { p = it->second; }
+		}
+		if (!p) { return std::nullopt; }
+		try {
+			return ::strata::group::serve(*p->dir, p->pin, name);
+		} catch (...) {
+			return std::nullopt;
+		}
+	}
 	// consensus's closed state (RFTCLOS1) at the close, if it rested: the host hands it to the
 	// reopen's config.closed, so the reopened replica resumes its term (quiescence.md).
 	const std::optional<std::string>& closed_record() const noexcept { return closed_record_; }
@@ -351,9 +400,45 @@ public:
 		push(new range_work(*this, std::move(range)));
 	}
 	void fenced(std::string reason) override { fence_local(std::move(reason)); }
-	void install_needed(cs::NodeId peer) override {
-		std::lock_guard lock(mu_);
-		installs_needed_.insert(peer);
+	// The leader: a flight to `peer` sends the bundle at the key's boundary; pin it on the chore.
+	void install_needed(cs::NodeId peer, cs::SnapshotKey key) override {
+		{
+			std::lock_guard lock(mu_);
+			installs_needed_.insert(peer);
+		}
+		push(new notice_work([this, peer, key] { pin_for(peer, key); }));
+	}
+	void install_released(cs::NodeId peer, cs::SnapshotKey key, cs::SnapshotReleaseReason reason) override {
+		if (reason == cs::SnapshotReleaseReason::Installed || reason == cs::SnapshotReleaseReason::CaughtUp) {
+			std::lock_guard lock(mu_);
+			installs_needed_.erase(peer);
+		}
+		push(new notice_work([this, peer, key] { unpin_for(peer, key); }));
+	}
+	// The learner: the image is the leader's bundle; stage its pin, then answer.
+	void validate(cs::Token token, cs::LogBoundary boundary, cs::NodeId source, jn::ArtifactReader& image) override {
+		std::optional<bundle> b;
+		try {
+			b = decode(read_image(image));
+		} catch (...) {}
+		if (!b || b->position != boundary.index || !loop_->fetch) {
+			loop_->driver().validation_failed(id_, token);
+			return;
+		}
+		task::spawn(loop_->scheduler(), stage_image(std::move(*b), source, token));
+	}
+	// consensus persisted the install: the replica becomes its bundle, on the chore after what
+	// it queued below the boundary.
+	void activate(cs::Token token, cs::LogBoundary boundary, jn::ArtifactReader& image) override {
+		std::optional<bundle> b;
+		try {
+			b = decode(read_image(image));
+		} catch (...) {}
+		if (!b || b->position != boundary.index) {
+			loop_->driver().activation_failed(id_, token, "strata::group: the install's image is not a bundle at its boundary");
+			return;
+		}
+		task::spawn(loop_->scheduler(), activate_image(std::move(*b), token));
 	}
 
 private:
@@ -419,6 +504,16 @@ private:
 		group* self;
 		cs::Committed range;
 		std::size_t next = 0;
+	};
+
+	// A loop notice the chore carries out between entries, the queue's.
+	struct notice_work final : work {
+		explicit notice_work(std::function<void()> f) : fn(std::move(f)) {}
+		step run() override {
+			fn();
+			return step::done;
+		}
+		std::function<void()> fn;
 	};
 
 	// A call the chore runs for an awaiting task, which resumes on its own scheduler.
@@ -505,7 +600,7 @@ private:
 	void kick() {
 		{
 			std::lock_guard lock(mu_);
-			if (running_ || stalled_ || hold_.load() || queue_.empty()) { return; }
+			if (running_ || stalled_ || hold_.load() || installing_.load() || queue_.empty()) { return; }
 			running_ = true;
 		}
 		task::spawn(chore_, drain());
@@ -519,7 +614,7 @@ private:
 				std::lock_guard lock(mu_);
 				closed = closed_ && !fenced_.load();
 				if (fenced_.load() || closed_) { left = queue_.take(false); }
-				if (queue_.empty() || stalled_ || hold_.load()) {
+				if (queue_.empty() || stalled_ || hold_.load() || installing_.load()) {
 					running_ = false;
 				} else {
 					w = queue_.front();
@@ -815,7 +910,10 @@ private:
 		}
 		auto published = co_await loop_->driver().checkpoint(id_, cap, source{std::move(bytes), 0, b.position, b.term}, std::move(token));
 		published_.store(std::max(published_.load(), published.through));
-		co_await on_chore([&] { files_.unlink_retired(b.position); });
+		co_await on_chore([&] {
+			if (published.through == b.position) { recovered_ = b; }
+			files_.unlink_retired(unlink_through(b.position));
+		});
 		co_return published;
 	}
 	// Steps 2 and 3: the named files and the directory synced, then strata committed (P_H >= P_b).
@@ -830,22 +928,155 @@ private:
 	// loaded. Core then delivers every committed entry above P_b: file effects re-run, strata
 	// skips at or below P_H.
 	void recover(std::optional<bundle> restored) {
-		recovered_ = restored.value_or(bundle{});
 		try {
 			ix_.emplace(index_type::open(*dir_, opening_->strata));
+			// A pin outlives its process in strata's manifest; no flight does.
+			release_pins(*ix_, *dir_);
 		} catch (const index_not_created&) {
 			// Nothing written until the first checkpoint commits; a crash before it recreates the
 			// index from the log (D112).
 			ix_.emplace(index_type::create_deferred(*dir_, opening_->strata, opening_->uuid));
 		}
+		adopt(restored.value_or(bundle{}), restored.has_value());
+	}
+	// The replica as bundle `b` names it, strata open: a complete stage for `b` activates first
+	// (install's resume), then strata at P_H >= P_b, the set at the bundle's lengths, the state.
+	// Recovery's, and an install's activation, which so is what a restore after a crash does.
+	void adopt(const bundle& b, bool restored) {
+		recovered_ = b;
+		if (::strata::group::resume(*dir_, b, *ix_)) {
+			installs_.fetch_add(1);
+			installed_at_.store(b.position);
+		}
 		head_ = ix_->applied();
-		if (recovered_.position > head_.index) { throw group_fenced("strata::group: the bundle is past strata's durable head (P_b > P_H)"); }
-		files_.recover(recovered_.files);
-		state_ = restored ? app_->decode(recovered_.state) : state_type{};
-		applied_term_ = recovered_.term;
+		if (b.position > head_.index) { throw group_fenced("strata::group: the bundle is past strata's durable head (P_b > P_H)"); }
+		files_.recover(b.files);
+		state_ = restored ? app_->decode(b.state) : state_type{};
+		applied_term_ = b.term;
+		phase_ = phase::effects;
+		throws_ = 0;
 		readable_at_.store(head_.index, std::memory_order_release);
-		applied_.store(recovered_.position, std::memory_order_release);
-		published_.store(recovered_.position);
+		applied_.store(b.position, std::memory_order_release);
+		published_.store(b.position);
+	}
+
+	// --- install (docs/mechanisms/group-install.md) ---------------------------------------
+
+	// The learner's fetches in flight at once, each up to 64 KiB.
+	static constexpr std::size_t install_window = 4;
+	// The directory rides with the pin: a serve that took it reads on past the group's teardown.
+	struct pinned {
+		install_pin pin;
+		std::shared_ptr<jn::IO> dir;
+		std::set<std::pair<cs::NodeId, cs::Token>> flights;  // (peer, transfer) holding it
+	};
+	static std::string read_image(jn::ArtifactReader& r) {
+		std::string bytes(std::size_t(r.descriptor().length), '\0');
+		for (std::size_t at = 0; at < bytes.size();) {
+			const auto n = r.read_at(at, std::span<char>(bytes.data() + at, std::min<std::size_t>(bytes.size() - at, 65536)));
+			if (!n) { throw std::runtime_error("strata::group: an image ends before its length"); }
+			at += n;
+		}
+		return bytes;
+	}
+	// On the chore, between entries: the flight's pin of the latest bundle, made once per bundle.
+	// A key at another boundary (a later bundle published) pins nothing: the learner's fetch of
+	// the pin finds none and its validation fails, and the leader's next flight sends the latest.
+	void pin_for(cs::NodeId peer, cs::SnapshotKey key) {
+		if (!ix_ || key.boundary.index != recovered_.position || !recovered_.position) { return; }
+		std::shared_ptr<pinned> p;
+		{
+			std::lock_guard lock(mu_);
+			if (auto it = pins_.find(key.boundary.index); it != pins_.end()) { p = it->second; }
+		}
+		if (!p) {
+			try {
+				p = std::make_shared<pinned>(pinned{make_pin(*ix_, *dir_, recovered_), dir_, {}});
+			} catch (...) {
+				return;  // strata behind its bundle, or the generation not retained: no pin
+			}
+		}
+		std::lock_guard lock(mu_);
+		p->flights.emplace(peer, key.transfer);
+		pins_.emplace(key.boundary.index, std::move(p));
+	}
+	// The flight ended: its pin goes with its last flight, and the set's retired files it held.
+	void unpin_for(cs::NodeId peer, cs::SnapshotKey key) {
+		std::shared_ptr<pinned> gone;
+		{
+			std::lock_guard lock(mu_);
+			auto it = pins_.find(key.boundary.index);
+			if (it == pins_.end()) { return; }
+			it->second->flights.erase({peer, key.transfer});
+			if (!it->second->flights.empty()) { return; }
+			gone = std::move(it->second);
+			pins_.erase(it);
+		}
+		if (!ix_) { return; }
+		release_pin(*ix_, gone->pin);
+		files_.unlink_retired(unlink_through(published_.load()));
+	}
+	// The teardown's: every pin released while strata is open.
+	void release_pins_held() {
+		std::map<cs::Index, std::shared_ptr<pinned>> held;
+		{
+			std::lock_guard lock(mu_);
+			held.swap(pins_);
+		}
+		if (!ix_) { return; }
+		for (const auto& [at, p] : held) {
+			try {
+				release_pin(*ix_, p->pin);
+			} catch (...) {}
+		}
+	}
+	// A retired set file a live pin names stays until the pin goes: unlinks stop below it.
+	cs::Index unlink_through(cs::Index through) const {
+		std::lock_guard lock(mu_);
+		return pins_.empty() ? through : std::min(through, pins_.begin()->first);
+	}
+	// The learner's stage: the pin from the image's source, then the chore held for the stage
+	// alone (apply waits behind it), then the answer on the loop. A failure answers
+	// validation_failed with what was staged kept, so the leader's retry fetches the rest.
+	task::task<void> stage_image(bundle image, cs::NodeId source, cs::Token token) {
+		bool ok = false;
+		try {
+			fetcher fetch = [l = loop_, id = id_, source](std::string name, fetch_done done) { l->fetch(id, source, std::move(name), std::move(done)); };
+			auto pin = co_await fetch_pin(fetch, std::move(image));
+			co_await on_chore_step([this] {
+				installing_.store(true);
+				return step::done;
+			});
+			co_await task::schedule_on{chore_};
+			try {
+				(void)co_await ::strata::group::stage(*dir_, std::move(pin), fetch, install_window);
+				ok = true;
+			} catch (...) {}
+			installing_.store(false);
+			kick();
+		} catch (...) {}
+		co_await task::schedule_on{loop_->scheduler()};
+		if (ok) {
+			loop_->driver().validated(id_, token);
+		} else {
+			loop_->driver().validation_failed(id_, token);
+		}
+	}
+	// Activation on the chore, then the answer on the loop; a failure fences the replica.
+	task::task<void> activate_image(bundle b, cs::Token token) {
+		std::optional<std::string> failed;
+		try {
+			co_await on_chore([this, &b] { adopt(b, true); });
+		} catch (...) {
+			failed = error_text(std::current_exception());
+		}
+		co_await task::schedule_on{loop_->scheduler()};
+		if (!failed) {
+			loop_->driver().activated(id_, token);
+			co_return;
+		}
+		fence_local(*failed);
+		loop_->driver().activation_failed(id_, token, *failed);
 	}
 
 	// --- fencing --------------------------------------------------------------------------
@@ -950,7 +1181,7 @@ private:
 	handoff_timer handoff_;            // armed on the loop only while stalled
 	std::unique_ptr<config> opening_;  // what open() needs, freed once it returns
 	std::optional<std::string> closed_record_;  // the loop's: taken at close
-	std::unique_ptr<jn::IO> dir_;
+	std::shared_ptr<jn::IO> dir_;  // shared with the pins being served
 	file_set files_;
 	App* app_;
 	task::scheduler_ref chore_;
@@ -977,7 +1208,10 @@ private:
 	std::map<cs::Index, outcome> recent_;
 	std::multiset<cs::Index> outstanding_;  // the `since` of each proposal not yet registered
 	std::set<cs::NodeId> installs_needed_;
-	std::atomic<cs::Index> applied_{0}, readable_at_{0}, published_{0};  // published_: the last bundle's P_b
+	std::map<cs::Index, std::shared_ptr<pinned>> pins_;  // the leader's, by P_b
+	std::atomic<bool> installing_{false};                // a stage holds the chore
+	std::atomic<std::uint64_t> installs_{0};
+	std::atomic<cs::Index> applied_{0}, readable_at_{0}, published_{0}, installed_at_{0};  // published_: the last bundle's P_b
 };
 
 }  // namespace strata::group
