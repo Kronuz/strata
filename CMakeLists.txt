@@ -12,7 +12,7 @@ FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_
 FetchContent_Declare(hashes GIT_REPOSITORY https://github.com/Kronuz/hashes.git GIT_TAG e3bf5b6167775f26dd14f89f210f687b0253241b)
 FetchContent_Declare(crc32c GIT_REPOSITORY https://github.com/Kronuz/crc32c.git GIT_TAG 0d5460d277170e92f33ffc148746f1a7c03eabe1)
 FetchContent_Declare(termdict GIT_REPOSITORY https://github.com/Kronuz/termdict.git GIT_TAG d7f5954ae84177c1587cc69a16a18d7911ee0501)
-FetchContent_Declare(varint GIT_REPOSITORY https://github.com/Kronuz/varint.git GIT_TAG ac6003e1ca12a2e52f6cf086d8a328d17672a558)
+FetchContent_Declare(varint GIT_REPOSITORY https://github.com/Kronuz/varint.git GIT_TAG efed272ffb834d97e5d7424bb8f2fba5779938d4)
 FetchContent_Declare(residency GIT_REPOSITORY https://github.com/Kronuz/residency.git GIT_TAG a0f7af930a30927cd1fe9c56bde254c29c3ba862)
 # Stored blocks are LZ4 or zstd (format-14-kv D1d), through compressors' one-shot block codecs.
 set(COMPRESSORS_DEFLATE OFF CACHE BOOL "" FORCE)
