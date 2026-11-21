@@ -1,0 +1,18 @@
+{
+ "system": "strata",
+ "tenants": 1000,
+ "per_tenant": 1000,
+ "dim": 768,
+ "host": "dg-linux",
+ "os": "Linux 6.8.0-149-generic",
+ "cpus": 8,
+ "env": "linux-vm",
+ "free_gb_before": 45.4,
+ "version": "3e8dcb934251",
+ "load_s": 30.4,
+ "resets": 0,
+ "disk": {
+  "mb": 2969,
+  "files": 2000
+ }
+}
