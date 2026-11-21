@@ -102,6 +102,16 @@ public:
 		mine(group);
 		return host_.status(group);
 	}
+	// A bounded group's bound (GroupStatus::bounded): the highest sequence damage to its log could
+	// hold. An index whose head ends below it loses the group: lose(), durable when it returns.
+	std::uint64_t bound(std::uint64_t group) {
+		const std::lock_guard turn(turn_mu_);
+		return host_.bound(group);
+	}
+	void lose(std::uint64_t group) {
+		const std::lock_guard turn(turn_mu_);
+		host_.lose(group);
+	}
 	// The table's checkpoint record of the group, once it closed: its sequence and payload.
 	std::optional<std::pair<std::uint64_t, std::string>> table_record(std::uint64_t group) {
 		const std::lock_guard turn(turn_mu_);
