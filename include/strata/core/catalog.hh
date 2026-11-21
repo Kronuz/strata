@@ -334,6 +334,7 @@ public:
 		std::string_view key;
 		io_counts counts;     // the slot's: what the host opens for this index reserves here (io_counts::reserve)
 		bool create = false;  // a create pin asked: make the index when there is none
+		kronuz::journal::IO* io = nullptr;  // the key's IO once resolved (null in resolve): H may borrow it for the slot's life
 	};
 
 	// What the host supplies (Q2). `resolve` returns the key's IO (a counted_io over the budget in
@@ -367,6 +368,12 @@ public:
 		// something is uncommitted (a failure ends the close), at shutdown, in the replace close, and in a demotion
 		// when only a finished merge's output is unsynced and nothing else is uncommitted (S14). Default: index.commit().
 		std::function<void(H&, Index&)> commit = [](H&, Index& ix) { ix.commit(); };
+		// H's close, run by every close just before the index's, on the close chore with no lease held, so it may
+		// wait on work that takes the lease: a replication group's close, whose checkpoint covers what it applied
+		// (D169; docs/mechanisms/group-catalog.md). From its return or throw H no longer uses the index; a throw
+		// is counted (payload_close_failures), names the key at shutdown, and the index closes regardless. A close
+		// refused after it (close() threw, nothing closed) calls it again. Default: nothing.
+		std::function<void(H&, Index&)> close_payload = [](H&, Index&) {};
 		// Failed wakes after which the sweep closes the slot (D5; I5-N2); too_many_open does not count.
 		unsigned wake_bound = 8;  // at most 255: a slot counts failures in a byte
 		// The sweep (D5, D6; estimates). The idle times are on the executor's clock. `soft_open` caps the
@@ -393,7 +400,7 @@ public:
 		std::uint64_t promoted = 0, decayed = 0, evictions = 0, evict_demotes = 0, busy = 0, ghost_hits = 0, ghost_adds = 0;
 		std::uint64_t wake_failures = 0, wake_overloads = 0, wake_gated = 0, bound_closes = 0, bound_commits = 0, commit_failures = 0;
 		std::uint64_t passes = 0, pass_demotes = 0, pass_closes = 0, pass_reposts = 0, reclaims = 0, erased = 0;
-		std::uint64_t stuck_closes = 0, stuck_retries = 0, close_failures = 0, shutdown_commits = 0, shutdown_commit_failures = 0;
+		std::uint64_t stuck_closes = 0, stuck_retries = 0, close_failures = 0, shutdown_commits = 0, shutdown_commit_failures = 0, payload_close_failures = 0;
 		std::uint64_t merge_commits = 0, merge_commit_failures = 0, create_reposts = 0, replaces = 0, replace_commit_failures = 0, drain_unpins = 0, replace_reposts = 0;
 		std::uint64_t unlinked = 0, gone_pins = 0;  // waiters removed before their delivery; pins delivered to a frame that was gone
 		std::uint64_t cancels = 0;                  // waiting pins ended by their token
@@ -943,6 +950,7 @@ public:
 		o.passes = passes_.load(), o.pass_demotes = pass_demotes_.load(), o.pass_closes = pass_closes_.load(), o.pass_reposts = pass_reposts_.load();
 		o.reclaims = reclaims_.load(), o.erased = erased_.load(), o.stuck_closes = stuck_closes_.load(), o.stuck_retries = stuck_retries_.load();
 		o.close_failures = close_failures_.load(), o.shutdown_commits = shutdown_commits_.load(), o.shutdown_commit_failures = shutdown_commit_failures_.load();
+		o.payload_close_failures = payload_close_failures_.load();
 		o.merge_commits = merge_commits_.load(), o.merge_commit_failures = merge_commit_failures_.load(), o.create_reposts = create_reposts_.load(), o.replaces = replaces_.load(), o.replace_commit_failures = replace_commit_failures_.load();
 		o.drain_unpins = drain_unpins_.load(), o.replace_reposts = replace_reposts_.load();
 		o.unlinked = unlinked_.load(), o.gone_pins = gone_pins_.load(), o.cancels = cancels_.load();
@@ -1646,6 +1654,7 @@ private:
 		}
 		try {
 			s.io = h_.resolve(op);
+			op.io = s.io.get();
 			s.index = std::make_unique<Index>(h_.open_index(*s.io, h_.index_options, op));
 			s.index->guard_calls(&s.word, &pin_held);
 			s.reader = s.index->reader();
@@ -2116,6 +2125,7 @@ private:
 			close_refused(idx, prior);
 			return;
 		}
+		close_payload(s, down);
 		try {
 			hook("close.call", false);
 			s.index->close();
@@ -2199,6 +2209,7 @@ private:
 			} catch (...) {
 			}
 		}
+		close_payload(s, false);
 		try {
 			hook("close.call", false);
 			s.index->close();
@@ -2211,6 +2222,23 @@ private:
 		}
 		replaces_.fetch_add(1, std::memory_order_relaxed);
 		after_close(idx, close_mode::replace);
+	}
+
+	// H's close before the index's, outside the lease (host::close_payload): a throw is counted and, at shutdown,
+	// names the key; the index closes regardless.
+	void close_payload(slot& s, bool down) noexcept {
+		try {
+			h_.close_payload(*s.payload, *s.index);
+		} catch (...) {
+			payload_close_failures_.fetch_add(1, std::memory_order_relaxed);
+			if (down) {
+				try {
+					std::lock_guard g(shut_mu_);
+					if (std::find(result_.uncommitted.begin(), result_.uncommitted.end(), s.key) == result_.uncommitted.end()) { result_.uncommitted.push_back(s.key); }
+				} catch (...) {
+				}
+			}
+		}
 	}
 
 	// A close the slot refused ends at its prior state, and the slot stays in the policy: the ghost mark goes and the
@@ -2589,7 +2617,7 @@ private:
 	std::uint64_t small_cap_ = ~std::uint64_t(0);
 	std::atomic<std::uint64_t> wake_failures_{0}, wake_overloads_{0}, wake_gated_{0}, bound_closes_{0}, bound_commits_{0}, commit_failures_{0};
 	std::atomic<std::uint64_t> passes_{0}, pass_demotes_{0}, pass_closes_{0}, pass_reposts_{0}, reclaims_{0}, erased_{0};
-	std::atomic<std::uint64_t> stuck_closes_{0}, stuck_retries_{0}, close_failures_{0}, shutdown_commits_{0}, shutdown_commit_failures_{0};
+	std::atomic<std::uint64_t> stuck_closes_{0}, stuck_retries_{0}, close_failures_{0}, shutdown_commits_{0}, shutdown_commit_failures_{0}, payload_close_failures_{0};
 	std::atomic<std::size_t> live_{0}, occupied_{0}, closing_{0};  // slots with an index; slots not free; slots closing
 	std::atomic<std::uint64_t> pending_maps_{0};  // relief of demotions begun and not ended (closes': counts_.booked)
 	std::atomic<std::uint64_t> pending_hot_{0}, pending_open_{0};  // hot indexes being demoted; closes booked by a demotion (B2)

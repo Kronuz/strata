@@ -1,8 +1,9 @@
 // strata::group: one replication group per shard on consensus's Driver (cluster-release D2, D3,
 // D11, D16, D18; docs/mechanisms/replication-group.md). A `loop` owns one Driver and its Sink;
-// each `group` binds a consensus group to a strata index, an application file set and an
-// application that turns committed commands into file effects, a strata transaction and its
-// own state. Apply runs on the group's chore, off the loop; the loop only enqueues.
+// each `group` binds a consensus group to a strata index it borrows (its catalog slot's, D169;
+// docs/mechanisms/group-catalog.md), an application file set and an application that turns
+// committed commands into file effects, a strata transaction and its own state. Apply runs on
+// the group's chore, off the loop; the loop only enqueues.
 #pragma once
 
 #include "strata/core/index.hh"
@@ -13,6 +14,7 @@
 #include "consensus/driver.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <coroutine>
 #include <functional>
 #include <map>
@@ -151,17 +153,26 @@ public:
 		cs::GroupId id = 0;
 		cs::GroupOptions options;
 		jn::Identity identity{};          // the journal group's, at create
-		std::array<char, 16> uuid{};      // the strata index's, at create
-		typename index_type::options strata{};
 		std::optional<std::string> closed;  // the last close's closed_record(), if the host kept it
 	};
 
-	// `directory` is the index's, which the file set shares under its prefix; the group holds it
-	// until it closes. The chore runs apply, the capture, the checkpoint's syncs and commit, and
-	// recovery, one item at a time.
-	group(loop& l, config c, std::unique_ptr<jn::IO> directory, App& app, task::scheduler_ref chore)
+	// The index a group recovers on, which its host opens and lends (the catalog's open_index):
+	// the durable one, else a deferred create, written first by the first checkpoint's commit; a
+	// crash before it recreates the index from the log (D112).
+	static index_type open_index(jn::IO& directory, const typename index_type::options& o, const std::array<char, 16>& uuid) {
+		try {
+			return index_type::open(directory, o);
+		} catch (const index_not_created&) {
+			return index_type::create_deferred(directory, o, uuid);
+		}
+	}
+
+	// Both borrowed, for the group's life (D169): `index` is opened over `directory`, which the
+	// file set shares under its prefix; the host closes both after the group's close. The chore
+	// runs apply, the capture, the checkpoint's syncs and commit, and recovery, one item at a time.
+	group(loop& l, config c, jn::IO& directory, index_type& index, App& app, task::scheduler_ref chore)
 		: loop_(&l), id_(c.id), log_bound_(cs::checkpoint_detail::maximum_size(c.options.limits)), replacement_pool_(c.options.admission.replacement_pool.logical_bytes),
-		  handoff_after_(c.options.timing.election_max * 1'000'000), opening_(std::make_unique<config>(std::move(c))), dir_(std::move(directory)), files_(*dir_), app_(&app), chore_(chore) {
+		  handoff_after_(c.options.timing.election_max * 1'000'000), opening_(std::make_unique<config>(std::move(c))), files_(directory), app_(&app), chore_(chore), ix_(&index) {
 		handoff_.self = this;
 		handoff_.fire = &handoff_fired;
 		loop_->attach(id_, *this);
@@ -170,7 +181,10 @@ public:
 	group& operator=(const group&) = delete;
 	// Destroyed with its chore idle and no call in flight: after close(), or once fenced and the
 	// chore has drained (a stopped process).
+	// A closed group left its loop on the loop, so a host may destroy it on any thread (the
+	// catalog's retire does).
 	~group() override {
+		if (!attached_) { return; }
 		if (handoff_.armed()) { loop_->scheduler().cancel(handoff_); }
 		loop_->detach(id_);
 	}
@@ -281,28 +295,48 @@ public:
 	// waiter whose placement this replica never applied answers `closed`: not acknowledged. It
 	// holds the checkpoints through the teardown, so a checkpoint racing it answers `closed`.
 	// At rest, it keeps consensus's closed state (closed_record) for a reopen without election.
+	// The teardown always runs: a fenced group publishes nothing and throws group_fenced, a
+	// failed checkpoint throws its error, and either way its log and last bundle stand. On return
+	// the chore is idle and the group touches neither the index nor the directory again (both stay
+	// the host's, D169); a second close returns at once.
 	task::task<void> close() {
 		closing_.store(true);
 		auto serial = co_await checkpoints_.lock();
-		for (;;) {
-			auto published = co_await checkpoint_held();
-			co_await task::schedule_on{loop_->scheduler()};
-			auto s = loop_->driver().state(id_);
-			if (!s || published.through >= s->committed) { break; }
-		}
-		closed_record_ = loop_->driver().closed_state(id_);
-		co_await loop_->driver().close(id_);
-		co_await on_chore([this] {
-			{
-				std::lock_guard lock(mu_);
-				closed_ = true;
+		if (torn_down()) { co_return; }
+		std::exception_ptr failed;
+		if (!fenced_.load()) {
+			try {
+				for (;;) {
+					auto published = co_await checkpoint_held();
+					co_await task::schedule_on{loop_->scheduler()};
+					auto s = loop_->driver().state(id_);
+					if (!s || published.through >= s->committed) { break; }
+				}
+				closed_record_ = loop_->driver().closed_state(id_);
+			} catch (...) {
+				failed = std::current_exception();
 			}
-			fail_waiters(std::make_exception_ptr(cs::closed{}));
-			if (ix_) { ix_->close(); ix_.reset(); }
-			files_.close();
-			dir_.reset();
-		});
+		}
+		co_await task::schedule_on{loop_->scheduler()};
+		try {
+			co_await loop_->driver().close(id_);
+		} catch (...) {
+			if (!failed) { failed = std::current_exception(); }
+		}
+		if (task::current() != loop_->scheduler()) { co_await task::schedule_on{loop_->scheduler()}; }
+		if (handoff_.armed()) { loop_->scheduler().cancel(handoff_); }
+		loop_->detach(id_);
+		attached_ = false;
+		co_await tear_down();
+		if (failed) { std::rethrow_exception(failed); }
+		if (fenced_.load()) { throw group_fenced("strata::group: closed fenced: " + fence_reason()); }
 	}
+
+	// open() and close() for a synchronous host (the catalog's open_payload and close_payload):
+	// block the calling thread until they end. The caller must be none of what they wait on: the
+	// loop, the group's chore, or a holder of the index's write lease, which apply and commit take.
+	void open_blocking() { blocking(open(), "open"); }
+	void close_blocking() { blocking(close(), "close"); }
 
 	// The host freed space: a stalled apply retries.
 	void resume() {
@@ -458,6 +492,66 @@ private:
 			if (raw->error) { std::rethrow_exception(raw->error); }
 		}
 	};
+	// Resumes once the chore is idle: no item running, none to come once the group refuses them.
+	struct idle_awaiter {
+		group* self;
+		std::coroutine_handle<> handle;
+		task::scheduler_ref home;
+		idle_awaiter* next = nullptr;
+		bool await_ready() const {
+			std::lock_guard lock(self->mu_);
+			return !self->running_;
+		}
+		bool await_suspend(std::coroutine_handle<> h) {
+			handle = h;
+			home = task::current();
+			std::lock_guard lock(self->mu_);
+			if (!self->running_) { return false; }
+			next = std::exchange(self->idle_, this);
+			return true;
+		}
+		void await_resume() const noexcept {}
+	};
+	idle_awaiter chore_idle() { return idle_awaiter{this, {}, {}}; }
+
+	// close()'s end, on the loop: items refused from here, the queue answered `closed`, every
+	// waiter failed; once the chore is idle the file set closes, exclusive by then.
+	task::task<void> tear_down() {
+		work_queue left;
+		{
+			std::lock_guard lock(mu_);
+			closed_ = true;
+			if (!running_) { left = queue_.take(false); }  // stalled or held: no drain will drop them
+		}
+		while (!left.empty()) { drop(left.pop_front(), true); }
+		fail_waiters(std::make_exception_ptr(cs::closed{}));
+		co_await chore_idle();
+		files_.close();
+	}
+	bool torn_down() const {
+		std::lock_guard lock(mu_);
+		return closed_;
+	}
+
+	void blocking(task::task<void> work, const char* what) {
+		if (loop_->scheduler().runs_here() || chore_.runs_here() || ix_->lease().held_here()) {
+			throw std::logic_error(std::string("strata::group: a blocking ") + what + " on the loop, the group's chore or under the index's write lease waits on itself");
+		}
+		std::mutex m;
+		std::condition_variable cv;
+		bool done = false;
+		std::exception_ptr error;
+		task::spawn(loop_->scheduler(), std::move(work), [&](std::exception_ptr e) {
+			std::lock_guard lock(m);
+			error = e;
+			done = true;
+			cv.notify_one();  // under the lock: the waiter's frame outlives it
+		});
+		std::unique_lock lock(m);
+		cv.wait(lock, [&] { return done; });
+		if (error) { std::rethrow_exception(error); }
+	}
+
 	// The awaiter keeps the item alive until it resumes: the queue hands it back, never frees it.
 	chore_awaiter on_chore(std::function<void()> fn, bool front = false) {
 		auto w = std::make_unique<call_work>();
@@ -514,6 +608,7 @@ private:
 		for (;;) {
 			work* w = nullptr;
 			work_queue left;  // a fence kept the running item, or the close tore down: they go now
+			idle_awaiter* idle = nullptr;
 			bool closed = false;
 			{
 				std::lock_guard lock(mu_);
@@ -521,12 +616,18 @@ private:
 				if (fenced_.load() || closed_) { left = queue_.take(false); }
 				if (queue_.empty() || stalled_ || hold_.load()) {
 					running_ = false;
+					idle = std::exchange(idle_, nullptr);
 				} else {
 					w = queue_.front();
 				}
 			}
 			if (!w) {
+				// Neither touches the group: a resumed idle waiter may destroy it.
 				while (!left.empty()) { drop(left.pop_front(), closed); }
+				while (idle) {
+					auto* i = std::exchange(idle, idle->next);
+					i->home.post(i->handle);
+				}
 				co_return;
 			}
 			step r;
@@ -826,18 +927,12 @@ private:
 
 	// --- recovery (D16) -------------------------------------------------------------------
 
-	// strata at its durable head P_H; the file set as the bundle names it; the application state
+	// strata at its head P_H, the borrowed index's (its durable head once opened, or past it when
+	// an earlier group over it closed); the file set as the bundle names it; the application state
 	// loaded. Core then delivers every committed entry above P_b: file effects re-run, strata
 	// skips at or below P_H.
 	void recover(std::optional<bundle> restored) {
 		recovered_ = restored.value_or(bundle{});
-		try {
-			ix_.emplace(index_type::open(*dir_, opening_->strata));
-		} catch (const index_not_created&) {
-			// Nothing written until the first checkpoint commits; a crash before it recreates the
-			// index from the log (D112).
-			ix_.emplace(index_type::create_deferred(*dir_, opening_->strata, opening_->uuid));
-		}
 		head_ = ix_->applied();
 		if (recovered_.position > head_.index) { throw group_fenced("strata::group: the bundle is past strata's durable head (P_b > P_H)"); }
 		files_.recover(recovered_.files);
@@ -948,15 +1043,15 @@ private:
 	std::uint64_t replacement_pool_;   // the admission's pool that reservation comes from
 	std::uint64_t handoff_after_;      // one election timeout, ns: a stalled leader's hand-off
 	handoff_timer handoff_;            // armed on the loop only while stalled
+	bool attached_ = true;             // in the loop's table: the loop's, until close() leaves it
 	std::unique_ptr<config> opening_;  // what open() needs, freed once it returns
 	std::optional<std::string> closed_record_;  // the loop's: taken at close
-	std::unique_ptr<jn::IO> dir_;
 	file_set files_;
 	App* app_;
 	task::scheduler_ref chore_;
 
-	// The chore's alone.
-	std::optional<index_type> ix_;
+	// The chore's alone; the index is borrowed (D169).
+	index_type* ix_;
 	state_type state_{};
 	bundle recovered_;
 	files::position head_{};  // P_H at the last recovery
@@ -967,6 +1062,7 @@ private:
 	// Shared, under mu_ or atomic.
 	mutable std::mutex mu_;
 	work_queue queue_;
+	idle_awaiter* idle_ = nullptr;  // close's, waiting for the chore to go idle
 	bool running_ = false, stalled_ = false, closed_ = false;  // closed_: torn down, chore items refused
 	std::atomic<bool> hold_{false}, fenced_{false}, closing_{false};
 	task::async_mutex checkpoints_;
