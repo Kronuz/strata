@@ -160,7 +160,9 @@ void lone() {
 		std::set<sp::group_id> seen;
 		std::size_t n = 0;
 		for (int i = 0; i < 5; ++i) {
-			for (const auto& s : v.namespace_at("burst/" + std::to_string(i))->record.shards) {
+			const auto ns = v.namespace_at("burst/" + std::to_string(i));  // held: a temporary's member dangles in a range-for
+			if (!ns) { return false; }
+			for (const auto& s : ns->record.shards) {
 				seen.insert(s.group);
 				++n;
 			}
