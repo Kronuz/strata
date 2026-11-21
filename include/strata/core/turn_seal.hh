@@ -103,7 +103,7 @@ public:
 	// The table's checkpoint record of the group, once it closed: its sequence and payload.
 	std::optional<std::pair<std::uint64_t, std::string>> table_record(std::uint64_t group) {
 		const std::lock_guard turn(turn_mu_);
-		const auto* e = host_.entry(group);
+		const auto e = host_.entry(group);
 		if (!e || e->manifest.empty()) { return std::nullopt; }
 		return std::pair{e->base, e->manifest};
 	}

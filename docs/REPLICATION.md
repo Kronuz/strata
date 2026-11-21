@@ -87,17 +87,20 @@ failover. Physical segment files differ between replicas.
 
 ## Checkpoints and repair
 
-- A journal checkpoint bundle references a strata manifest by applied log position,
-  term, and manifest CRC32C. Strata owns its segment files and their retention; the
-  journal never copies them.
+- A checkpoint bundle binds the log to strata by position: strata's durable head is at
+  or past the bundle's position P_b when the bundle publishes. The bundle carries P_b and
+  its term, the application's file set (name, length at P_b, CRC32C once immutable) and
+  its opaque state, and no manifest CRC32C (install's pin carries it). Strata owns its
+  segment files and their retention; the journal never copies them.
 - Checkpoints are triggered by retained-log bytes and elapsed time, never by refresh.
   The checkpoint freeze is budgeted against the election timeout.
 - A new or far-behind voter installs a checkpoint: snapshot transfer streams a
   segment pack in 64 KiB chunks from a pinned manifest.
 - A voter whose segment files fail a checksum reinstalls a checkpoint at or below its
   commit position and replays its own log from there.
-- Recovery replays the journal from the applied position recorded in the referenced
-  manifest.
+- Recovery opens strata at its durable head P_H, fails closed if P_b > P_H, and replays
+  the log above P_b; strata skips entries at or below P_H, and the application's file
+  effects re-run. `docs/mechanisms/replication-group.md` is the mechanism.
 
 ## Replica count
 
