@@ -78,7 +78,7 @@ void fixtures() {
 	cb += key5_l + bytes({0, 3, 1, 1, 0, 2, 9}) + key5_n + bytes({1, 3});
 	fixture("command", c, cb, sp::decode_command);
 	check(sp::node_key(258) == bytes({'N', 0, 0, 0, 0, 0, 0, 1, 2}) && sp::load_key(5) == key5_l, "node and load keys are the tag and the id big-endian");
-	check(sp::directory_key() == "D" && sp::groups_key() == "G" && sp::namespace_key("twitter/user") == "Ptwitter/user", "the directory, counter and namespace keys");
+	check(sp::directory_key() == "D" && sp::groups_key() == "G" && sp::namespace_key("twitter/user") == std::string("Ptwitter\0user", 13), "the directory, counter and namespace keys");
 }
 
 // Each rule refused by a record that breaks it alone.
@@ -93,6 +93,9 @@ void rules() {
 	check(refuses(grp, sp::encode(sp::groups_record{0})), "next group 0");
 	check(refuses(dir, bytes({2, 3, 0})), "an unknown format");
 	check(refuses(dir, bytes({1, 0x83, 0x00, 0})), "an overlong integer");
+	check(refuses(dir, bytes({1, 0x83, 0x80, 0x00, 0})), "an overlong integer of three bytes");
+	// The fuzzer's crash input: an overlong node id re-encodes to other bytes.
+	check(refuses(nsd, bytes({1, 3, 2, 1, 9, 1, 3, 4, 0, 0xfa, 0, 0, 3, 2})), "an overlong node id");
 	check(refuses(grp, bytes({1, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02})), "an integer past 64 bits");
 	check(refuses(node, sp::encode(sp::node_record{"", {}, "", sp::node_state::active, 0, ""})), "an empty name");
 	check(refuses(node, sp::encode(sp::node_record{"n", {""}, "", sp::node_state::active, 0, ""})), "an empty address");

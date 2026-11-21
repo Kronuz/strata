@@ -26,6 +26,8 @@ MUTANTS = {
     "slash-raw": (REC, [(RECORDS, "\tstd::replace(k.begin() + 1, k.end(), '/', '\\0');\n", "")]),
     # A decoder accepts bytes past its record, so a record has two encodings.
     "trailing-bytes": (REC, [(RECORDS, "\t\tif (left()) { fail(\"trailing bytes\"); }", "\t\tif (false) { fail(\"trailing bytes\"); }")]),
+    # A decoder accepts an overlong integer, so a record has two encodings.
+    "shortest-form": (REC, [(RECORDS, "if (p - in.data() > std::ptrdiff_t(at + 1) && p[-1] == 0) { fail(", "if (false) { fail(")]),
     # A count is not bounded by the bytes left: a hostile count allocates before it fails.
     "count-bound": (REC, [(RECORDS, "\t\tif (n > left() / least) { fail(\"count past the bytes left\"); }", "\t\t(void)least;")]),
     # A namespace's preferred leader may be a learner or a witness.

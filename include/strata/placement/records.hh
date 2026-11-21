@@ -20,6 +20,7 @@
 #include "varint.hh"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <set>
@@ -194,7 +195,9 @@ struct reader {
 	T number() {
 		const char* p = in.data() + at;
 		T v{};
-		if (!varint::leb128::decode(&p, in.data() + in.size(), v)) { fail("truncated or overlong integer"); }
+		if (!varint::leb128::decode(&p, in.data() + in.size(), v)) { fail("truncated integer or past its type"); }
+		// Shortest form only: a last byte of 0 after the first adds nothing, a second encoding.
+		if (p - in.data() > std::ptrdiff_t(at + 1) && p[-1] == 0) { fail("overlong integer"); }
 		at = std::size_t(p - in.data());
 		return v;
 	}
