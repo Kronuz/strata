@@ -48,7 +48,7 @@ for a, b in edits:
 open(path, "w").write(s)
 PY
 grep -n "MUTANT" "$f"
-cmake -B build -DCMAKE_BUILD_TYPE=Release >/dev/null && cmake --build build --target index_test -j4 >/dev/null || exit 2
+cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release >/dev/null && cmake --build build --target index_test -j4 >/dev/null || exit 2
 ./build/index_test > index_test.out 2>&1
 rc=$?
 cat index_test.out

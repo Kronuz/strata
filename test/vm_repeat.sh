@@ -11,7 +11,7 @@ for spec in "$@"; do
 	label=${spec%%=*} tree=${spec#*=} dir="preflight/repeat-$label"
 	(cd "$tree" && git ls-files -z | xargs -0 tar -cf -) |
 		"$vm" ssh "rm -rf ~/$dir && mkdir -p ~/$dir && tar -xf - -C ~/$dir" || { echo "$label: ship failed"; status=1; continue; }
-	"$vm" ssh "cd ~/$dir && cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo '-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O2 -g' >build.log 2>&1 &&
+	"$vm" ssh "cd ~/$dir && cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo '-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O2 -g' >build.log 2>&1 &&
 		cmake --build build --parallel 4 --target $target >>build.log 2>&1 || { tail -30 build.log; exit 1; }" </dev/null ||
 		{ echo "$label: build failed"; status=1; continue; }
 	# Each run writes its exit status and, on failure, its output.
