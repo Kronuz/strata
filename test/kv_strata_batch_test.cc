@@ -97,12 +97,15 @@ int main() {
 	CHECK(!e.get(0, key_of(1), got));
 	CHECK(e.get(0, key_of(batches * 14 - 1), got) && got == value + std::to_string(batches - 1));
 
-	// A batch past the command limit (1 MiB) splits into whole transactions, each acknowledged.
+	// A batch past the record cap (1 MiB) is still one transaction: two chunk records, its
+	// position the last one's (rocksdb-parity A3).
 	const std::string big(100 << 10, 'b');
 	const auto before = e.last(0);
+	const std::uint64_t transactions = e.index(0).logged_visible();
 	for (int i = 0; i < 16; ++i) { e.put(0, key_of(1000 + i), big); }
 	e.durable(0);
-	CHECK(e.last(0).index == before.index + 2);
+	CHECK(e.last(0).index == before.index + 2 && e.last(0).applied == 1 && e.index(0).logged_visible() == transactions + 1);
+	CHECK(e.get(0, key_of(1000), got) && got == big);
 	CHECK(e.get(0, key_of(1015), got) && got == big);
 
 	std::printf("kv_strata batch: %d batches of 16 writes: %d records, %llu barriers, %llu writes\n", batches, records, (unsigned long long)barriers,
