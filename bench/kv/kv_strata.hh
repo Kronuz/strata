@@ -122,7 +122,7 @@ public:
 	}
 	void put(unsigned t, std::string_view key, std::string_view value) {
 		shard& s = route(t, key);
-		auto& op = next_op(s, key.size() + value.size());
+		auto& op = next_op(s);
 		op.type = kv_index::operation::replace_key;
 		op.key.assign(key);
 		op.doc.key.assign(key);
@@ -134,7 +134,7 @@ public:
 	}
 	void erase(unsigned t, std::string_view key) {
 		shard& s = route(t, key);
-		auto& op = next_op(s, key.size());
+		auto& op = next_op(s);
 		op.type = kv_index::operation::delete_key;
 		op.key.assign(key);
 		if (!batching_) { apply(s); }
@@ -264,18 +264,14 @@ private:
 	struct shard {
 		std::shared_ptr<kronuz::journal::IO> io;
 		std::unique_ptr<kv_index> ix;
-		kv_index::transaction tx;  // the batch: its first n ops, about `bytes` encoded
+		kv_index::transaction tx;  // the batch: its first n ops
 		std::size_t n = 0;
-		std::uint64_t bytes = 0;
 		std::string got;  // multiget's copy target
 		strata::files::position last;  // the last write's position, which durable() awaits
 	};
-	// An operation's encoding past its key and value, at most (command.hh's codec).
-	static constexpr std::uint64_t op_overhead = 64;
-	// The op the next write fills; a batch that would pass the command limit applies first.
-	kv_index::operation& next_op(shard& s, std::uint64_t bytes) {
-		if (s.n && s.bytes + bytes + op_overhead > command_bytes) { apply(s); }
-		s.bytes += bytes + op_overhead;
+	// The op the next write fills. A batch is one transaction whatever its size: past the record
+	// cap it streams as chunk records, all or nothing (rocksdb-parity A3).
+	kv_index::operation& next_op(shard& s) {
 		if (s.n == s.tx.ops.size()) { s.tx.ops.emplace_back(); }
 		return s.tx.ops[s.n++];
 	}
@@ -283,7 +279,6 @@ private:
 		if (!s.n) { return; }
 		if (s.n < s.tx.ops.size()) { s.tx.ops.resize(s.n); }
 		s.n = 0;
-		s.bytes = 0;
 		if (const auto v = s.ix->apply(s.tx, {}); v.result != strata::verdict::accepted) {
 			std::fprintf(stderr, "rejected: verdict %d at op %zu\n", int(v.result), std::size_t(v.op));
 			std::exit(1);
@@ -291,8 +286,8 @@ private:
 		s.last = s.ix->applied();
 	}
 	bool logged() const noexcept { return c_.dur != kvbench::durability::none; }
-	// The rows' values are at most a few KiB: a 1 MiB command limit lets the host's segments be
-	// 4 MiB (two framed commands, D3) rather than the 129 MiB that 64 MiB commands need.
+	// The rows' values are at most a few KiB: a 1 MiB record cap lets the host's segments be 4 MiB
+	// (two framed commands, D3) rather than the 129 MiB that 64 MiB commands need.
 	static constexpr std::uint64_t command_bytes = 1 << 20;
 	static kronuz::journal::TurnLogOptions turns() {
 		kronuz::journal::TurnLogOptions g;

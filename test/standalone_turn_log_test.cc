@@ -3,7 +3,7 @@
 // append (T12), V and flushes held at the barrier (T4), a power-off sweep with checkpoints and
 // recycled segments (T1), a process crash at every mutation (T2), a failed barrier (T3), log
 // damage below the head (T5) and double damage past it (T5d), no_space and owed verdicts at
-// replay (T7, T7b), the command limit and the turn budget (T8), runtime refusals (T10), joining
+// replay (T7, T7b), chunks past the command limit and the turn budget (T8), runtime refusals (T10), joining
 // and leaving (T6; t6w: a waiter across a close and reopen, and recovery over the retired
 // sequence), one write and one sync per acknowledgement (M1), a served loop with group commit, a
 // checkpointing writer and a reader (the TSan case), a writer outrunning slow barriers (lag: D4's
@@ -165,8 +165,9 @@ void codec() {
 	std::copy(uuid, uuid + 15, cp.uuid.begin());
 	cp.generation = 9;
 	cp.at = {12, 3};
-	const std::vector<std::pair<std::string, std::string>> files = {
-		{"batch-kv.bin", batch_of({kv1, kv2})}, {"batch-all.bin", batch_of({all})}, {"checkpoint.bin", command::encode_checkpoint(cp)}};
+	const std::string kv_bytes = command::encode(kv1);
+	const std::vector<std::pair<std::string, std::string>> files = {{"batch-kv.bin", batch_of({kv1, kv2})}, {"batch-all.bin", batch_of({all})},
+		{"checkpoint.bin", command::encode_checkpoint(cp)}, {"chunk.bin", command::chunk_payload(command::chunk_place::middle, kv_bytes)}};
 	const std::filesystem::path dir = std::filesystem::path(STRATA_FIXTURES) / "command";
 	if (std::getenv("STRATA_WRITE_FIXTURES")) {
 		std::filesystem::create_directories(dir);
@@ -182,6 +183,11 @@ void codec() {
 	for (const auto& [name, bytes] : files) {
 		if (command::kind_of(bytes) == command::checkpoint) {
 			CHECK(command::decode_checkpoint(bytes) == cp);
+			continue;
+		}
+		if (command::kind_of(bytes) == command::chunk) {
+			const command::chunk_record c = command::decode_chunk(bytes);
+			CHECK(c.place == command::chunk_place::middle && c.bytes == kv_bytes && command::chunk_payload(c.place, c.bytes) == bytes);
 			continue;
 		}
 		std::string body;
@@ -200,7 +206,7 @@ void codec() {
 	CHECK(back.ops[5].meta_key == "m" && back.ops[5].meta_value == "v" && back.ops[6].meta_key == "m");
 	// Another kind or version is another build's log, never damage.
 	for (const auto& [name, bytes] : files) {
-		const std::pair<int, int> others[] = {{0, 1}, {3, 1}, {1, 0}, {1, 2}, {2, 2}};
+		const std::pair<int, int> others[] = {{0, 1}, {4, 1}, {1, 0}, {1, 2}, {2, 2}, {3, 2}};
 		for (const auto& [k, v] : others) {
 			std::string other = bytes;
 			other[0] = char(k);
@@ -208,11 +214,23 @@ void codec() {
 			CHECK(throws_as<unsupported_index>([&] { (void)command::kind_of(other); }));
 			CHECK(throws_as<unsupported_index>([&] { (void)command::decode_batch(other); }));
 			CHECK(throws_as<unsupported_index>([&] { (void)command::decode_checkpoint(other); }));
+			CHECK(throws_as<unsupported_index>([&] { (void)command::decode_chunk(other); }));
 		}
 	}
 	// Every strict prefix, a trailing byte, an overlong integer and an unknown op kind are damage.
 	for (const auto& [name, bytes] : files) {
-		const bool batch = command::kind_of(bytes) == command::batch;
+		const std::uint8_t kind = command::kind_of(bytes);
+		if (kind == command::chunk) {
+			// A chunk's slice is any bytes: only its header and an empty slice are damage here.
+			for (std::size_t n = 0; n <= command::chunk_overhead; ++n) { CHECK(throws_as<corrupt_index>([&] { (void)command::decode_chunk(bytes.substr(0, n)); })); }
+			for (const char place : {'\0', '\4'}) {
+				std::string other = bytes;
+				other[2] = place;
+				CHECK(throws_as<corrupt_index>([&] { (void)command::decode_chunk(other); }));
+			}
+			continue;
+		}
+		const bool batch = kind == command::batch;
 		const auto decodes = [&](const std::string& b) {
 			if (!batch) {
 				(void)command::decode_checkpoint(b);
@@ -1017,7 +1035,7 @@ void t7b() {
 	std::printf("t7b: %zu cases over %llu mutations, %zu owed flushes\n", cases, (unsigned long long)total, owed);
 }
 
-// --- T8: the command limit at admission, and the turn budget ---------------------------------
+// --- T8: a command past the limit streams as chunks, and the turn budget -----------------------
 
 void t8() {
 	// The smallest segment that holds two 32 KiB commands with their framing: 19 blocks.
@@ -1031,9 +1049,12 @@ void t8() {
 	o2.log_group = group + 1;
 	kv_index mate = kv_index::create(io2, o2, uuid_of("t8-mate"));
 	while (h.sealer.turn()) {}  // the joins' records
-	// Past command_bytes: invalid, no trace.
-	CHECK(ix.apply(tx({replace("big", std::string(small_command, 'x'))}), {}).result == verdict::invalid);
-	CHECK(ix.applied() == files::position{} && !ix.get("big") && !h.sealer.turn());
+	// Past command_bytes: accepted, as two chunk records of a turn each, the last one its position.
+	const std::uint64_t s0 = ix.log_synced();
+	CHECK(ix.apply(tx({replace("big", std::string(small_command, 'x'))}), {}).result == verdict::accepted);
+	CHECK(ix.applied() == (files::position{s0 + 2, 1}) && ix.get("big"));
+	while (h.sealer.turn()) {}
+	CHECK(ix.log_synced() == s0 + 2);
 	// Two loop-mates each near command_bytes: the turn budget splits them across two turns.
 	const std::string near(small_command - 64, 'y');
 	CHECK(ix.apply(tx({replace("a", near)}), {}).result == verdict::accepted);
@@ -1041,9 +1062,9 @@ void t8() {
 	const auto barriers = [&] { return h.driver.log().stats().barriers; };
 	const std::uint64_t b0 = barriers();
 	CHECK(h.sealer.turn());
-	CHECK(barriers() == b0 + 1 && (ix.log_synced() == 2) != (mate.log_synced() == 2));
+	CHECK(barriers() == b0 + 1 && (ix.log_synced() == s0 + 3) != (mate.log_synced() == 2));
 	CHECK(h.sealer.turn());
-	CHECK(barriers() == b0 + 2 && ix.log_synced() == 2 && mate.log_synced() == 2 && !h.sealer.turn());
+	CHECK(barriers() == b0 + 2 && ix.log_synced() == s0 + 3 && mate.log_synced() == 2 && !h.sealer.turn());
 }
 
 // --- T10: runtime refusals leave no trace in the log ---------------------------------------------
