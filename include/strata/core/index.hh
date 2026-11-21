@@ -2773,10 +2773,14 @@ private:
 		std::atomic<std::uint64_t> lost{0};     // maps whose body lost the install race and was destroyed
 	};
 	// The manifest's claim a mapped file must meet (F2, F20): its structures within `mask`, its
-	// version within the range. Copied from the manifest the record was made under.
+	// version within the range, its field ids within the table's size and none its key field.
+	// Copied from the manifest the record was made under; a segment this process wrote has ids
+	// stage 1 checked, so its vouch bounds no field (`fields` all ones).
 	struct vouch {
 		format::structure_bits mask = ~format::structure_bits(0);
 		std::uint32_t min_version = 0, max_version = ~std::uint32_t(0);
+		std::uint64_t fields = ~std::uint64_t(0);
+		std::optional<std::uint32_t> key_field;
 	};
 	// A segment file mapped (or its bytes, when the backend cannot map) and decoded. Immutable,
 	// installed on a record once and never replaced or cleared before the record dies (I1). It
@@ -5925,7 +5929,9 @@ private:
 			if (owner && !(configured & owner)) { throw corrupt_index("configured structure bit " + std::to_string(std::countr_zero(b)) + " without its owner"); }
 		}
 	}
-	static vouch vouch_of(const files::log_state& m) noexcept { return {m.mask, std::uint32_t(m.min_version), std::uint32_t(m.max_version)}; }
+	static vouch vouch_of(const files::log_state& m) noexcept {
+		return {m.mask, std::uint32_t(m.min_version), std::uint32_t(m.max_version), m.fields.size(), m.fields.key_field()};
+	}
 	static files::segment_ref ref_of(const files::log_segment& s) {
 		files::segment_ref r;
 		r.id = s.id;
@@ -6024,6 +6030,8 @@ private:
 		if ((b->seg.core().structures() & ~v.mask) || ver < v.min_version || ver > v.max_version) {
 			throw corrupt_segment("segment outside its manifest's structures or versions");
 		}
+		// At every map: a lazy segment's first read, an eager one's open, a merge's input, a wake.
+		if (v.fields != ~std::uint64_t(0)) { b->seg.check_fields(v.fields, v.key_field); }
 		if (whole) { b->seg.verify_all(); }
 		return b;
 	}
