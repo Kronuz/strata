@@ -475,6 +475,7 @@ struct log_state {
 	// joined since it (D5's second trigger).
 	files::position checkpointed;
 	std::uint64_t logged_bytes = 0;
+	bool writing = false;  // counted in the sealer's writers (D2 item 2)
 	// The newest checkpoint record staged or recovered, which a leave hands to the table (D7).
 	std::uint64_t last_checkpoint = 0;
 	std::string checkpoint_payload;
@@ -786,8 +787,9 @@ struct basic_index_options {
 	// A logged index refuses as invalid a transaction whose command passes this many bytes (D3).
 	std::uint64_t command_bytes = command::max_bytes;
 	// A logged index checkpoints (commit()) when the commands logged since its last checkpoint
-	// pass this many bytes (D5's second trigger; not under defer_io, whose host owns its flushes).
-	std::uint64_t checkpoint_log_bytes = command::max_bytes;
+	// pass its share of the log's window, turn_sealer::window_bytes() over its writers, and at
+	// least this floor (D5's second trigger, rocksdb-parity D2 item 2; not under defer_io).
+	std::uint64_t checkpoint_floor_bytes = 1 << 20;
 	// Tests: runs between a logged apply's stage 1 and its append (T12).
 	std::function<void()> log_seam;
 };
@@ -3519,8 +3521,26 @@ private:
 			refresh();
 		}
 	}
-	// D5's second trigger: the commands logged since the last checkpoint pass its byte bound.
-	bool log_due() const noexcept { return logged_ && !replaying_ && logged_->logged_bytes >= opts_.checkpoint_log_bytes; }
+	// D5's second trigger (rocksdb-parity D2 item 2): the commands logged since the last checkpoint
+	// pass the group's share of the log's window, and the floor.
+	bool log_due() const noexcept {
+		if constexpr (command::loggable<Layout>) {
+			if (!logged_ || replaying_) { return false; }
+			const std::uint64_t share = opts_.log->window_bytes() / std::max<std::uint64_t>(opts_.log->writers(), 1);
+			return logged_->logged_bytes >= std::max(opts_.checkpoint_floor_bytes, share);
+		}
+		return false;
+	}
+	// The group's count in the sealer's writers: in at its first join after a checkpoint, out at the
+	// next checkpoint or its detach.
+	void count_writing(bool on) noexcept {
+		if constexpr (command::loggable<Layout>) {
+			if (logged_ && opts_.log && logged_->writing != on) {
+				logged_->writing = on;
+				opts_.log->writing(on);
+			}
+		}
+	}
 	// D5's step 4, after commit_files() made the edit durable: the checkpoint record {UUID, g, X},
 	// unless nothing was logged since the last one and no join or leave owes one (`force`).
 	void stage_checkpoint(bool force = false) {
@@ -3533,12 +3553,14 @@ private:
 			cp.generation = m_.generation;
 			cp.at = x;
 			logged_->checkpoint(command::encode_checkpoint(cp), x, visible_);
+			count_writing(false);
 			join_owed_ = false;
 			opts_.log->wake();
 		}
 	}
 	void detach_log() noexcept {
 		if constexpr (command::loggable<Layout>) {
+			count_writing(false);
 			if (logged_ && opts_.log) { opts_.log->unseal(logged_->group, logged_.get()); }
 		}
 		logged_.reset();
@@ -3564,6 +3586,7 @@ private:
 				throw;
 			}
 			changed();
+			count_writing(true);
 			if (opened) { opts_.log->wake(); }
 		}
 	}

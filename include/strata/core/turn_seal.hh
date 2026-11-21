@@ -11,6 +11,7 @@
 #include "journal/turn_driver.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -54,7 +55,8 @@ public:
 	// admits fits an empty segment (D3).
 	turn_sealer(kronuz::journal::Host& host, std::uint32_t loop, const kronuz::journal::Identity& identity, const kronuz::journal::TurnLogOptions& geometry,
 		std::uint64_t command_bytes)
-		: host_(host), turns_(host.driver(loop)), identity_(identity), loop_(loop), block_(geometry.block_bytes) {
+		: host_(host), turns_(host.driver(loop)), identity_(identity), loop_(loop), block_(geometry.block_bytes),
+		  window_(geometry.retain_segments ? (geometry.retain_segments - 1) * geometry.segment_bytes : 0) {
 		if (block_ < 512 || geometry.segment_bytes < 2 * turn_framed_bytes(command_bytes + 32, block_) + turn_framed_bytes(4, block_)) {
 			throw std::invalid_argument("strata: the turn log's segments are smaller than two commands");
 		}
@@ -312,6 +314,11 @@ public:
 		return turns_written_;
 	}
 	std::uint32_t block_bytes() const noexcept { return block_; }
+	// The retention window, retain_segments - 1 segments, and the groups that logged commands
+	// since their last checkpoint, which share it (rocksdb-parity D2 item 2).
+	std::uint64_t window_bytes() const noexcept { return window_; }
+	std::uint64_t writers() const noexcept { return writers_.load(std::memory_order_relaxed); }
+	void writing(bool on) noexcept { on ? writers_.fetch_add(1, std::memory_order_relaxed) : writers_.fetch_sub(1, std::memory_order_relaxed); }
 
 private:
 	// A writer blocked in await() (its sequence) or await_sealed() (its predicate), listed under mu_.
@@ -365,6 +372,8 @@ private:
 	kronuz::journal::TurnDriver& turns_;
 	const kronuz::journal::Identity identity_;
 	const std::uint32_t loop_, block_;
+	const std::uint64_t window_;
+	std::atomic<std::uint64_t> writers_{0};
 	std::mutex turn_mu_;  // the driver's loop: one turn at a time, and every driver call but unseal and wake
 	mutable std::mutex mu_;
 	std::condition_variable cv_;
