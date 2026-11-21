@@ -241,6 +241,18 @@ void values() {
 		}
 		check(refused, "a damaged pin is refused");
 	}
+	// A whole pin whose strata list names a file outside strata's names is refused.
+	for (const char* name : {"../x", "app.vol-1", "ip"}) {
+		auto bad = l.pin;
+		bad.strata.back().name = name;
+		bool refused = false;
+		try {
+			(void)sg::decode_pin(sg::encode(bad));
+		} catch (const sg::corrupt_pin&) {
+			refused = true;
+		}
+		check(refused, std::string("a pin naming strata file ") + name + " is refused");
+	}
 	// The serve: chunks of at most 64 KiB, nothing past a file, nothing it does not pin.
 	const auto& up = *std::find_if(l.pin.files.begin(), l.pin.files.end(), [](const auto& f) { return f.name == "up-2"; });
 	check(sg::serve(l.r.io, l.pin, sg::chunk_name(bundle_at, 'a', 0, "up-2"))->size() == 61440, "a 61,440 B file is one chunk");
