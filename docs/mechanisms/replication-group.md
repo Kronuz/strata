@@ -60,8 +60,9 @@ transaction and its own state.
   count; a read refused before the ready point answers 503 with nothing placed.
 - **A replica behind the leader's checkpoint** catches up only by install
   ([group-install.md](group-install.md): the pin, the staged transfer, activation and its
-  recovery). The group does not bind it to consensus's install yet: it answers `SnapshotNeeded`
-  by naming the peer in `installs_needed()`, and the peer stays behind.
+  recovery, and their binding to consensus's Driver). The leader pins at `SnapshotNeeded` and
+  names the peer in `installs_needed()` until the install ends; the learner stages at
+  `ValidateImage` and becomes the bundle at `ActivateImage`, then applies past it.
 - **A fence or a close refuses every `quorum` waiter** from then on, linked or not yet: a fence
   answers `fenced`, a close `closed` for a placement this replica never applied (a leader cut off
   from its followers closes with one). journal's `group_closed` maps to `closed` too.
@@ -171,7 +172,10 @@ which answers it, or to a replica that does not lead, which answers 503; a leade
 `no_space` hands leadership to a follower applied past it, which answers writes while the old
 leader's waits, and so does a follower stalled on `no_space` and then elected by transfer
 (`stalled_follower_elected`). A replica cut off while every other one checkpoints past it is named in
-`installs_needed()` and stays behind (no install yet).
+`installs_needed()` and installs (`install_gap`); the ungated schedules, whose checkpoints leave a
+replica behind, settle by install and pass the oracle over the log merged from every replica's
+applied entries; a learner joins past every checkpoint, installs, and is promoted to replace a
+voter that is then removed, across leader changes (`grow_and_heal`).
 
 `test/group/lifetime_test.cc` (ctest `group_lifetime`, A5 and A10): two groups on one loop with
 their chores on threads; one group's apply blocks at an entry's strata write while the other

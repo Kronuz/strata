@@ -1,7 +1,7 @@
-> Status: the transfer is built and tested on its own (quest group-heal, task `install`);
-> its binding to the group's chore and consensus's install is not. Design: Xapiand
-> `docs/design/cluster-release.md` D16 (install moves the file set), D7, F1; contracts
-> `strata:group-install`, `strata:checkpoint-bundle`.
+> Status: built (quest group-heal, task `install`), bound to consensus's Driver install surface
+> (consensus `docs/DRIVER.md`, Install; Detent's `consensus-driver-install`), which strata pins
+> once it lands. Design: Xapiand `docs/design/cluster-release.md` D16 (install moves the file
+> set), D7, F1; contracts `strata:group-install`, `strata:checkpoint-bundle`.
 
 # Install
 
@@ -85,6 +85,43 @@ one above it waits for consensus's retry. The group's recovery then runs as alwa
 the set truncated to the bundle's lengths, its state. Every step repeats safely, so a crash
 anywhere leaves the old replica (before consensus persists) or the complete new one (after).
 
+## The binding
+
+`group.hh` carries the transfer on consensus's Driver (a group opened with
+`GroupOptions::snapshots`). consensus sends the bundle itself, the image, over the host's transfer
+frames (the loop's `send_transfer`); the pinned files go over the fetch lane (the loop's `fetch`,
+answered by the leader's `group::serve`).
+
+```
+ leader (Sink, chore)                       learner (Sink, chore)
+ SnapshotNeeded ─▶ chore: make_pin(latest)
+   image ═══ SendTransfer frames ═════════▶ ValidateImage(image = bundle, source)
+ serve ◀═══════ fetch lane ═══════════════  fetch_pin, chore held: stage ─▶ validated
+                                            consensus persists the install
+                                            ActivateImage ─▶ chore: adopt(bundle) ─▶ activated
+ SnapshotReleased ─▶ chore: release_pin     Committed past the boundary
+```
+
+- **The leader** pins at `SnapshotNeeded`, on the chore between entries, the bundle at the key's
+  boundary when it is its latest one (restored, installed or published); another boundary pins
+  nothing, the learner's pin fetch finds none, and its validation fails until the leader's next
+  flight. One pin per bundle, held by every flight that asked for it; the last flight's
+  `SnapshotReleased` releases it. A checkpoint's `unlink_retired` stops below the lowest live
+  pin, so the set's files a pin names stay until it goes. The teardown releases what is left;
+  pins a crash left in strata's manifest go at open (`release_pins`).
+- **`serve`** answers the fetch lane on any thread: a pin's own name or its files' chunks, nothing
+  for a pin released. A pin holds the replica's directory, so a serve racing the teardown reads
+  on.
+- **The learner** at `ValidateImage` decodes the image as a bundle at the boundary, fetches the
+  pin from the source incarnation, then holds the chore for the stage (apply waits; the stage is
+  the chore's only work), stages, and answers `validated`, or `validation_failed` with what it
+  staged kept. consensus persists the install only after `validated`.
+- **Activation** at `ActivateImage` is a chore item behind what was queued below the boundary:
+  `adopt`, the step recovery runs after opening strata, finishes the stage (`resume`) and loads
+  the set and the state from the bundle; then `activated`, and consensus delivers past the
+  boundary. A failure fences the replica (`activation_failed`). A crash between consensus's
+  persist and `activated` recovers through the same `adopt`.
+
 ## What it costs
 
 A fresh learner moves every pinned byte once over the lane: G's segments, its manifest log, and
@@ -101,6 +138,17 @@ and the set's once, and needs room for both until the sweep.
   semantic validation (the stage) succeeds.
 
 ## Proof
+
+`test/group/voters_test.cc` drives the binding on consensus's Driver, transfer frames and
+fetches on its seeded network: `install_gap` (a replica cut off while every other checkpoints
+past it installs and its digest equals the replay), the ungated schedules (group-core's seeds 8,
+12, 16, 18, 23, 24, 27 and seeds 101-140 at 3 voters, crashes and power cuts included, settle by
+install), and `grow_and_heal` (at 3 and 5 voters, a joiner added past every checkpoint installs,
+is promoted beside a voter it replaces, and that voter is removed, a leader change between each
+step; the second round replaces the leader). Until CMakeLists.txt pins consensus's install
+surface, `test/group/install_suite.sh` builds them against a consensus checkout (CONSENSUS_DIR).
+`test/group/mutants.py install-silent` drops `SnapshotNeeded`: the ungated schedules do not
+settle.
 
 `test/group/install_test.cc` (until registered, `test/group/install_build.sh BUILD [case]`):
 `values` (the pin, the serve's bounds, a fresh learner fetching every byte once in
