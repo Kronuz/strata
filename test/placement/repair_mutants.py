@@ -31,7 +31,7 @@ MUTANTS = {
     # A leaving node keeps its members: a drain moves nothing.
     "drain-ignored": (PLAN, ["0"], [(REPAIR, "s.lost = s.lost || s.state != node_state::active;", "")]),
     # A promotion never names the member it replaces: no 3 + 1 or 2 + 2 window, no growth past a witness.
-    "no-leaving": (PLAN, ["0"], [(REPAIR, "\t\t\t\tnext.leaving = inc;\n", "")]),
+    "no-leaving": (PLAN, ["0"], [(REPAIR, "\t\t\tbase.leaving = leaving;\n", "")]),
     # A change may leave fewer up voters than a quorum.
     "no-quorum-guard": (PLAN, ["0"], [(REPAIR, "return live >= cs::voter_count(n) / 2 + 1;", "return true;")]),
     # The root's record does not follow the group: loads and preferred leaders drift.
