@@ -229,6 +229,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_include_directories(test_reopen_loops PRIVATE bench/kv)
   target_link_libraries(test_reopen_loops PRIVATE strata::core)
   add_test(NAME reopen_loops COMMAND test_reopen_loops)
+  # An idle index's checkpoint moves forward while another writes 10 x retain_segments segments;
+  # the log keeps at most retain + spare + 1 segment files (rocksdb-parity D2's test).
+  add_executable(test_checkpoint_window test/test_checkpoint_window.cc)
+  target_link_libraries(test_checkpoint_window PRIVATE strata::core)
+  add_test(NAME checkpoint_window_explicit COMMAND test_checkpoint_window explicit)
   add_executable(apply_atomic_test test/apply_atomic_test.cc)
   target_link_libraries(apply_atomic_test PRIVATE strata::core)
   add_test(NAME apply_atomic COMMAND apply_atomic_test)
@@ -445,6 +450,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   endif()
   add_executable(kv_strata bench/kv/kv_strata.cc)
   target_link_libraries(kv_strata PRIVATE strata::core)
+  # rocksdb-parity D2 item 2's floor: checkpoints and bytes written at 10k logged indexes.
+  add_executable(checkpoint_floor bench/kv/probes/rocksdb-parity/checkpoint-floor.cc)
+  target_link_libraries(checkpoint_floor PRIVATE strata::core)
   # format-14-kv's micro-prototypes (bench/kv/proto): block layouts and codecs, the decoded-block
   # cache, the buffer's sorted view, and the current buffer's bytes per record. Off by default, so
   # no other build fetches what they use; LZ4 is the pinned one strata links.
