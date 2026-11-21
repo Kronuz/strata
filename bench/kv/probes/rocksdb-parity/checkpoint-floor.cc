@@ -5,7 +5,8 @@
 // trigger is the bytes of commands an index logs before it checkpoints. A checkpoint is counted
 // where an apply flushed the buffer (a commit). Prints one JSON line; phases go to stderr for
 // wbytes.c (`phase NAME x`).
-//   checkpoint_floor DIR [--indexes N] [--writes W] [--value V] [--threads T] [--theta Z] [--trigger B]
+// With DIR/host present it reopens the indexes `--setup` left there.
+//   checkpoint_floor DIR [--setup] [--indexes N] [--writes W] [--value V] [--threads T] [--theta Z] [--trigger B]
 #include "strata/core/index.hh"
 #include "strata/core/turn_seal.hh"
 #include "strata/core/work_pool_executor.hh"
@@ -73,7 +74,7 @@ double seconds_since(std::chrono::steady_clock::time_point t) { return std::chro
 
 int main(int argc, char** argv) {
 	if (argc < 2) {
-		std::fprintf(stderr, "usage: checkpoint_floor DIR [--indexes N] [--writes W] [--value V] [--threads T] [--theta Z(x100)] [--trigger B]\n");
+		std::fprintf(stderr, "usage: checkpoint_floor DIR [--setup] [--indexes N] [--writes W] [--value V] [--threads T] [--theta Z(x100)] [--trigger B]\n");
 		return 2;
 	}
 	const std::string dir = argv[1];
@@ -83,6 +84,9 @@ int main(int argc, char** argv) {
 	const unsigned threads = unsigned(std::max<std::uint64_t>(1, arg(argc, argv, "--threads", 4)));
 	const double theta = double(arg(argc, argv, "--theta", 99)) / 100;
 	const std::uint64_t trigger = arg(argc, argv, "--trigger", 0);  // 0: the index's default
+	bool setup = false;
+	for (int i = 2; i < argc; ++i) { setup |= !std::strcmp(argv[i], "--setup"); }
+	const bool reopen = !setup && std::filesystem::exists(dir + "/host");
 
 	const jr::Identity id{'c', 'k', 'p', 't', '-', 'f', 'l', 'o', 'o', 'r'};
 	jr::Host host(posix_io(dir + "/host"), id, jr::HostOptions{1, geometry()});
@@ -101,11 +105,12 @@ int main(int argc, char** argv) {
 	auto pool = std::make_unique<WorkPool>(po);
 	auto exec = std::make_unique<strata::work_pool_executor>(*pool);
 
-	phase("create");
+	phase(reopen ? "open" : "create");
 	const auto t0 = std::chrono::steady_clock::now();
 	std::vector<std::shared_ptr<jr::IO>> ios(n);
 	std::vector<std::unique_ptr<kv_index>> ixs(n);
-	// Created on 16 threads: each create's commits sync, about 90 ms of them on the host.
+	// On 16 threads. A create's syncs take about 70 ms on the host, mostly its group's, one at a
+	// time: `--setup` creates (under nosync.c) and leaves the groups open, and a run reopens them.
 	auto create = [&](std::size_t i) {
 		char name[32];
 		std::snprintf(name, sizeof name, "/i%06zu", i);
@@ -121,7 +126,7 @@ int main(int argc, char** argv) {
 		if (trigger) { o.checkpoint_log_bytes = trigger; }
 		std::array<char, 16> uuid{'c', 'k', 'p', 't'};
 		std::memcpy(uuid.data() + 8, &i, sizeof i);
-		ixs[i] = std::make_unique<kv_index>(kv_index::create(*ios[i], o, uuid));
+		ixs[i] = std::make_unique<kv_index>(reopen ? kv_index::open(*ios[i], o) : kv_index::create(*ios[i], o, uuid));
 	};
 	{
 		std::atomic<std::size_t> next{0};
@@ -134,6 +139,13 @@ int main(int argc, char** argv) {
 		for (auto& c : cs) { c.join(); }
 	}
 	const double create_s = seconds_since(t0);
+	if (setup) {
+		sealer.stop();
+		loop.join();
+		std::printf("{\"setup\":%zu,\"create_s\":%.2f}\n", n, create_s);
+		std::fflush(stdout);
+		std::exit(0);  // no leave: the groups stay open for the run's reopen
+	}
 
 	// Per thread: its indexes' Zipf CDF, and its count of puts and checkpoints.
 	const std::size_t per = (n + threads - 1) / threads;
@@ -194,7 +206,7 @@ int main(int argc, char** argv) {
 	const jr::TurnLogStats st = host.driver(0).log().stats();
 	const std::size_t segments = host.driver(0).log().data_segments().size();
 	std::printf(
-		"{\"indexes\":%zu,\"writes\":%" PRIu64 ",\"value\":%zu,\"threads\":%u,\"theta\":%.2f,\"trigger\":%" PRIu64 ",\"create_s\":%.2f,\"run_s\":%.3f,"
+		"{\"indexes\":%zu,\"writes\":%" PRIu64 ",\"value\":%zu,\"threads\":%u,\"theta\":%.2f,\"trigger\":%" PRIu64 ",\"open_s\":%.2f,\"run_s\":%.3f,"
 		"\"puts_per_s\":%.0f,\"checkpoints\":%" PRIu64 ",\"checkpoints_per_s\":%.1f,\"commits\":%" PRIu64 ",\"log_bytes_written\":%" PRIu64
 		",\"log_bytes_appended\":%" PRIu64 ",\"forwarded_bytes\":%" PRIu64 ",\"forwarded_records\":%" PRIu64 ",\"turns\":%" PRIu64
 		",\"segments_prepared\":%" PRIu64 ",\"segments_recycled\":%" PRIu64 ",\"segments_removed\":%" PRIu64 ",\"data_segments\":%zu}\n",

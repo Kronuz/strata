@@ -123,6 +123,8 @@ int main(int argc, char** argv) {
 	CHECK(log.segment() >= first + 10 * g.retain_segments);
 	CHECK(most <= bound);
 	CHECK(st.forwarded_records > 0);
+	// Each log byte is written about once (D2): forward copies stay under a tenth of the commands.
+	CHECK(st.forwarded_bytes * 10 <= logged);
 	// The writer checkpoints once per window of commands: the transactions' bytes, without their framing.
 	CHECK(checkpoints + 1 >= logged / window && checkpoints <= logged / window + 1);
 	// The idle index still reads its write.

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Probe (rocksdb-parity D2 item 2, N9): one checkpoint_floor run under wbytes.c, from a strata
-# checkout with the probe built in BUILD (default build). Prints the probe's JSON line and the run
+# checkout with the probe built in BUILD (default build). The indexes are created first with
+# syncs off (nosync.c), then the run reopens them. Prints the probe's JSON line and the run
 # phase's bytes written by file class: the turn log (host/), zero-fill apart, and the indexes.
 #   checkpoint-floor.sh [BUILD] -- probe arguments (--trigger B --indexes N --writes W ...)
 set -u
@@ -13,7 +14,10 @@ OUT=$O/run-$(date +%H%M%S)-$$
 mkdir -p "$OUT"
 echo "OUT=$OUT"
 cc -O2 -dynamiclib "$P/wbytes.c" -o "$OUT/wbytes.dylib" || exit 1
+cc -O2 -dynamiclib "$P/nosync.c" -o "$OUT/nosync.dylib" || exit 1
 ulimit -n 65536 2>/dev/null || ulimit -n 10240
+DYLD_INSERT_LIBRARIES=$OUT/nosync.dylib "$B/checkpoint_floor" "$OUT/data" --setup "$@" || exit 1
+sync
 WBYTES_LOG=$OUT/wbytes.tsv DYLD_INSERT_LIBRARIES=$OUT/wbytes.dylib "$B/checkpoint_floor" "$OUT/data" "$@" >"$OUT/run.json" 2>"$OUT/run.err"
 rc=$?
 cat "$OUT/run.json"
