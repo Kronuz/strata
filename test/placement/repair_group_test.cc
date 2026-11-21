@@ -422,9 +422,13 @@ void replace(std::uint64_t seed) {
 	c.verify("after node " + std::to_string(x) + " was replaced");
 	auto* root = c.w.leader(root_gid);
 	if (root) {
-		bool fresh = false;
-		for (const auto& m : root->state()->membership.members) { fresh = fresh || m.incarnation > 3; }
-		check(fresh && !cs::find_member(root->state()->membership, x), "a new root voter joined and node " + std::to_string(x) + "'s left");
+		bool fresh = false, left = true;
+		const auto m = root->state()->membership;  // a copy: the state is a temporary
+		for (const auto& y : m.members) {
+			fresh = fresh || (y.incarnation > 3 && y.role == cs::MemberRole::Voter);
+			left = left && y.node != x;
+		}
+		check(fresh && left, "a new root voter joined and node " + std::to_string(x) + "'s left: " + text(m));
 	}
 }
 
@@ -517,7 +521,8 @@ void defer(std::uint64_t seed) {
 	if (!check(l != nullptr, "up has a leader")) { return; }
 	if (l->node == preferred) {
 		cs::NodeId other = 0;
-		for (const auto& m : l->state()->membership.members) {
+		const auto members = l->state()->membership.members;  // a copy: the state is a temporary
+		for (const auto& m : members) {
 			if (m.node != preferred && m.role == cs::MemberRole::Voter) { other = m.incarnation; }
 		}
 		auto t = start(l->p->loop_ref(), l->p->lp->driver().transfer_leadership(g, other));
@@ -559,7 +564,9 @@ void defer(std::uint64_t seed) {
 	if (!check(c.d.converge(), "repair converges once the upload ends")) { return; }
 	l = c.w.leader(g);
 	check(c.d.transfers > transfers && l && l->node == preferred, "made once it ends: leader on node " + std::to_string(l ? l->node : 0) + ", preferred " + std::to_string(preferred));
-	for (const auto& m : l->state()->membership.members) {
+	if (!l) { return; }
+	const auto members = l->state()->membership.members;  // a copy: the state is a temporary
+	for (const auto& m : members) {
 		auto* r = static_cast<shard_replica*>(c.w.find(g, m.incarnation));
 		if (!r) { continue; }
 		const auto d = of(*r);
