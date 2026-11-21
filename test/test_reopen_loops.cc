@@ -7,7 +7,7 @@
 // Usage: test_reopen_loops [--seeds N] (power-loss seeds per cut, default 2).
 #include "kv_strata.hh"
 
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -17,7 +17,7 @@
 #include <string>
 #include <vector>
 
-namespace faultfs = strata::faultfs;
+namespace fl = kronuz::faultlab;
 
 namespace {
 
@@ -32,7 +32,7 @@ int failures = 0;
 // A directory as the names under its prefix in one shared faultfs; its owner locks are tokens.
 class dir_view final : public jr::IO {
 public:
-	dir_view(faultfs::io& io, std::string prefix) : io_(io), prefix_(std::move(prefix)) {}
+	dir_view(fl::io& io, std::string prefix) : io_(io), prefix_(std::move(prefix)) {}
 	jr::FilesystemClass directory_filesystem() const override { return io_.directory_filesystem(); }
 	jr::DirectoryTrust directory_trust() const override { return io_.directory_trust(); }
 	std::unique_ptr<jr::OwnerLock> acquire_owner(bool) override { return std::make_unique<jr::OwnerLock>(); }
@@ -64,7 +64,7 @@ public:
 
 private:
 	std::string path(std::string_view n) const { return prefix_ + std::string(n); }
-	faultfs::io& io_;
+	fl::io& io_;
 	std::string prefix_;
 };
 
@@ -72,8 +72,8 @@ constexpr std::uint32_t loop_counts[] = {1, 3, 2};  // step j runs at loop_count
 constexpr unsigned indexes = 4;
 
 struct world {
-	faultfs::filesystem fs;
-	faultfs::io io{fs};
+	fl::filesystem fs;
+	fl::io io{fs};
 	strata_kv::io_maker maker() {
 		return [this](const std::string& dir) -> std::shared_ptr<jr::IO> {
 			std::string prefix = dir + "/";

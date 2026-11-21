@@ -2,7 +2,7 @@
 // CT-R25, CT-R26): demote() swaps every record for a twin with no body, promote() maps them again,
 // and under defer_io apply answers verdict::map_owed in between. Each case names its K5 rule and
 // the options it runs with; the mutants that each case must kill are run by .scratch/mutants.py.
-// The device-call counter (faultfs::filesystem::calls()) is the oracle for "apply makes no I/O";
+// The device-call counter (faultfs's calls()) is the oracle for "apply makes no I/O";
 // the wrapper's live mappings are the oracle for "the index keeps no map".
 #include "cold_hooks.hh"
 #include "stepping_executor.hh"
@@ -46,7 +46,7 @@ kv_index::options opts_of(fixture& f, bool eager, bool defer, bool merges = fals
 files::position at(std::uint64_t n) { return {1, n}; }
 
 template <class F>
-std::uint64_t calls_in(const faultfs::filesystem& fs, F&& f) {
+std::uint64_t calls_in(const fl::filesystem& fs, F&& f) {
 	const std::uint64_t before = fs.calls();
 	f();
 	return fs.calls() - before;
@@ -554,8 +554,8 @@ std::string noise(std::size_t n, std::uint64_t seed) {
 	return s;
 }
 void turn_bound_drain() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	byte_budget storage(150 * 1024);
 	kv_index::options o;
 	o.keyed = true;
@@ -785,7 +785,7 @@ struct workload_result {
 	contents_t inflight;  // before the commit that was running when power went
 	bool in_commit = false;
 };
-void workload(kv_index& ix, faultfs::filesystem& fs, bool defer, workload_result& r) {
+void workload(kv_index& ix, fl::filesystem& fs, bool defer, workload_result& r) {
 	std::uint64_t pos = 0;
 	const auto go = [&](const transaction& t) {
 		turn_counts c;
@@ -839,8 +839,8 @@ void crash_points() {
 		o.defer_io = defer;
 		std::uint64_t points = 0;
 		{
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			fl::filesystem fs;
+			fl::io io(fs);
 			auto ix = kv_index::create(io, o, uuid_of("crash"));
 			workload_result r;
 			const auto from = fs.mutations();
@@ -849,8 +849,8 @@ void crash_points() {
 		}
 		CHECK(points > 25);  // each commit an append: about 32 mutations
 		for (std::uint64_t n = 0; n <= points; ++n) {
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			fl::filesystem fs;
+			fl::io io(fs);
 			workload_result r;
 			{
 				auto ix = kv_index::create(io, o, uuid_of("crash"));

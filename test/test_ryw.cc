@@ -44,7 +44,7 @@ jr::TurnLogOptions geometry() {
 class host_view final : public jr::IO {
 public:
 	static constexpr std::string_view prefix = "host-";
-	explicit host_view(faultfs::io& io) : io_(io) {}
+	explicit host_view(fl::io& io) : io_(io) {}
 	jr::FilesystemClass directory_filesystem() const override { return io_.directory_filesystem(); }
 	jr::DirectoryTrust directory_trust() const override { return io_.directory_trust(); }
 	std::unique_ptr<jr::OwnerLock> acquire_owner(bool) override { return std::make_unique<jr::OwnerLock>(); }
@@ -77,14 +77,14 @@ public:
 
 private:
 	static std::string path(std::string_view n) { return std::string(prefix) + std::string(n); }
-	faultfs::io& io_;
+	fl::io& io_;
 };
 
 // A journal host with one loop, and its sealer for the indexes.
 struct host {
 	jr::Host table;
 	turn_sealer sealer;
-	explicit host(faultfs::io& io) : table(std::make_shared<host_view>(io), host_identity(), jr::HostOptions{1, geometry()}), sealer(table, 0, host_identity(), geometry(), command_bytes) {}
+	explicit host(fl::io& io) : table(std::make_shared<host_view>(io), host_identity(), jr::HostOptions{1, geometry()}), sealer(table, 0, host_identity(), geometry(), command_bytes) {}
 };
 
 kv_index::options logged_options(turn_sealer& s) {
@@ -128,8 +128,8 @@ bool until(Ready ready, Each each) {
 // --- held: the owner reads its write, views do not, until the barrier --------------------------
 
 void held() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	host h(io);
 	h.sealer.served(true);  // writers wait for turns, which this thread writes
 	std::atomic<int> stage{0}, go{0};
@@ -185,8 +185,8 @@ void held() {
 
 void crash() {
 	for (const std::uint64_t seed : {0, 1, 2, 3}) {  // 0: a process crash, which keeps every byte written
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		{
 			host h(io);
 			kv_index ix = kv_index::create(io, logged_options(h.sealer), uuid_of("ryw-crash"));
@@ -214,8 +214,8 @@ void crash() {
 
 void race() {
 	constexpr int n = 3000;
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	host h(io);
 	std::thread loop([&] { h.sealer.serve(); });
 	std::uint64_t missed = 0, reads = 0, exposed = 0, behind = 0;

@@ -474,8 +474,8 @@ int main(int argc, char** argv) {
 	// T7 on faultfs, which models a local disk: classified local by default, so no warning;
 	// classified NFS, it refuses under refuse and warns under warn, through a wrapper too.
 	{
-		faultfs::filesystem f;
-		faultfs::io io(f);
+		fl::filesystem f;
+		fl::io io(f);
 		{
 			auto ix = kv_index::create(io, policy(refuse), uuid_a);
 			CHECK(!ix.filesystem_warning());
@@ -560,8 +560,8 @@ int main(int argc, char** argv) {
 		// A foreign owner, which an ordinary user cannot make on disk, and an IO that does not
 		// say, through faultfs and the wrappers: warn reports it, refuse refuses.
 		{
-			faultfs::filesystem f;
-			faultfs::io io(f);
+			fl::filesystem f;
+			fl::io io(f);
 			{
 				auto ix = kv_index::create(io, trust_policy(trust_refuse), uuid_a);  // owned and private: trusted
 				CHECK(!ix.directory_trust_warning());
@@ -599,8 +599,8 @@ int main(int argc, char** argv) {
 		}
 		// A wrapper that does not forward leaves the base default: unknown, so not trusted.
 		{
-			faultfs::filesystem f;
-			faultfs::io io(f);
+			fl::filesystem f;
+			fl::io io(f);
 			{ auto ix = kv_index::create(io, keyed(), uuid_a); }
 			wrapper_io bare(io, false);
 			std::string what;
@@ -617,8 +617,8 @@ int main(int argc, char** argv) {
 		// writer's temporary file, both against a held lock, are busy with the files untouched
 		// (recovery would remove the holder's in-flight files).
 		{
-			faultfs::filesystem f;
-			faultfs::io holder(f), other(f);
+			fl::filesystem f;
+			fl::io holder(f), other(f);
 			auto lock = holder.acquire_directory_owner();  // a create in progress, nothing written yet
 			other.create_exclusive("manifest-1.tmp")->write_at(0, "torn");
 			other.sync_directory();
@@ -628,8 +628,8 @@ int main(int argc, char** argv) {
 			CHECK(f.list().size() == 1);
 		}
 		{
-			faultfs::filesystem f;
-			faultfs::io holder(f), other(f);
+			fl::filesystem f;
+			fl::io holder(f), other(f);
 			auto ix = kv_index::create(holder, keyed(), uuid_a);
 			ix.apply(one_doc("Qa"), {});
 			ix.commit();
@@ -646,9 +646,9 @@ int main(int argc, char** argv) {
 		// over an empty directory makes 3 durability calls: the log's sync at the ordering point
 		// and 2 directory syncs (the ordering point, the rename's). Clearing residue adds one.
 		{
-			auto syncs = [](faultfs::op kind, std::uint64_t nth, bool residue) {
-				faultfs::filesystem f;
-				faultfs::io io(f);
+			auto syncs = [](fl::op kind, std::uint64_t nth, bool residue) {
+				fl::filesystem f;
+				fl::io io(f);
 				if (residue) {
 					io.create_exclusive("manifest-1.tmp")->write_at(0, "torn");
 					io.sync_directory();
@@ -656,12 +656,12 @@ int main(int argc, char** argv) {
 				f.add_fault({kind, nth, EIO});
 				return error_of([&] { auto ix = kv_index::create(io, keyed(), uuid_a); }) != 0;  // the nth happened
 			};
-			CHECK(syncs(faultfs::op::sync, 1, false) && !syncs(faultfs::op::sync, 2, false));
-			CHECK(syncs(faultfs::op::sync_directory, 2, false) && !syncs(faultfs::op::sync_directory, 3, false));
-			CHECK(syncs(faultfs::op::sync_directory, 3, true) && !syncs(faultfs::op::sync_directory, 4, true));
+			CHECK(syncs(fl::op::sync, 1, false) && !syncs(fl::op::sync, 2, false));
+			CHECK(syncs(fl::op::sync_directory, 2, false) && !syncs(fl::op::sync_directory, 3, false));
+			CHECK(syncs(fl::op::sync_directory, 3, true) && !syncs(fl::op::sync_directory, 4, true));
 			// Power off before any mutation: create fails and the directory stays empty.
-			faultfs::filesystem f;
-			faultfs::io io(f);
+			fl::filesystem f;
+			fl::io io(f);
 			f.power_off_after(0);
 			CHECK(error_of([&] { auto ix = kv_index::create(io, keyed(), uuid_a); }) != 0);
 			CHECK(f.list().empty());
@@ -673,8 +673,8 @@ int main(int argc, char** argv) {
 		{
 			std::uint64_t total = 0, empty = 0, one = 0;
 			{
-				faultfs::filesystem f;
-				faultfs::io io(f);
+				fl::filesystem f;
+				fl::io io(f);
 				auto ix = kv_index::create(io, keyed(), uuid_a);
 				empty = ix.digest();
 				ix.apply(one_doc("Qa"), {});
@@ -686,8 +686,8 @@ int main(int argc, char** argv) {
 			std::uint64_t n = 0, opened_empty = 0, opened_one = 0, cleared = 0, corrupt = 0, other_errors = 0;
 			for (std::uint64_t at = 0; at <= total; ++at) {
 				for (std::uint64_t k = 0; k < per; ++k, ++n) {
-					faultfs::filesystem f;
-					faultfs::io io(f);
+					fl::filesystem f;
+					fl::io io(f);
 					f.power_off_after(at);
 					try {
 						auto ix = kv_index::create(io, keyed(), uuid_a);

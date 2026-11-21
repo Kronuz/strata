@@ -118,7 +118,7 @@ void absent_dir(W& w, const char* alias) {
 // Fences the index behind `p`: a document applied, a sync that fails under commit.
 template <class WW, class P>
 bool fence(WW& w, int dir, P& p, int round = 0) {
-	w.dirs[dir].fs.add_fault({faultfs::op::sync, 1, EIO});
+	w.dirs[dir].fs.add_fault({fl::op::sync, 1, EIO});
 	bool fenced = false;
 	try {
 		(void)p.index().apply(tx({set_meta("fence" + std::to_string(round), "x")}), {});  // an owed index answers map_owed

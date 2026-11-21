@@ -32,8 +32,8 @@ static std::optional<std::uint64_t> read_digest(kv_index& ix, bool& healed) {
 int main() {
 	kv_index::options keyed;
 	keyed.keyed = true;
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	{
 		auto ix = kv_index::create(io, keyed, uuid);
 		for (int s = 0; s < 3; ++s) {
@@ -74,8 +74,8 @@ int main() {
 			if (at >= prefix) { offsets.push_back(at); }
 		}
 		for (const std::uint64_t at : offsets) {
-			for (faultfs::media kind : {faultfs::media::bit_flip, faultfs::media::read_error}) {
-				const char* label = kind == faultfs::media::bit_flip ? "flip" : "EIO";
+			for (fl::media kind : {fl::media::bit_flip, fl::media::read_error}) {
+				const char* label = kind == fl::media::bit_flip ? "flip" : "EIO";
 				// Transient: the medium returns the right bytes on the next read.
 				fs.clear_faults();
 				fs.add_media_fault(name, kind, at, at + 1, 1);
@@ -153,7 +153,7 @@ int main() {
 			merged = index_detail::segment_name(ix.manifest().segments.begin()->first);
 		}
 		const std::uint64_t size = fs.view(merged).size();
-		fs.add_media_fault(merged, faultfs::media::bit_flip, size / 2, size / 2 + 1, 0);
+		fs.add_media_fault(merged, fl::media::bit_flip, size / 2, size / 2 + 1, 0);
 		bool head_failed = false;
 		try {
 			auto ix = kv_index::open(io, keyed);

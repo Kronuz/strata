@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.18)
 project(strata LANGUAGES C CXX)
 
+# Ninja is the only supported generator (the top-level project only).
+if (CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR AND NOT CMAKE_GENERATOR MATCHES "^Ninja")
+	message(FATAL_ERROR "Ninja only: configure with -G Ninja (not ${CMAKE_GENERATOR})")
+endif ()
+
 include(FetchContent)
 
 # Building blocks (Kronuz libraries). Point FETCHCONTENT_SOURCE_DIR_<NAME> at local
@@ -93,6 +98,11 @@ strata_check_links(strata_core "docset;bitpack;analysis;unicode;snowball")
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   enable_testing()
+  # faultlab's faultfs, the crash model the tests and benches run on (faultlab/faultfs.h); it
+  # reuses the completion target declared above. Every target here links it.
+  FetchContent_Declare(faultlab GIT_REPOSITORY https://github.com/Kronuz/faultlab.git GIT_TAG e3fcfe3ca197d40e53371dffee1497708fc438b5)
+  FetchContent_MakeAvailable(faultlab)
+  link_libraries(faultlab::faultlab)
   add_executable(fields_test test/fields_test.cc)
   target_link_libraries(fields_test PRIVATE strata::core)
   add_test(NAME fields COMMAND fields_test)
@@ -103,9 +113,6 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(merge_policy_test test/merge_policy_test.cc)
   target_link_libraries(merge_policy_test PRIVATE strata::core)
   add_test(NAME merge_policy COMMAND merge_policy_test)
-  add_executable(faultfs_test test/faultfs_test.cc)
-  target_link_libraries(faultfs_test PRIVATE strata::core)
-  add_test(NAME faultfs COMMAND faultfs_test)
   # strata::group's lone voter crashed at every point (quest group-core A1).
   add_executable(group_lone_voter_test test/group/lone_voter_test.cc)
   target_link_libraries(group_lone_voter_test PRIVATE strata::group)
@@ -167,7 +174,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(scan_test PRIVATE strata::core)
   add_test(NAME scan COMMAND scan_test)
   add_test(NAME scan_mapped COMMAND scan_test)
-  set_tests_properties(scan_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  set_tests_properties(scan_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1")
   # Format 14's step 1 (docs/design/format-14-kv.md): fixtures, index_sort, key order, blocks,
   # codecs, and key-ordered merges; and gets that allocate nothing (an allocation-counting build).
   add_executable(key_index_test test/key_index_test.cc)
@@ -184,7 +191,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(get_alloc_test PRIVATE strata::core)
   add_test(NAME get_alloc COMMAND get_alloc_test)
   add_test(NAME get_alloc_mapped COMMAND get_alloc_test)
-  set_tests_properties(get_alloc_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  set_tests_properties(get_alloc_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1")
   # The lifecycle on the document layout, as prospect's suites run it on the search layout
   # (docs/status/core-lifecycle-tests.md): media faults, reclamation, the directory, crash and
   # power loss, background merges, and the index's operations. Core headers only.
@@ -199,7 +206,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(reclaim_backlog_test PRIVATE strata::core)
   add_test(NAME reclaim_backlog COMMAND reclaim_backlog_test)
   add_test(NAME reclaim_backlog_mapped COMMAND reclaim_backlog_test)
-  set_tests_properties(reclaim_backlog_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  set_tests_properties(reclaim_backlog_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1")
   # A view held across refresh(): faultfs aborts if its file is truncated (shared-reader D7).
   add_test(NAME reclaim_backlog_view COMMAND reclaim_backlog_test view)
   # Reclaim's deletes on the host's executor: posted, failed, drained, closed, crashed.
@@ -207,7 +214,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(reclaim_bg_test PRIVATE strata::core)
   add_test(NAME reclaim_bg COMMAND reclaim_bg_test)
   add_test(NAME reclaim_bg_mapped COMMAND reclaim_bg_test)
-  set_tests_properties(reclaim_bg_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  set_tests_properties(reclaim_bg_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1")
   # apply() leaves no partial state when a stage-1 segment read throws (CT-R5).
   # Standalone durability through the turn log (docs/design/standalone-turn-log.md): the command
   # codec's fixtures, the open record and its seal, V at the barrier, and crash cases.
@@ -249,7 +256,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(retention_test PRIVATE strata::core)
   add_test(NAME retention COMMAND retention_test)
   add_test(NAME retention_mapped COMMAND retention_test)
-  set_tests_properties(retention_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  set_tests_properties(retention_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1")
   add_executable(lifecycle_test test/lifecycle_test.cc)
   target_link_libraries(lifecycle_test PRIVATE strata::core)
   add_test(NAME lifecycle COMMAND lifecycle_test)
@@ -265,7 +272,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(defer_io_test PRIVATE strata::core)
   add_test(NAME defer_io COMMAND defer_io_test)
   add_test(NAME defer_io_mapped COMMAND defer_io_test)
-  set_tests_properties(defer_io_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  set_tests_properties(defer_io_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1")
   add_executable(work_pool_executor_test test/work_pool_executor_test.cc)
   target_link_libraries(work_pool_executor_test PRIVATE strata::core)
   add_test(NAME work_pool_executor COMMAND work_pool_executor_test)
@@ -277,12 +284,12 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   # sanitizer jobs' hour.
   foreach(t index reclaim lifecycle background_merge flush_memory)
     add_test(NAME ${t}_mapped COMMAND ${t}_test)
-    set_tests_properties(${t}_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+    set_tests_properties(${t}_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1")
   endforeach()
   add_test(NAME reclaim_bg_crash_mapped COMMAND reclaim_test bg)
-  set_tests_properties(reclaim_bg_crash_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1;STRATA_CRASH_POINTS=150")
-  set_tests_properties(reclaim_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1;STRATA_CRASH_POINTS=150")
-  set_tests_properties(lifecycle_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1;STRATA_CRASH_POINTS=1000;STRATA_BG_CRASH_POINTS=200")
+  set_tests_properties(reclaim_bg_crash_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1;STRATA_CRASH_POINTS=150")
+  set_tests_properties(reclaim_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1;STRATA_CRASH_POINTS=150")
+  set_tests_properties(lifecycle_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1;STRATA_CRASH_POINTS=1000;STRATA_BG_CRASH_POINTS=200")
   # The shared reader's core (docs/design/shared-reader.md step 1): the hazard registry, its
   # ordering litmus (native; it must also catch a weakened order on x86_64, so it runs alone),
   # the copy-on-write live bits, merge sources, and snapshot reads; then the views, their
@@ -359,24 +366,24 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(shared_read_test PRIVATE strata::core)
   add_test(NAME shared_read COMMAND shared_read_test)
   add_test(NAME shared_read_mapped COMMAND shared_read_test)
-  set_tests_properties(shared_read_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  set_tests_properties(shared_read_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1")
   add_executable(shared_view_test test/shared_view_test.cc)
   target_link_libraries(shared_view_test PRIVATE strata::core)
   add_test(NAME shared_view COMMAND shared_view_test)
   add_test(NAME shared_view_mapped COMMAND shared_view_test 2)
-  set_tests_properties(shared_view_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  set_tests_properties(shared_view_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1")
   # install() maps only files the target owns: a live source's reclaim leaves it readable.
   add_executable(install_own_test test/install_own_test.cc)
   target_link_libraries(install_own_test PRIVATE strata::core)
   add_test(NAME install_own COMMAND install_own_test)
   add_test(NAME install_own_mapped COMMAND install_own_test)
-  set_tests_properties(install_own_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  set_tests_properties(install_own_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1")
   # install()'s reopen: a host error neither fences nor counts as media; write damage surfaces at read.
   add_executable(install_errors_test test/install_errors_test.cc)
   target_link_libraries(install_errors_test PRIVATE strata::core)
   add_test(NAME install_errors COMMAND install_errors_test)
   add_test(NAME install_errors_mapped COMMAND install_errors_test)
-  set_tests_properties(install_errors_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  set_tests_properties(install_errors_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1")
   add_executable(directory_test test/directory_test.cc)
   target_link_libraries(directory_test PRIVATE strata::core)
   target_compile_definitions(directory_test PRIVATE STRATA_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")

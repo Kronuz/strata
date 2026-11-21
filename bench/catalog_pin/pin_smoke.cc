@@ -4,7 +4,7 @@
 //   pin_smoke [rounds] [pairs per round]   default: 11 rounds of 2,000,000
 #include "strata/core/catalog.hh"
 #include "strata/core/executor.hh"
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 #include "strata/core/index.hh"
 
 #include <algorithm>
@@ -12,6 +12,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
+
+namespace fl = kronuz::faultlab;
 
 using namespace strata;
 using kv_index = basic_index<document_layout>;
@@ -34,8 +36,8 @@ std::uint64_t sink = 0;
 int main(int argc, char** argv) {
 	const int rounds = argc > 1 ? std::atoi(argv[1]) : 11;
 	const long pairs = argc > 2 ? std::atol(argv[2]) : 2'000'000;
-	faultfs::filesystem fs;
-	faultfs::io fio{fs};
+	fl::filesystem fs;
+	fl::io fio{fs};
 	fs.map_files(true);
 	kv_index::options o;
 	o.keyed = true;
@@ -57,11 +59,11 @@ int main(int argc, char** argv) {
 	h.timer = [](std::uint64_t, std::function<void()> fn) { fn(); };  // never armed: nothing here fails
 #ifdef STRATA_ITEM5B
 	h.resolve = [&](const cat::opening& op) -> std::unique_ptr<kronuz::journal::IO> {
-		return counted_io::make(op.counts, [&] { return std::unique_ptr<kronuz::journal::IO>(new faultfs::io(fs)); });
+		return counted_io::make(op.counts, [&] { return std::unique_ptr<kronuz::journal::IO>(new fl::io(fs)); });
 	};
 #else
 	h.resolve = [&](std::string_view, io_counts c) -> std::unique_ptr<kronuz::journal::IO> {
-		return counted_io::make(c, [&] { return std::unique_ptr<kronuz::journal::IO>(new faultfs::io(fs)); });
+		return counted_io::make(c, [&] { return std::unique_ptr<kronuz::journal::IO>(new fl::io(fs)); });
 	};
 #endif
 	cat c(std::move(h));

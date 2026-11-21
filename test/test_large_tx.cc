@@ -43,7 +43,7 @@ jr::Identity host_identity() {
 class host_view final : public jr::IO {
 public:
 	static constexpr std::string_view prefix = "host-";
-	explicit host_view(faultfs::io& io) : io_(io) {}
+	explicit host_view(fl::io& io) : io_(io) {}
 	jr::FilesystemClass directory_filesystem() const override { return io_.directory_filesystem(); }
 	jr::DirectoryTrust directory_trust() const override { return io_.directory_trust(); }
 	std::unique_ptr<jr::OwnerLock> acquire_owner(bool) override { return std::make_unique<jr::OwnerLock>(); }
@@ -76,7 +76,7 @@ public:
 
 private:
 	static std::string path(std::string_view n) { return std::string(prefix) + std::string(n); }
-	faultfs::io& io_;
+	fl::io& io_;
 };
 
 // A log geometry and the command size its segments are checked against.
@@ -102,7 +102,7 @@ shape kv_chunks() {
 struct host {
 	jr::Host table;
 	turn_sealer sealer;
-	host(faultfs::io& io, const shape& s)
+	host(fl::io& io, const shape& s)
 		: table(std::make_shared<host_view>(io), host_identity(), jr::HostOptions{1, s.g}), sealer(table, 0, host_identity(), s.g, s.command) {}
 };
 
@@ -203,7 +203,7 @@ void run(kv_index& ix, turn_sealer& s, const run_plan& p, std::vector<files::pos
 }
 
 // A fresh index for the plan: created, its join's records durable.
-void fresh(faultfs::io& io, const run_plan& p) {
+void fresh(fl::io& io, const run_plan& p) {
 	host h(io, p.s);
 	kv_index ix = kv_index::create(io, logged_options(h.sealer, p.s.command), uuid_of("large-tx"));
 	CHECK(ix.apply(small("warm", 0), {}).result == verdict::accepted);
@@ -221,8 +221,8 @@ struct tally {
 // write, so its leave checkpoints the recovered state over a dropped run's records, and reopens
 // with the same state. It writes again, commits, and a second crash of the same kind keeps it all.
 void crash_case(const run_plan& p, std::uint64_t k, std::optional<std::uint64_t> seed, tally& t) {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	fresh(io, p);
 	std::vector<files::position> positions;
 	std::size_t acked = 0;
@@ -292,8 +292,8 @@ void crash_case(const run_plan& p, std::uint64_t k, std::optional<std::uint64_t>
 
 // The plan uncut: its mutations, every transaction acknowledged, and the records it took.
 std::uint64_t measure(const run_plan& p, std::uint64_t& records) {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	fresh(io, p);
 	host h(io, p.s);
 	kv_index ix = kv_index::open(io, logged_options(h.sealer, p.s.command));
@@ -323,13 +323,13 @@ void admit() {
 	const shape s = kv_chunks();
 	const transaction big = large("h", 1, 66, 1 << 20);  // 66 MiB of values
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		host h(io, s);
 		kv_index logged = kv_index::create(io, logged_options(h.sealer, s.command), uuid_of("admit"));
 		while (h.sealer.turn()) {}
-		faultfs::filesystem fs2;
-		faultfs::io io2(fs2);
+		fl::filesystem fs2;
+		fl::io io2(fs2);
 		kv_index::options plain;
 		plain.keyed = true;
 		kv_index unlogged = kv_index::create(io2, plain, uuid_of("admit-unlogged"));
@@ -344,15 +344,15 @@ void admit() {
 	}
 	// Past the unlogged limit (a transaction with more operations than the buffer holds), both
 	// refuse it, and the logged one leaves no trace in the log.
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	host h(io, s);
 	kv_index::options o = logged_options(h.sealer, s.command);
 	o.buffered_docs_cap = 65;
 	kv_index logged = kv_index::create(io, o, uuid_of("admit-cap"));
 	while (h.sealer.turn()) {}
-	faultfs::filesystem fs2;
-	faultfs::io io2(fs2);
+	fl::filesystem fs2;
+	fl::io io2(fs2);
 	kv_index::options plain;
 	plain.keyed = true;
 	plain.buffered_docs_cap = 65;
@@ -413,8 +413,8 @@ void big() {
 
 void visible() {
 	const shape s = small_chunks();
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	host h(io, s);
 	std::thread loop([&] { h.sealer.serve(); });
 	std::uint64_t reads = 0, seen = 0, exposed = 0;

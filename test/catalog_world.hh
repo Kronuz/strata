@@ -94,8 +94,8 @@ template <class Exec, class P = payload>
 struct world {
 	using cat_t = strata::catalog<kv_index, P>;
 	struct dir {
-		faultfs::filesystem fs;
-		faultfs::io io{fs};
+		fl::filesystem fs;
+		fl::io io{fs};
 		dir() { fs.map_files(true); }
 	};
 	std::deque<dir> dirs;

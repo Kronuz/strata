@@ -2,7 +2,7 @@
 // returns and nothing else, get(key, f) nothing at all, once a thread's first gets have sized
 // its decode buffer and codec contexts. This program replaces the global allocation functions
 // to count every allocation while it measures; it runs over faultfs, read (and, with
-// STRATA_FAULTFS_MAP=1, mapped), with LZ4 blocks and with the zstd disk preset.
+// FAULTLAB_MAP=1, mapped), with LZ4 blocks and with the zstd disk preset.
 #include "kv_test.hh"
 
 #include <atomic>
@@ -78,8 +78,8 @@ static std::uint64_t allocations_in(F&& f) {
 }
 
 static void run(bool preset) {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	kv_index::options o;
 	o.keyed = true;
 	o.zstd_merged = preset;

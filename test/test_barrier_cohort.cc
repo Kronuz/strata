@@ -32,7 +32,7 @@ jr::Identity host_identity() {
 // is a token, as in standalone_turn_log_test's host_view.
 class log_io final : public jr::IO {
 public:
-	explicit log_io(faultfs::filesystem& fs) : io_(fs) {}
+	explicit log_io(fl::filesystem& fs) : io_(fs) {}
 	jr::FilesystemClass directory_filesystem() const override { return io_.directory_filesystem(); }
 	jr::DirectoryTrust directory_trust() const override { return io_.directory_trust(); }
 	std::unique_ptr<jr::OwnerLock> acquire_owner(bool) override { return std::make_unique<jr::OwnerLock>(); }
@@ -51,7 +51,7 @@ public:
 	std::unique_ptr<jr::DirectoryCursor> scan_directory() override { return io_.scan_directory(); }
 
 private:
-	faultfs::io io_;
+	fl::io io_;
 };
 
 }  // namespace
@@ -61,17 +61,17 @@ int main(int argc, char** argv) {
 	jr::TurnLogOptions g;
 	g.segment_bytes = 4 << 20;
 	g.block_bytes = 4096;
-	faultfs::filesystem log_fs;
+	fl::filesystem log_fs;
 	jr::Host table(std::make_shared<log_io>(log_fs), host_identity(), jr::HostOptions{1, g});
 	turn_sealer sealer(table, 0, host_identity(), g, command_bytes);
 
-	std::vector<std::unique_ptr<faultfs::filesystem>> fss;
-	std::vector<std::unique_ptr<faultfs::io>> ios;
+	std::vector<std::unique_ptr<fl::filesystem>> fss;
+	std::vector<std::unique_ptr<fl::io>> ios;
 	std::vector<kv_index> ixs;
 	ixs.reserve(std::size_t(writers));
 	for (int w = 0; w < writers; ++w) {
-		fss.push_back(std::make_unique<faultfs::filesystem>());
-		ios.push_back(std::make_unique<faultfs::io>(*fss.back()));
+		fss.push_back(std::make_unique<fl::filesystem>());
+		ios.push_back(std::make_unique<fl::io>(*fss.back()));
 		kv_index::options o;
 		o.keyed = true;
 		o.log = &sealer;

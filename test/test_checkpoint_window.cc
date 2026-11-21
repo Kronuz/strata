@@ -35,7 +35,7 @@ jr::Identity host_identity() {
 // standalone_turn_log_test's host_view.
 class log_io final : public jr::IO {
 public:
-	explicit log_io(faultfs::filesystem& fs) : io_(fs) {}
+	explicit log_io(fl::filesystem& fs) : io_(fs) {}
 	jr::FilesystemClass directory_filesystem() const override { return io_.directory_filesystem(); }
 	jr::DirectoryTrust directory_trust() const override { return io_.directory_trust(); }
 	std::unique_ptr<jr::OwnerLock> acquire_owner(bool) override { return std::make_unique<jr::OwnerLock>(); }
@@ -54,7 +54,7 @@ public:
 	std::unique_ptr<jr::DirectoryCursor> scan_directory() override { return io_.scan_directory(); }
 
 private:
-	faultfs::io io_;
+	fl::io io_;
 };
 
 // The host names a loop's segments l<generation>-<loop>-turns-<segment> (host.h's layout).
@@ -72,14 +72,14 @@ int main() {
 	const std::uint64_t window = (g.retain_segments - 1) * g.segment_bytes;
 	const std::size_t bound = g.retain_segments + g.spare_segments + 1;
 
-	faultfs::filesystem log_fs;
+	fl::filesystem log_fs;
 	auto lio = std::make_shared<log_io>(log_fs);
 	jr::Host host(lio, host_identity(), jr::HostOptions{1, g});
 	turn_sealer sealer(host, 0, host_identity(), g, command_bytes);
 	auto turns = [&] { while (sealer.turn()) {} };
 
-	faultfs::filesystem idle_fs, writer_fs;
-	faultfs::io idle_io(idle_fs), writer_io(writer_fs);
+	fl::filesystem idle_fs, writer_fs;
+	fl::io idle_io(idle_fs), writer_io(writer_fs);
 	kv_index::options o;
 	o.keyed = true;
 	o.log = &sealer;

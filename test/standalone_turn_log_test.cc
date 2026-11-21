@@ -64,7 +64,7 @@ jr::TurnLogOptions geometry() {
 class host_view final : public jr::IO {
 public:
 	static constexpr std::string_view prefix = "host-";
-	explicit host_view(faultfs::io& io) : io_(io) {}
+	explicit host_view(fl::io& io) : io_(io) {}
 	jr::FilesystemClass directory_filesystem() const override { return io_.directory_filesystem(); }
 	jr::DirectoryTrust directory_trust() const override { return io_.directory_trust(); }
 	std::unique_ptr<jr::OwnerLock> acquire_owner(bool) override { return std::make_unique<jr::OwnerLock>(); }
@@ -97,7 +97,7 @@ public:
 
 private:
 	static std::string path(std::string_view n) { return std::string(prefix) + std::string(n); }
-	faultfs::io& io_;
+	fl::io& io_;
 };
 
 // A journal host with one loop, and its synchronous loop for the indexes.
@@ -105,7 +105,7 @@ struct host {
 	jr::Host table;
 	jr::TurnDriver& driver;
 	turn_sealer sealer;
-	explicit host(faultfs::io& io, const jr::TurnLogOptions& g = geometry(), std::uint64_t command = small_command)
+	explicit host(fl::io& io, const jr::TurnLogOptions& g = geometry(), std::uint64_t command = small_command)
 		: table(std::make_shared<host_view>(io), host_identity(), jr::HostOptions{1, g}), driver(table.driver(0)), sealer(table, 0, host_identity(), g, command) {}
 };
 
@@ -119,7 +119,7 @@ kv_index::options logged_options(turn_sealer& s, std::uint64_t command = small_c
 }
 
 // An open recovers the group: replay, then release (D6).
-kv_index reopen(faultfs::io& io, host&, const kv_index::options& o) { return kv_index::open(io, o); }
+kv_index reopen(fl::io& io, host&, const kv_index::options& o) { return kv_index::open(io, o); }
 
 std::string read_file(const std::filesystem::path& p) {
 	std::ifstream in(p, std::ios::binary);
@@ -283,8 +283,8 @@ void t9o() {
 		return r;
 	};
 	for (const auto kind : {jr::TurnRecordKind::Batch, jr::TurnRecordKind::Checkpoint, jr::TurnRecordKind::HardState}) {
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		{
 			host h(io);
 			kv_index ix = kv_index::create(io, logged_options(h.sealer), uuid_of("t9o"));
@@ -305,8 +305,8 @@ void t9o() {
 // --- T11: RFTW0001's checkpoint rule, as D5 relies on it --------------------------------------
 
 void t11() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	const auto record = [](std::uint64_t seq, jr::TurnRecordKind kind, std::uint64_t covers = 0) {
 		jr::TurnRecord r;
 		r.group = 1;
@@ -341,8 +341,8 @@ void t11() {
 // --- T12: the position is taken with the append ----------------------------------------------
 
 void t12() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	const transaction a = tx({replace("a", "1")}), b = tx({replace("b", "2")}), c = tx({replace("c", "3"), erase("a")}), d = tx({set_meta("m", "4")});
 	files::position applied;
 	contents_t before;
@@ -382,8 +382,8 @@ void t12() {
 		CHECK(recs[0].sequence == 2 && one.size() == 2 && one[0] == command::encode(a) && one[1] == command::encode(b));
 		CHECK(recs[1].sequence == 3 && two.size() == 2 && two[0] == command::encode(c) && two[1] == command::encode(d));
 		// Replayed at those positions into an unlogged index, the log reaches the same state.
-		faultfs::filesystem fs2;
-		faultfs::io io2(fs2);
+		fl::filesystem fs2;
+		fl::io io2(fs2);
 		kv_index::options plain;
 		plain.keyed = true;
 		kv_index fresh = kv_index::create(io2, plain, uuid_of("t12"));
@@ -406,8 +406,8 @@ void t12() {
 // --- T4: a read and a refresh() between apply and its barrier --------------------------------
 
 void t4() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	host h(io);
 	h.sealer.served(true);  // writers wait for turns, which this thread writes
 	std::atomic<int> stage{0};
@@ -537,7 +537,7 @@ void run(kv_index& ix, turn_sealer& s, const workload& w, int from, int n, std::
 }
 
 // A fresh index for the sweep, warmed: the mutations it took.
-std::uint64_t fresh(faultfs::filesystem& fs, faultfs::io& io, const workload& w) {
+std::uint64_t fresh(fl::filesystem& fs, fl::io& io, const workload& w) {
 	host h(io, w.g, w.command);
 	kv_index ix = kv_index::create(io, logged_options(h.sealer, w.command), uuid_of("sweep"));
 	for (int i = 0; i < w.warm; ++i) {
@@ -557,8 +557,8 @@ struct sweep_tally {
 // (crash(seed)); recovery holds every acknowledged transaction and one prefix of the apply order.
 // The index writes again, and a second crash (the same kind) and recovery keep all of that.
 void crash_case(const workload& w, const std::vector<state_t>& prefixes, std::uint64_t k, std::optional<std::uint64_t> seed, sweep_tally& t) {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	fresh(fs, io, w);
 	std::vector<files::position> positions;
 	std::size_t acked = 0;
@@ -618,8 +618,8 @@ sweep_tally sweep(const workload& w, int seeds) {
 	const std::vector<state_t> prefixes = prefixes_of(0, w.n, w.pad);
 	sweep_tally t;
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		fresh(fs, io, w);
 		host h(io, w.g, w.command);
 		kv_index ix = kv_index::open(io, logged_options(h.sealer, w.command));
@@ -695,8 +695,8 @@ void t3() {
 	std::size_t lost = 0, kept = 0, dropped = 0;
 	for (const bool keep : {false, true}) {
 		for (std::uint64_t seed = 0; seed < 8; ++seed) {
-			faultfs::filesystem fs, fs2;
-			faultfs::io io(fs), io2(fs2);
+			fl::filesystem fs, fs2;
+			fl::io io(fs), io2(fs2);
 			state_t before, after;
 			{
 				host h(io);
@@ -716,7 +716,7 @@ void t3() {
 				apply_to(after, b);
 				apply_to(after, c);
 				const files::position pc = ix.applied();
-				fs.add_fault({faultfs::op::sync, 1, EIO, false, keep});
+				fs.add_fault({fl::op::sync, 1, EIO, false, keep});
 				CHECK(throws([&] { h.sealer.turn(); }));  // the barrier fails: fail-stop
 				fs.clear_faults();
 				CHECK(h.sealer.failed());
@@ -750,7 +750,7 @@ void t3() {
 
 void t5() {
 	// Each case on its own copy: two applies, each committed (its checkpoint record follows it).
-	const auto build = [](faultfs::io& io) {
+	const auto build = [](fl::io& io) {
 		host h(io);
 		kv_index ix = kv_index::create(io, logged_options(h.sealer), uuid_of("t5"));  // generation 1
 		CHECK(ix.apply(tx({replace("k0", "a")}), {}).result == verdict::accepted);
@@ -762,8 +762,8 @@ void t5() {
 	};
 	// Another index on the same group: its checkpoint record names this one's UUID.
 	{
-		faultfs::filesystem fs, other;
-		faultfs::io io(fs), oio(other);
+		fl::filesystem fs, other;
+		fl::io io(fs), oio(other);
 		build(io);
 		host h(io);
 		CHECK(throws_as<log_mismatch>([&] { (void)kv_index::create(oio, logged_options(h.sealer), uuid_of("t5-other")); }));
@@ -771,8 +771,8 @@ void t5() {
 	// An index whose attribute names this host and group, joined on a host of the same identity
 	// elsewhere: the group's checkpoint record carries another UUID.
 	{
-		faultfs::filesystem fs, other;
-		faultfs::io io(fs), oio(other);
+		fl::filesystem fs, other;
+		fl::io io(fs), oio(other);
 		build(io);
 		{
 			host oh(oio);
@@ -784,8 +784,8 @@ void t5() {
 	}
 	// A fallback open at the first generation: its head is older than the log's checkpoint.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		build(io);
 		host h(io);
 		CHECK(throws_as<log_lost>([&] { (void)kv_index::open(io, logged_options(h.sealer), 1); }));
@@ -793,8 +793,8 @@ void t5() {
 	// The log's turns after the first commit rolled back (the group still stored): the head names
 	// records the log lacks, which only the cross-check against the head sees (D6.4, M-d).
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		std::map<std::string, std::string> snapshot;
 		const auto turn_files = [&] {
 			std::vector<std::string> names;
@@ -831,8 +831,8 @@ void t5() {
 	}
 	// The log's segments gone: the head names records the log lacks.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		build(io);
 		std::vector<std::string> turns;
 		for (auto c = io.scan_directory(); auto name = c->next();) {
@@ -852,8 +852,8 @@ void t5() {
 // after it (journal's double damage): no crash leaves that header, so the reopen keeps every
 // acknowledged write or refuses with log_lost, never a silent prefix.
 void t5d() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	state_t acked;
 	std::uint64_t segment = 0, block = 0, end = 0;
 	try {
@@ -907,8 +907,8 @@ void t5d() {
 // --- T7: no_space at replay ---------------------------------------------------------------------
 
 void t7() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	constexpr int n = 12;
 	const std::vector<state_t> prefixes = prefixes_of(0, n, 300);
 	{
@@ -961,7 +961,7 @@ void t7b() {
 	constexpr std::size_t pad = 200;
 	const std::vector<state_t> prefixes = prefixes_of(0, n + more, pad);
 	// The run: a large buffer, every transaction acknowledged, nothing checkpointed.
-	const auto build = [&](faultfs::filesystem& fs, faultfs::io& io) {
+	const auto build = [&](fl::filesystem& fs, fl::io& io) {
 		host h(io);
 		kv_index ix = kv_index::create(io, logged_options(h.sealer), uuid_of("t7b"));
 		for (int i = 0; i < n; ++i) {
@@ -973,7 +973,7 @@ void t7b() {
 	};
 	// The replay meets flush_owed and refreshes; then more writes, answered as a host would.
 	std::size_t owed = 0;
-	const auto replay = [&](faultfs::io& io, std::size_t& acked) {
+	const auto replay = [&](fl::io& io, std::size_t& acked) {
 		host h(io);
 		kv_index::options o = logged_options(h.sealer);
 		o.defer_io = true;
@@ -997,8 +997,8 @@ void t7b() {
 	};
 	std::uint64_t total = 0;
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		const std::uint64_t start = build(fs, io);
 		std::size_t acked = 0;
 		replay(io, acked);
@@ -1008,8 +1008,8 @@ void t7b() {
 	std::size_t cases = 0;
 	for (std::uint64_t k = 0; k <= total; ++k) {
 		for (std::uint64_t seed = 0; seed < 2; ++seed) {
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			fl::filesystem fs;
+			fl::io io(fs);
 			build(fs, io);
 			std::size_t acked = n;
 			fs.power_off_after(k);
@@ -1041,8 +1041,8 @@ void t8() {
 	// The smallest segment that holds two 32 KiB commands with their framing: 19 blocks.
 	jr::TurnLogOptions g = geometry();
 	g.segment_bytes = 19 * 4096;
-	faultfs::filesystem fs, fs2;
-	faultfs::io io(fs), io2(fs2);
+	fl::filesystem fs, fs2;
+	fl::io io(fs), io2(fs2);
 	host h(io, g);
 	kv_index ix = kv_index::create(io, logged_options(h.sealer), uuid_of("t8"));
 	kv_index::options o2 = logged_options(h.sealer);
@@ -1070,8 +1070,8 @@ void t8() {
 // --- T10: runtime refusals leave no trace in the log ---------------------------------------------
 
 void t10() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	constexpr int n = 6;
 	state_t expected{{"k0", "a"}};
 	{
@@ -1101,7 +1101,7 @@ void t10() {
 		kv_index ix = kv_index::open(io, o);
 		// A stage 1 whose segment read fails (k0's first lookup) throws, rolled back and never logged.
 		for (const auto& name : names) {
-			if (name.starts_with("seg-")) { fs.add_media_fault(name, faultfs::media::read_error, 0, ~std::uint64_t(0) >> 1); }
+			if (name.starts_with("seg-")) { fs.add_media_fault(name, fl::media::read_error, 0, ~std::uint64_t(0) >> 1); }
 		}
 		CHECK(throws([&] { (void)ix.apply(tx({replace("k0", "thrown", 1)}), {}); }));
 		CHECK(fs.media_hits() > 0);
@@ -1130,8 +1130,8 @@ void t10() {
 
 void served() {
 	constexpr int writers = 4, n = 600;
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	host h(io);
 	std::thread loop([&] { h.sealer.serve(); });
 	{
@@ -1192,8 +1192,8 @@ void served() {
 // one write and the unsealed bytes one command.
 void lag() {
 	constexpr int n = 4000;
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	host h(io);
 	std::thread loop([&] { h.sealer.serve(); });
 	std::uint64_t worst = 0, records = 0;
@@ -1222,7 +1222,7 @@ void lag() {
 // --- T6: joining and leaving (D7) ---------------------------------------------------------
 
 // An open of the T6 index, or its create when no create was committed (a crash inside it).
-kv_index open_t6(faultfs::io& io, const kv_index::options& o) {
+kv_index open_t6(fl::io& io, const kv_index::options& o) {
 	try {
 		return kv_index::open(io, o);
 	} catch (const index_not_created&) {
@@ -1233,7 +1233,7 @@ kv_index open_t6(faultfs::io& io, const kv_index::options& o) {
 // Two lives of one index: created (the join), written and closed (the leave); opened again (the
 // reopen of a closed group) from step `from`, written and closed. `acked` counts the prefix
 // whose records are durable.
-void t6_run(faultfs::io& io, int from, int n, std::vector<files::position>& positions, std::size_t& acked) {
+void t6_run(fl::io& io, int from, int n, std::vector<files::position>& positions, std::size_t& acked) {
 	const auto ack = [&](const kv_index& ix, bool all) {
 		const std::uint64_t synced = ix.log_synced();
 		while (acked < positions.size() && (all || positions[acked].index <= synced)) { ++acked; }
@@ -1257,8 +1257,8 @@ void t6() {
 	// The states: the group closed in the table after a leave, open again after a reopen; the
 	// attribute names its host and group, so another index, host or group is refused (D6.2, N6).
 	{
-		faultfs::filesystem fs, other;
-		faultfs::io io(fs), oio(other);
+		fl::filesystem fs, other;
+		fl::io io(fs), oio(other);
 		std::vector<files::position> positions;
 		std::size_t acked = 0;
 		t6_run(io, 0, n, positions, acked);
@@ -1282,8 +1282,8 @@ void t6() {
 	}
 	{
 		// Another host: its table and log live elsewhere, and its identity differs.
-		faultfs::filesystem fs, elsewhere;
-		faultfs::io io(fs), eio(elsewhere);
+		fl::filesystem fs, elsewhere;
+		fl::io io(fs), eio(elsewhere);
 		std::vector<files::position> positions;
 		std::size_t acked = 0;
 		t6_run(io, 0, 2, positions, acked);
@@ -1299,8 +1299,8 @@ void t6() {
 	const std::vector<state_t> prefixes = prefixes_of(0, n, 0);
 	std::uint64_t total = 0;
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		std::vector<files::position> positions;
 		std::size_t acked = 0;
 		t6_run(io, 0, n, positions, acked);
@@ -1309,8 +1309,8 @@ void t6() {
 	std::size_t cases = 0, seen[4] = {};  // the group's status at each first recovery: none, stored, closed, lost
 	for (std::uint64_t k = 0; k <= total; ++k) {
 		for (int seed = -1; seed < 2; ++seed) {
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			fl::filesystem fs;
+			fl::io io(fs);
 			std::vector<files::position> positions;
 			std::size_t acked = 0;
 			fs.power_off_after(k);
@@ -1370,8 +1370,8 @@ void t6() {
 // A waiter across a close and a reopen on one host (journal's group_closed), and recovery over
 // the sequence the closed life retired.
 void t6w() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	const auto until = [](auto ready, auto each) {
 		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
 		while (!ready() && std::chrono::steady_clock::now() < deadline) {
@@ -1436,15 +1436,15 @@ void t6w() {
 // --- M1: calls per acknowledgement in steady state -------------------------------------------
 
 void m1() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	host h(io);
 	kv_index ix = kv_index::create(io, logged_options(h.sealer), uuid_of("m1"));
 	for (int i = 0; i < 8; ++i) {
 		CHECK(ix.apply(step(i), {}).result == verdict::accepted);
 		while (h.sealer.turn()) {}
 	}
-	using faultfs::op;
+	using fl::op;
 	const auto count = [&](op k) { return fs.operations(k); };
 	const std::uint64_t writes = count(op::write), syncs = count(op::sync), dirs = count(op::sync_directory);
 	const std::uint64_t names = count(op::create) + count(op::replace) + count(op::remove) + count(op::truncate);

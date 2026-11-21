@@ -3,7 +3,7 @@
 // mirror prospect's lifecycle suites, which index through the search layout.
 #pragma once
 
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 #include "strata/core/index.hh"
 
 #include <array>
@@ -16,6 +16,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+namespace fl = kronuz::faultlab;
 
 inline int failures = 0;
 #define CHECK(cond) \

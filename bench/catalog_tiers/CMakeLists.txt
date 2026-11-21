@@ -1,5 +1,5 @@
 # The cold tier's gate rows through the catalog (docs/perf/catalog-tiers.md): a project of its own
-# over strata's, built with `cmake -S bench/catalog_tiers`; the second build counts the heap.
+# over strata's, built with `cmake -G Ninja -S bench/catalog_tiers`; the second build counts the heap.
 cmake_minimum_required(VERSION 3.18)
 project(catalog_tiers LANGUAGES C CXX)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../.. strata EXCLUDE_FROM_ALL)

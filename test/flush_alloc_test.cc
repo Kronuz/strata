@@ -67,8 +67,8 @@ void operator delete[](void* p, std::size_t, std::align_val_t) noexcept { std::f
 #endif
 
 int main() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	kv_index::options o;
 	o.keyed = true;
 	auto ix = kv_index::create(io, o, uuid_of("flush-alloc"));

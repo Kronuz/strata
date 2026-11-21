@@ -250,7 +250,7 @@ static void fill(kv_index& ix, std::uint64_t seed) {
 	ix.commit();
 }
 
-static std::map<std::string, std::string> segment_files(const faultfs::filesystem& fs) {
+static std::map<std::string, std::string> segment_files(const fl::filesystem& fs) {
 	std::map<std::string, std::string> out;
 	for (const auto& n : fs.list()) {
 		if (n.starts_with("seg-") && n.ends_with(".sx")) { out[n] = std::string(fs.view(n)); }
@@ -269,8 +269,8 @@ static kv_index::options options(std::size_t threads) {
 
 // The digest of every segment file one flush shape writes, name and bytes.
 static std::uint64_t flushed_digest(std::size_t threads, std::size_t* files = nullptr) {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, options(threads), uuid);
 	fill(ix, 5);
 	std::uint64_t h = 0xcbf29ce484222325ull;
@@ -283,7 +283,7 @@ static std::uint64_t flushed_digest(std::size_t threads, std::size_t* files = nu
 // An IO whose files call `hook` before each write: the flush is mid-run when it fires.
 class hook_io final : public kronuz::journal::IO {
 public:
-	hook_io(faultfs::io& inner, std::function<void()> hook) : inner_(inner), hook_(std::move(hook)) {}
+	hook_io(fl::io& inner, std::function<void()> hook) : inner_(inner), hook_(std::move(hook)) {}
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_owner(bool create) override { return inner_.acquire_owner(create); }
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_owner() override { return inner_.acquire_directory_owner(); }
 	kronuz::journal::FilesystemClass directory_filesystem() const override { return inner_.directory_filesystem(); }
@@ -323,7 +323,7 @@ private:
 		hook_io& io_;
 		std::unique_ptr<kronuz::journal::File> f_;
 	};
-	faultfs::io& inner_;
+	fl::io& inner_;
 	std::function<void()> hook_;
 };
 
@@ -338,8 +338,8 @@ static void lifetime_rule_in_the_flush() {
 		po.name_format = "merge{:02}";
 		WorkPool pool(po);
 		work_pool_executor exec(pool);
-		faultfs::filesystem fs;
-		faultfs::io inner(fs);
+		fl::filesystem fs;
+		fl::io inner(fs);
 		kv_index* target = nullptr;
 		std::atomic<int> refused{0}, allowed{0}, fired{0}, pinned_seen{0};
 		hook_io io(inner, [&] {
@@ -387,8 +387,8 @@ static void lifetime_rule_in_the_flush() {
 static void writer_holds_no_copy() {
 	for (const std::size_t threads : {std::size_t(1), std::size_t(3)}) {
 		byte_budget budget(1ull << 30);
-		faultfs::filesystem fs;
-		faultfs::io inner(fs);
+		fl::filesystem fs;
+		fl::io inner(fs);
 		std::atomic<std::uint64_t> at_write{0};
 		std::atomic<int> fired{0};
 		hook_io io(inner, [&] {
@@ -417,8 +417,8 @@ static void writer_holds_no_copy() {
 static void budget_returns() {
 	for (const std::size_t threads : {std::size_t(1), std::size_t(3)}) {
 		byte_budget budget(64 << 20);
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		auto o = options(threads);
 		o.budget = &budget;
 		auto ix = kv_index::create(io, o, uuid);
@@ -434,8 +434,8 @@ static void budget_returns() {
 // first file is created, a mutation is already refused.
 static void owner_pins_before_the_files() {
 	for (const std::size_t threads : {std::size_t(1), std::size_t(3)}) {
-		faultfs::filesystem fs;
-		faultfs::io inner(fs);
+		fl::filesystem fs;
+		fl::io inner(fs);
 		hook_io io(inner, nullptr);
 		auto ix = kv_index::create(io, options(threads), uuid);
 		std::mt19937_64 r(threads);
@@ -457,8 +457,8 @@ static void owner_pins_before_the_files() {
 // which holds no lease: the refusal comes first, so that is no ownership break either.
 static void close_inside_a_flush() {
 	for (const std::size_t threads : {std::size_t(1), std::size_t(3)}) {
-		faultfs::filesystem fs;
-		faultfs::io inner(fs);
+		fl::filesystem fs;
+		fl::io inner(fs);
 		kv_index* target = nullptr;
 		std::atomic<int> fired{0}, refused{0};
 		const auto owner = std::this_thread::get_id();
@@ -494,8 +494,8 @@ static void close_inside_a_flush() {
 static void failure_paths() {
 	for (const std::size_t threads : {std::size_t(1), std::size_t(3)}) {
 		for (const int error : {ENOSPC, EIO}) {
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			fl::filesystem fs;
+			fl::io io(fs);
 			auto ix = kv_index::create(io, options(threads), uuid);
 			std::mt19937_64 r(11);
 			for (int d = 0; d < 300; ++d) { CHECK(ix.apply(tx({replace("Q" + std::to_string(d), value_of(r, 1500))}), {}).result == verdict::accepted); }
@@ -503,7 +503,7 @@ static void failure_paths() {
 			if (error == ENOSPC) {
 				fs.set_capacity(fs.used() + 120000);  // room for part of the runs, not all
 			} else {
-				fs.add_fault({faultfs::op::write, threads, EIO});  // the last run's write, after the others
+				fs.add_fault({fl::op::write, threads, EIO});  // the last run's write, after the others
 			}
 			bool failed = false;
 			try {
