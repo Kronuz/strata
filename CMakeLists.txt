@@ -440,6 +440,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   # cache, the buffer's sorted view, and the current buffer's bytes per record. Off by default, so
   # no other build fetches what they use; LZ4 is the pinned one strata links.
   option(STRATA_KV_PROTO "Build format-14-kv's micro-prototypes (bench/kv/proto)" OFF)
+  # The deterministic simulator (docs/mechanisms/simulator.md): its own project under sim/.
+  set(SIMULATION_TESTS ON)
+  add_subdirectory(sim)
 endif()
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND STRATA_KV_PROTO)
   add_executable(kv_proto_blocks EXCLUDE_FROM_ALL bench/kv/proto/blocks.cc)
