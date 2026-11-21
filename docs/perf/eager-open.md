@@ -110,7 +110,15 @@ stalls; only a difference beyond that band counts.
   one segment, 126 µs at 4 and 640 µs at 10 (CPU 60, 160 and 527 µs), 30 to 64 µs per segment,
   22 to 31% of the open at 4 and 10 segments. It is the pass over every pooled term.
 
-FAST_PENDING
+### Experiment 4: the pool check in two seeks (pending)
+
+prospect:5ac2314 checks the pool with two seeks while the table has at most 240 fields: the pool
+is in key order and a field id's bytes sort as the id (D10), so a key past the table (malformed
+leads included) sorts after every valid one and the key field's keys sort together. Larger tables
+keep the pass. A local identity smoke (100 indexes of `d1000s4` and `d1000s4c`, every arm) gave
+the same hashes and the same refusals. Its rows, `base` against `fast` (this branch over
+prospect:5ac2314), are queued: build 261121-111130-dda9d6, `d1000s4` 261121-111132-b1a619,
+`d1000s10` 261121-111134-f179e5, identity 261121-111136-e15a28.
 
 ## What the lazy saving is worth in Xapiand
 
@@ -162,7 +170,8 @@ Identity (261121-110632-e10bb1, 1,000 indexes of each fixture, every arm, both s
   segment maps. Its message is wrapped twice ("strata: corrupt segment: strata: corrupt segment:
   ..."), as for any first-map refusal on main (`open_segment::fail` wraps `what()` again).
 - Suites at the change: strata's index, warm, reader_check, background_merge and key_index pass
-  (261121-111138-374fa5). PROSPECT_TESTS_PENDING
+  (261121-111138-374fa5). prospect's fielddict, fields, index, lifecycle, merge, multisegment,
+  background_merge and reclaim suites over this branch are queued (261121-111140-64ce5a).
 
 ## Recommendation
 
@@ -176,7 +185,9 @@ Identity (261121-110632-e10bb1, 1,000 indexes of each fixture, every arm, both s
    then also covers merge inputs and wakes, which Xapiand's loop never reached (strata-fields SF9).
    Its acceptance: a prospect test that reseals a manifest with a field dropped and expects the
    refusal at open (eager), at first read (lazy) and at a merge's input map.
-3. The one-thread win is the check itself (FAST_SUMMARY).
+3. The one-thread win on the request path is the check itself: 30 to 64 µs per segment per
+   open, 22 to 31% of an eager open at 4 and 10 segments. The two-seek pool check (experiment 4)
+   targets it; its rows decide whether it joins the quest.
 4. For 1M indexes per host the lever is the hot set, not the open: 30.6 KB plus 72 KB of page cache
    and 4 mappings per hot index against 11.9 KB per warm one; the warm 10.7 KB of heap (the kv
    layout's is 5 KB, `catalog-tiers.md`) is the next thing to take apart.
