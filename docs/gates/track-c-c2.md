@@ -1,4 +1,4 @@
-# Track C, C2 gate report (rerun at today's mains, in progress)
+# Track C, C2 gate report (rerun at today's mains; T9 fails at `journal:178030b`)
 
 C2 (the shared journal, D11) rerun as campaign jobs at today's `journal` and `consensus` mains.
 The report has three parts: the rerun (new results, each with its job), the rows that are
@@ -103,16 +103,41 @@ The macOS rows are filled; the VM rows follow the rerun table.
 at its own pins with no `--ref` override. `journal` rows run at `journal:178030b`, 8 commits past
 that pin (turn-log recovery: double damage, dropped tail turns). Same scripts as above.
 
+**T9 fails at `journal:178030b`.** `journal_turn_log_power_test 200` on faultfs fails on macOS
+(`261120-151854-18b807`) and on the FreeBSD VM (`261120-152238-d74166`) with the same seven
+failures, at the same seeds and with the same counts (1,036,264 checks). Acknowledged records are
+lost in groups recovery keeps, and damage goes unreported:
+
+| Block size | Mode | Seed | Segment, block | Check that failed |
+|---|---|---|---|---|
+| 512 B | `both` | 91 | 25, 1 | the damage is reported |
+| 512 B | `both` | 140 | 24, 1 | the damage is reported |
+| 2 KiB | `last` | 145 | 4, 2 | the damage is reported; a group not lost keeps every acknowledged record |
+| 2 KiB | `last` | 199 | 4, 1 | the damage is reported; a group not lost keeps every acknowledged record |
+| 256 B | `both` | 122 | 42, 6 | a group not lost keeps every acknowledged record |
+
+At `journal:d90797c` the same command passed on macOS (`261118-115852-e136e7`: 51,998 crash points,
+8,227 corrupted blocks, 195,619 checks, 0 failures) and on both VMs ("T9 on faultfs" above). The
+512 B case at `178030b` has the same 51,998 crash points and 8,227 corrupted blocks as that passing
+run, and fails. The Linux VM passes the row at `178030b`, but it draws other cases (its crash-point
+and corrupted-block counts differ from macOS's and FreeBSD's, which match each other exactly), so
+its pass does not clear the failure. `journal` is Detent's: the failure is reported to them as
+their msg-183, where it is being fixed, and this report does not attribute it. T9 at `journal`
+main is red until a rerun at their fix passes.
+
 | Row | Platform | Result | Status | Job |
 |---|---|---|---|---|
-| `journal` build and rows | macOS | Builds. Turn log on faultfs now at four block sizes: 512 B 2,040 crash points (677 with a second loss), 312 corrupted blocks, 295 doubly damaged boundaries; 4 KiB 1,150; 2 KiB 1,156; 256 B 2,262 (827 corrupted blocks); 40,913 checks, 0 failures; `turn_log` 64 checks; shared Store 4,366 crash points, 734,100 checks, 0 failures (the counts at `d90797c`); seal, bound, placement 43 of 43; host, driver, framing, CRC 4 of 4; replay 2 of 2 | Pass on macOS | `261120-151850-4592f2` (build), `261120-151852-86e99e` |
-| `jpower 200`, `no-sync-data`, `no-barrier-wait` | macOS | Queued | Queued | `261120-151854-18b807`, `261120-151857-83dd88`, `261120-151859-75f543` |
+| `journal` build and rows | macOS | Builds. Turn log on faultfs at six block sizes: 512 B 2,040 crash points (677 with a second loss), 312 corrupted blocks, 295 doubly damaged boundaries; 4 KiB 1,150; 2 KiB 1,156; 1,000 B 1,402; 768 B 1,614; 256 B 2,262 (827 corrupted blocks); 40,913 checks, 0 failures; `turn_log` 64 checks; shared Store 4,366 crash points, 734,100 checks, 0 failures (the counts at `d90797c`); seal, bound, placement 43 of 43; host, driver, framing, CRC 4 of 4; replay 2 of 2 | Pass on macOS | `261120-151850-4592f2` (build), `261120-151852-86e99e` |
+| T9: `jpower 200` on faultfs | macOS | **Fails: 1,036,264 checks, 7 failures** (the table above). 512 B: 51,998 crash points (17,266 with a second loss), 8,227 corrupted blocks, 2 failures; 4 KiB: 28,784, 1,662 corrupted, 0 failures; 2 KiB: 28,864, 3,414 corrupted, 4 failures; 1,000 B: 35,434, 0 failures; 768 B: 40,926, 0 failures; 256 B: 56,236, 21,102 corrupted, 1 failure. Passed at `journal:d90797c` (`261118-115852-e136e7`) | **Fail** (Detent's msg-183) | `261120-151854-18b807` |
+| Mutants `no-sync-data`, `no-barrier-wait` | macOS | Both killed by `journal_shared_store_test`: `no-sync-data` at 827 crash points, 1,285 failures, first "a group without records acknowledged nothing"; `no-barrier-wait` at 64 crash points, 67 failures, "store append has not completed" | Pass on macOS (both killed) | `261120-151857-83dd88`, `261120-151859-75f543` |
 | `consensus` build and rows (Workers, cluster, simulation, wave_open, driver, worker) | macOS | Builds at its own pins. Workers 896 crash points, 11,729 checks, 0 failures; cluster 24 seeds, 453 power cuts, 150,052 checks, 0 failures (45 catch-ups left to installs); core simulation 200 x 10,000 ok (1,754 elections, 2,108 restarts, 1,100 repairs, 442 committed memberships); Driver 20 x 3,000 plus 1 regression seed ok, hosts booted with 2, 3 and 4 loops (18 re-partitions), 1,529 elections, 116 crashes, 6,423 proposals; wave_open, driver (153 checks) and worker (96,196 checks) 5 of 5 | Pass on macOS | `261120-151902-b711ce` (build), `261120-151904-2b2fc3` |
-| T2's budget: 10,000 seeds x 3,000 steps, core and Driver | macOS | Queued | Queued | `261120-151907-369f91` |
-| Driver seeds 399 and 727 replayed | macOS | Queued | Queued | `261120-151910-c43dad`, `261120-151912-4175b8` |
-| Cluster at 10 times its seeds (240 x 3,000) | macOS | Queued | Queued | `261120-151915-b0da39` |
-| `consensus` rows; `journal` rows, `jpower 200` and mutants | Linux VM | Queued | Queued | `261120-152227-124538`, `261120-152229-2096f8` |
-| `consensus` rows; `journal` rows, `jpower 200` and mutants | FreeBSD VM | Queued | Queued | `261120-152236-dd591f`, `261120-152238-d74166` |
+| T2's budget: 10,000 seeds x 3,000 steps, core and Driver | macOS | Core: 10,000 seeds ok (48,335 elections, 33,961 restarts, 20,493 repairs, 22,047 committed memberships). Driver: 10,000 seeds ok (3 x 10^7 steps): hosts booted with 2, 3 and 4 loops (8,648 re-partitions), 669,497 elections, 53,374 crashes, 2,980,067 proposals, 522,436 commits awaited, 140,195 checkpoints (41,791 images restored), 335,188 repairs requested and none pending at a seed's end. Seeds 399 and 727, which stopped the Driver at `5923b6c`, pass | Pass on macOS | `261120-151907-369f91` |
+| Driver seeds 399 and 727 replayed | macOS | Seed 399 ok (75 elections, 7 crashes, 305 proposals, 58 commits awaited); seed 727 ok with one regression seed beside it (150 elections, 12 crashes, 602 proposals, 112 commits awaited) | Pass on macOS | `261120-151910-c43dad`, `261120-151912-4175b8` |
+| Cluster at 10 times its seeds (240 x 3,000) | macOS | 240 seeds, 4,471 power cuts, 1,510,826 checks, 0 failures; 1,370,557 commands applied, 26,260 checkpoints published, 408 catch-ups left to installs | Pass on macOS | `261120-151915-b0da39` |
+| `consensus` rows | Linux VM | Linux 6.8 x86_64, GCC 13.3: Workers 896 crash points, 11,729 checks, 0 failures; cluster 24 seeds, 453 power cuts, 150,052 checks, 0 failures; simulation 200 x 10,000 and Driver 20 x 3,000 ok; wave_open, driver (153 checks) and worker (96,196 checks) 5 of 5. The counts equal macOS's | Pass on Linux | `261120-152227-124538` |
+| `journal` rows, `jpower 200` and mutants | Linux VM | Turn log 512 B 2,042 crash points (678 with a second loss), 276 corrupted blocks, six block sizes, 40,019 checks, 0 failures; `turn_log` 64 checks; shared Store 4,366 crash points, 734,100 checks, 0 failures; seal, bound, placement 43 of 43; host, driver, framing, CRC 4 of 4; replay 2 of 2. `jpower 200`: 1,046,208 checks, 0 failures (512 B 51,928 crash points and 8,647 corrupted blocks; 256 B 56,350 and 21,952). Both mutants killed (`no-sync-data` 827 crash points, 1,285 failures; `no-barrier-wait` 63, 66). The counts differ from macOS's and FreeBSD's: other cases, so this pass does not clear T9 | Pass on Linux; does not clear T9 | `261120-152229-2096f8` |
+| `consensus` rows | FreeBSD VM | FreeBSD 14.4 amd64, clang 19.1.7: the Linux row's counts exactly | Pass on FreeBSD | `261120-152236-dd591f` |
+| `journal` rows, `jpower 200` and mutants | FreeBSD VM | Turn log, shared Store, seal through replay: macOS's counts exactly (40,913 and 734,100 checks, 0 failures; 43 of 43, 4 of 4, 2 of 2). **`jpower 200` fails with macOS's seven failures**: the same seeds, block sizes and counts (1,036,264 checks). Both mutants killed (`no-sync-data` 827 crash points, 1,285 failures; `no-barrier-wait` 63, 66) | **Fail** on T9 (Detent's msg-183); the other rows pass | `261120-152238-d74166` |
 
 ## Obsolete, owed, and moved
 
