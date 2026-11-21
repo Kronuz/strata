@@ -58,9 +58,10 @@ transaction and its own state.
   retryable 503. `invalid` and a client's own condition answer as they are, `superseded` too. A
   replica that is not the leader forwards the original request once, carrying its placement
   count; a read refused before the ready point answers 503 with nothing placed.
-- **A replica behind the leader's checkpoint** catches up only by install (group-install). Until
-  that lands the group answers consensus's `SnapshotNeeded` by naming the peer in
-  `installs_needed()`; the peer stays behind.
+- **A replica behind the leader's checkpoint** catches up only by install
+  ([group-install.md](group-install.md): the pin, the staged transfer, activation and its
+  recovery). The group does not bind it to consensus's install yet: it answers `SnapshotNeeded`
+  by naming the peer in `installs_needed()`, and the peer stays behind.
 - **A fence or a close refuses every `quorum` waiter** from then on, linked or not yet: a fence
   answers `fenced`, a close `closed` for a placement this replica never applied (a leader cut off
   from its followers closes with one). journal's `group_closed` maps to `closed` too.
