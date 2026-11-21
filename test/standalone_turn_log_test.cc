@@ -2,13 +2,13 @@
 // codec and its fixtures (T9), RFTW0001's checkpoint rule (T11), the position taken with the
 // append (T12), V and flushes held at the barrier (T4), a power-off sweep with checkpoints and
 // recycled segments (T1), a process crash at every mutation (T2), a failed barrier (T3), log
-// damage below the head (T5), no_space and owed verdicts at replay (T7, T7b), the command limit
-// and the turn budget (T8), runtime refusals (T10), joining and leaving (T6; t6w: a waiter across
-// a close and reopen, and recovery over the retired sequence), one write and one
-// sync per acknowledgement (M1), a served loop with group commit, a checkpointing writer and
-// a reader (the TSan case), a writer outrunning slow barriers (lag: D4's window), and another
-// build's record failing the open (t9o).
-// Usage: standalone_turn_log_test [--seeds N] [codec|t9o|t11|t12|t4|t1|t1r|t2|t3|t5|t6|t6w|t7|t7b|t8|t10|m1|served|lag]...;
+// damage below the head (T5) and double damage past it (T5d), no_space and owed verdicts at
+// replay (T7, T7b), the command limit and the turn budget (T8), runtime refusals (T10), joining
+// and leaving (T6; t6w: a waiter across a close and reopen, and recovery over the retired
+// sequence), one write and one sync per acknowledgement (M1), a served loop with group commit, a
+// checkpointing writer and a reader (the TSan case), a writer outrunning slow barriers (lag: D4's
+// window), and another build's record failing the open (t9o).
+// Usage: standalone_turn_log_test [--seeds N] [codec|t9o|t11|t12|t4|t1|t1r|t2|t3|t5|t5d|t6|t6w|t7|t7b|t8|t10|m1|served|lag]...;
 // none runs every case. --seeds sets T1's power-loss seeds per crash point (default 8).
 #include "kv_test.hh"
 #include "strata/core/command.hh"
@@ -828,6 +828,64 @@ void t5() {
 	}
 }
 
+// --- T5d: double damage past the head's checkpoint ----------------------------------------------
+
+// A damaged block whose next block's header, its manifest, is damaged too, with acknowledged turns
+// after it (journal's double damage): no crash leaves that header, so the reopen keeps every
+// acknowledged write or refuses with log_lost, never a silent prefix.
+void t5d() {
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	state_t acked;
+	std::uint64_t segment = 0, block = 0, end = 0;
+	try {
+		host h(io);
+		kv_index ix = kv_index::create(io, logged_options(h.sealer), uuid_of("t5d"));
+		const auto write = [&](const std::string& key, const std::string& value) {
+			CHECK(ix.apply(tx({replace(key, value)}), {}).result == verdict::accepted);
+			while (h.sealer.turn()) {}
+			acked[key] = value;
+		};
+		write("k0", "a");
+		ix.commit();  // the head names k0's batch; the writes below are only in the log
+		while (h.sealer.turn()) {}
+		write("big", std::string(6000, 'b'));  // ends in `block`, which later turns share
+		block = h.driver.log().position() / 4096;
+		end = h.driver.log().position();
+		for (int i = 0; h.driver.log().position() / 4096 == block; ++i) { write("s" + std::to_string(i), "c"); }
+		segment = h.driver.log().segment();
+		CHECK(h.driver.log().position() / 4096 == block + 1);
+		fs.power_off_after(0);  // the process dies here: nothing after the last turn reaches the disk
+	} catch (const std::exception&) {
+	}
+	fs.power_on();
+	CHECK(end % 4096 > 400);  // the big record's last fragment holds the first flip
+	std::string name;
+	for (auto c = io.scan_directory(); auto n = c->next();) {
+		if (n->starts_with(host_view::prefix) && n->ends_with(jr::turn_log_detail::segment_name(segment))) { name = *n; }
+	}
+	CHECK(!name.empty());
+	{
+		auto f = io.open_existing(name);
+		for (const std::uint64_t at : {block * 4096 + end % 4096 / 2, (block + 1) * 4096 + 10}) {  // the fragment, the next header
+			char byte = 0;
+			f->read_at(at, std::span(&byte, 1));
+			byte = char(byte ^ 0x10);
+			f->write_at(at, std::string_view(&byte, 1));
+		}
+		f->sync();
+	}
+	host h(io);
+	bool refused = false;
+	try {
+		kv_index ix = kv_index::open(io, logged_options(h.sealer));
+		for (const auto& [key, value] : acked) { CHECK(ix.get(key) == value); }
+	} catch (const log_lost&) {
+		refused = true;
+	}
+	std::printf("t5d: %zu acknowledged writes; the reopen %s\n", acked.size(), refused ? "refused the group (log_lost)" : "kept them");
+}
+
 // --- T7: no_space at replay ---------------------------------------------------------------------
 
 void t7() {
@@ -1390,7 +1448,7 @@ void m1() {
 
 int main(int argc, char** argv) {
 	const std::vector<std::pair<std::string, void (*)()>> cases = {{"codec", codec}, {"t11", t11}, {"t12", t12}, {"t4", t4}, {"t1", t1}, {"t1r", t1r},
-		{"t2", t2}, {"t3", t3}, {"t5", t5}, {"t7", t7}, {"t7b", t7b}, {"t6", t6}, {"t6w", t6w}, {"t8", t8}, {"t10", t10}, {"m1", m1}, {"served", served}, {"lag", lag}, {"t9o", t9o}};
+		{"t2", t2}, {"t3", t3}, {"t5", t5}, {"t5d", t5d}, {"t7", t7}, {"t7b", t7b}, {"t6", t6}, {"t6w", t6w}, {"t8", t8}, {"t10", t10}, {"m1", m1}, {"served", served}, {"lag", lag}, {"t9o", t9o}};
 	std::vector<std::string> wanted;
 	for (int i = 1; i < argc; ++i) {
 		if (std::string(argv[i]) == "--seeds" && i + 1 < argc) {
