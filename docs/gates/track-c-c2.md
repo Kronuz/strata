@@ -156,6 +156,19 @@ main is red until a rerun at their fix passes.
   snapshot transport (C4, `group-install`); the cluster test counts those cases (47 over 24
   seeds in the rerun).
 
+## Residuals, owed before C2 passes
+
+The architect's review (`docs/reviews/track-c-c2.md`): APPROVE WITH CONDITIONS. C2 is not passed
+while these hold open:
+
+1. (F1) T9's `jpower 200` passes (0 failures) at the `journal` commit carrying Detent's msg-183
+   fix, on macOS, Linux and FreeBSD, with the report's other `journal` rows and both mutants;
+   `consensus` moves its `journal` pin to that commit or later and C2's `consensus` rows rerun at
+   it. Until the power test's argument order is fixed (F3), the Linux leg runs other cases.
+2. (F4) T8: one measured CPU-hour per decoder (`user + sys`, at least 3,600 s each), the input
+   pinned to that decoder (a `FUZZ_DECODER`-style override in `fuzz_turn_log.cc`, Detent's), at
+   condition 1's commit, with the executed-unit count; no crash, timeout or leak artifact.
+
 ## Results at the pre-driver commits
 
 These are the results as first measured at `journal` `2737613` through `ad92b2e` and `consensus`
