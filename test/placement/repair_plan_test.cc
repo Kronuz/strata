@@ -312,6 +312,20 @@ void no_replacement() {
 	check(y.trail.empty(), "no change loses its quorum");
 }
 
+// rf 2 to 1 with a data voter lost: 2 + witness drops neither member directly (D9's shapes, the
+// quorum), so the lost voter leaves beside a promoted learner first, then the shard shrinks.
+void shrink_past_lost() {
+	context = "rf 2 to 1, a data voter lost";
+	auto x = founded(5, {{1, V}, {4, V}, {5, W}}, 2);
+	x.nodes[1].down = x.nodes[1].lost = true;
+	x.rf = 1;
+	auto s = x.run();
+	check(s.kind == sp::step::none, "rests at rf 1: " + text(s));
+	check(x.m.members.size() == 1 && x.m.members.front().role == cs::MemberRole::Voter && x.m.members.front().node != 1, "one data voter, off node 1: " + text(x.m));
+	check(!x.trail.empty() && x.trail.front() == "1:1:V 4:4:V 5:5:W 6:2:L", "a learner joins first, on the free node with the fewest groups: " + (x.trail.empty() ? "" : x.trail.front()));
+	check(x.trail.size() > 1 && x.trail[1] == "1:1:V 4:4:V 5:5:W 6:2:V leaving 1", "promoted beside the lost voter (3 + 1)");
+}
+
 // Leader balance (A4): a transfer to the preferred leader waits while a multi-entry command is
 // open, and happens once it ends; a preferred leader two leaderships above another voter moves.
 void balance() {
@@ -404,6 +418,7 @@ int main(int argc, char** argv) {
 	drain_leader();
 	rf1_waits();
 	no_replacement();
+	shrink_past_lost();
 	balance();
 	const std::uint64_t seeds = argc > 1 ? std::stoull(argv[1]) : 3000;
 	for (std::uint64_t seed = 1; seed <= seeds; ++seed) { property(seed); }

@@ -38,6 +38,8 @@ MUTANTS = {
     "record-ignored": (PLAN, ["0"], [(REPAIR, "\t\t\tif (!same_record(want, *recorded)) {", "\t\t\tif (false) {")]),
     # A change retires the leader without moving leadership first.
     "leader-not-first": (PLAN, ["0"], [(REPAIR, "\t\tif (leaving != r.leader) { return std::nullopt; }", "\t\treturn std::nullopt;")]),
+    # A lost member no removal drops stays: a 2 + witness group with a lost member waits at a lower rf.
+    "no-window-replace": (PLAN, ["0"], [(REPAIR, "\t\tfor (const auto* bad : {&bad_wit, &bad_data}) {", "\t\tfor (const auto* bad : std::initializer_list<const std::vector<const cs::Member*>*>{}) {")]),
     # A shrink removes a data voter before the witness: 1 data voter beside a witness.
     "shrink-order": (PLAN, ["0"], [(REPAIR, "\t\tif (wit.size() > t.witnesses) {\n\t\t\tif (auto next = without(wit.front()->incarnation); valid(next)) { return change(std::move(next)); }\n\t\t}\n",
                                      "")]),

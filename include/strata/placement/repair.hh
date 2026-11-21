@@ -220,11 +220,12 @@ struct planner {
 		return x == y;
 	}
 
-	// A change consensus accepts (D3's single step, D9's witness shapes) that keeps a quorum of
-	// up voters.
-	bool valid(const cs::Membership& n) const {
+	// A change from `from` consensus accepts (D3's single step, D9's witness shapes) that keeps a
+	// quorum of up voters.
+	bool valid(const cs::Membership& n, const cs::Membership* from = nullptr) const {
+		const auto& f = from ? *from : m;
 		try {
-			cs::validate_change(m, n, m.limits ? *m.limits : cs::ceilings);
+			cs::validate_change(f, n, f.limits ? *f.limits : cs::ceilings);
 		} catch (const std::invalid_argument&) {
 			return false;
 		}
@@ -319,25 +320,30 @@ struct planner {
 			const auto* c = candidate ? status(candidate) : nullptr;
 			if (!c || s.groups < c->groups || (s.groups == c->groups && s.leaders < c->leaders)) { candidate = id; }
 		}
-		auto add_learner = [&](node_id n) {
+		auto with_learner = [&](node_id n) {
 			auto next = m;
 			next.members.push_back({next.next_incarnation, n, cs::MemberRole::Learner});
 			++next.next_incarnation;
-			return change(std::move(next), n);
+			return next;
 		};
+		auto add_learner = [&](node_id n) { return change(with_learner(n), n); };
 		auto without = [&](cs::NodeId inc) {
 			auto next = m;
 			std::erase_if(next.members, [&](const cs::Member& x) { return x.incarnation == inc; });
 			return next;
 		};
+		// `base` with learner `l` promoted to `to` beside `leaving`.
+		auto promoted = [](cs::Membership base, cs::NodeId l, cs::MemberRole to, cs::NodeId leaving) {
+			for (auto& x : base.members) {
+				if (x.incarnation == l) { x.role = to; }
+			}
+			base.leaving = leaving;
+			return base;
+		};
 		// A learner promoted to `to`, beside the first of `leaving` that makes a valid change.
 		auto promote = [&](const cs::Member& l, cs::MemberRole to, const std::vector<cs::NodeId>& leaving) -> std::optional<step> {
 			for (const auto inc : leaving) {
-				auto next = m;
-				for (auto& x : next.members) {
-					if (x.incarnation == l.incarnation) { x.role = to; }
-				}
-				next.leaving = inc;
+				auto next = promoted(m, l.incarnation, to, inc);
 				if (valid(next)) { return leaving_change(std::move(next), inc); }
 			}
 			return std::nullopt;
@@ -388,6 +394,19 @@ struct planner {
 		}
 		for (const auto* x : bad_data) {
 			if (auto next = without(x->incarnation); valid(next)) { return leaving_change(std::move(next), x->incarnation); }
+		}
+		// A lost member no removal drops leaves beside a promoted learner, whatever the shape
+		// (D9: 2 + witness loses either only through a window); a learner joins for it only when
+		// that promotion is valid, so none joins to be removed.
+		for (const auto* bad : {&bad_wit, &bad_data}) {
+			for (const auto* x : *bad) {
+				if (ready) {
+					if (auto s = promote(*ready, x->role, {x->incarnation})) { return *s; }
+				} else if (learn.empty() && candidate) {
+					const auto base = with_learner(candidate);
+					if (valid(promoted(base, m.next_incarnation, x->role, x->incarnation), &base)) { return add_learner(candidate); }
+				}
+			}
 		}
 		if (wit.size() > t.witnesses) {
 			if (auto next = without(wit.front()->incarnation); valid(next)) { return change(std::move(next)); }

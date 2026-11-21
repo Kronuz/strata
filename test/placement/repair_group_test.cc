@@ -91,6 +91,8 @@ struct driver {
 	std::map<cs::GroupId, std::vector<std::pair<std::string, std::shared_ptr<started<sg::answer>>>>> writing;
 	std::uint64_t written = 0;
 	std::map<cs::GroupId, sp::step::kind_type> last;  // each group's last planned step
+	std::map<cs::GroupId, std::string> planned_text;  // and as text
+	std::map<cs::GroupId, std::function<std::string()>> outcome;  // its last change or transfer's answer
 
 	std::optional<sp::report> report_of(cs::GroupId g) {
 		auto* l = w.leader(g);
@@ -126,6 +128,7 @@ struct driver {
 				busy.erase(b);
 			}
 			last[p.group] = p.next.kind;
+			planned_text[p.group] = text(p.next);
 			switch (p.next.kind) {
 			case sp::step::none: break;
 			case sp::step::wait:
@@ -158,6 +161,7 @@ struct driver {
 				auto s = start(l->p->loop_ref(), l->p->lp->driver().change_membership(p.group, p.next.next));
 				l->run();
 				busy[p.group] = [s] { return s->done; };
+				outcome[p.group] = [s, t = planned_text[p.group]] { return t + ": " + (s->done ? what(s->error) : "in flight"); };
 				break;
 			}
 			case sp::step::transfer: {
@@ -168,6 +172,7 @@ struct driver {
 				auto s = start(l->p->loop_ref(), l->p->lp->driver().transfer_leadership(p.group, p.next.target));
 				l->run();
 				busy[p.group] = [s] { return s->done; };
+				outcome[p.group] = [s, t = planned_text[p.group]] { return t + ": " + (s->done ? what(s->error) : "in flight"); };
 				break;
 			}
 			}
@@ -202,6 +207,16 @@ struct driver {
 		}
 	}
 
+	// Each group's last plan and answer, and every replica.
+	void dump() {
+		for (auto g : w.groups()) {
+			auto* l = w.leader(g);
+			std::cerr << "  group " << g << ": leader " << (l ? std::to_string(l->inc) + " on node " + std::to_string(l->node) : std::string("none")) << ", planned "
+					  << planned_text[g] << (busy.contains(g) ? ", busy" : "") << (outcome.contains(g) ? ", last answer " + outcome[g]() : std::string()) << '\n';
+		}
+		w.print();
+	}
+
 	// Writes, steps and passes until two passes in a row rest on a calm world.
 	bool converge(int bound = 300) {
 		int quiet = 0;
@@ -221,6 +236,7 @@ struct driver {
 				return true;
 			}
 		}
+		dump();
 		return false;
 	}
 };
@@ -416,21 +432,23 @@ void replace(std::uint64_t seed) {
 void drain(std::uint64_t seed) {
 	context = "drain, seed " + std::to_string(seed);
 	cluster c(seed);
-	auto idx = c.create("idx", 3);
-	auto sub = c.create("idx/sub", 2);
+	c.create("idx", 3);
+	c.create("idx/sub", 2);
 	c.create("other", 3);
 	if (!check(c.d.converge(), "the cluster settles")) { return; }
-	// The preferred leader of idx, on a node not a root voter.
+	// A shard's preferred leader on a node not a root voter, else a member off the root.
 	sp::node_id x = 0;
-	for (const auto& s : idx.shards) {
-		if (s.members.front().node > 3) { x = s.members.front().node; }
-	}
-	if (!x) {
-		for (auto n : nodes_of(idx)) {
-			if (n > 3) { x = n; }
+	for (const auto& [path, ns] : c.placed) {
+		for (const auto& s : ns.shards) {
+			if (!x && s.members.front().node > 3) { x = s.members.front().node; }
 		}
 	}
-	if (!check(x != 0, "idx has a member off the root")) { return; }
+	for (const auto& [path, ns] : c.placed) {
+		for (auto n : nodes_of(ns)) {
+			if (!x && n > 3) { x = n; }
+		}
+	}
+	if (!check(x != 0, "a member off the root")) { return; }
 	check(root_op(c.w, [x](const sp::view& v) { return sp::drain(v, x); }, "drain"), "node " + std::to_string(x) + " drains");
 	c.draining.insert(x);
 	if (!check(c.d.converge(), "repair converges after the drain")) { return; }
@@ -476,7 +494,7 @@ void waits(std::uint64_t seed) {
 	}
 	check(c.d.last[g] == sp::step::wait, "the plan for one's group is a wait");
 	auto rec = c.record("one");
-	check(rec && rec->shards.front().members == one.shards.front().members, "one's record is unchanged");
+	if (!check(rec && rec->shards.front().members == one.shards.front().members, std::string("one's record is unchanged") + (rec ? "" : ": no record read"))) { c.d.dump(); }
 	check(c.w.replicas.count({g, n}) == 1 && !c.w.leader(g), "its lone voter is down, its group leaderless, no other replica made");
 	c.w.restore(n);
 	if (!check(c.d.converge(), "back up, the cluster settles")) { return; }
@@ -507,8 +525,12 @@ void defer(std::uint64_t seed) {
 		run_until(c.w, t);
 		c.w.settle(false);
 		l = c.w.leader(g);
+		if (!check(l && l->node != preferred, "leadership is away from preferred node " + std::to_string(preferred) + " (transfer to " + std::to_string(other) + ": " +
+												  (t->done ? what(t->error) : std::string("in flight")) + ")")) {
+			c.d.dump();
+			return;
+		}
 	}
-	if (!check(l && l->node != preferred, "leadership is away from preferred node " + std::to_string(preferred))) { return; }
 	const auto away = l->inc;
 	const auto term = l->state()->term;
 	// An upload's chunks: the command is open.

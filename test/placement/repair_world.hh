@@ -30,6 +30,27 @@ namespace sp = strata::placement;
 
 constexpr cs::GroupId root_gid = 1000;  // apart from the root's group counter
 
+// incarnation:node:role (V, L, W) per member, and the leaving one.
+inline std::string text(const cs::Membership& m) {
+	std::string out;
+	for (const auto& x : m.members) {
+		if (!out.empty()) { out += ' '; }
+		out += std::to_string(x.incarnation) + ':' + std::to_string(x.node) + ':' + "VLW"[int(x.role)];
+	}
+	if (m.leaving) { out += " leaving " + std::to_string(m.leaving); }
+	return out;
+}
+inline std::string text(const sp::step& s) {
+	switch (s.kind) {
+	case sp::step::none: return std::string("none: ") + s.why;
+	case sp::step::wait: return std::string("wait: ") + s.why;
+	case sp::step::record: return "record";
+	case sp::step::change: return "change to " + text(s.next);
+	case sp::step::transfer: return "transfer to " + std::to_string(s.target);
+	}
+	return "?";
+}
+
 // A replica's shared surface, whichever its application.
 struct replica {
 	cs::GroupId gid = 0;
@@ -418,16 +439,21 @@ struct world {
 			still = calm() ? still + 1 : 0;
 			if (still >= 30) { return true; }
 		}
-		if (report) {
-			for (auto& [k, r] : replicas) {
-				if (!r->up()) { continue; }
-				auto s = r->state();
-				std::cerr << "  replica " << k.first << "/" << k.second << " on node " << r->node << (r->open() ? "" : " not open: " + what(r->p->opening->error)) << " applied "
-						  << r->applied() << (r->fenced() ? " fenced" : "") << ", role " << (s ? int(s->role) : -1) << " term " << (s ? s->term : 0) << " committed "
-						  << (s ? s->committed : 0) << '\n';
-			}
-		}
+		if (report) { print(); }
 		return false;
+	}
+	// Every replica: its node, whether open, applied, role, term, commit index and membership.
+	void print() {
+		for (auto& [k, r] : replicas) {
+			if (!r->up()) {
+				std::cerr << "  replica " << k.first << "/" << k.second << " on node " << r->node << " down\n";
+				continue;
+			}
+			auto s = r->state();
+			std::cerr << "  replica " << k.first << "/" << k.second << " on node " << r->node << (r->open() ? "" : " not open: " + what(r->p->opening->error)) << " applied "
+					  << r->applied() << (r->fenced() ? " fenced" : "") << ", role " << (s ? int(s->role) : -1) << " term " << (s ? s->term : 0) << " committed "
+					  << (s ? s->committed : 0) << (s ? ", " + text(s->membership) : std::string()) << '\n';
+		}
 	}
 };
 
