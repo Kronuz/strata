@@ -24,7 +24,7 @@ using root_test::started;
 using root_test::what;
 namespace cs = kronuz::consensus;
 namespace j = kronuz::journal;
-namespace ff = strata::faultfs;
+namespace fl = kronuz::faultlab;
 namespace sg = strata::group;
 namespace sp = strata::placement;
 
@@ -59,7 +59,7 @@ struct replica {
 	bool founder = false;
 	std::vector<cs::NodeId> voters;     // a founder's configured voters
 	std::optional<cs::Membership> roles;  // a founder's founding roles, with a witness
-	ff::filesystem host_disk, dir_disk;
+	fl::filesystem host_disk, dir_disk;
 	strata::byte_budget storage{std::uint64_t(1) << 30};
 
 	struct process {
@@ -186,7 +186,7 @@ struct replica_of final : replica {
 	void open_group(std::uint64_t) override {
 		typename group_type::config c;
 		fill(c);
-		g = std::make_unique<group_type>(*p->lp, std::move(c), std::make_unique<ff::io>(dir_disk), app, task::scheduler_ref::of(p->chore_s));
+		g = std::make_unique<group_type>(*p->lp, std::move(c), std::make_unique<fl::io>(dir_disk), app, task::scheduler_ref::of(p->chore_s));
 		writer = std::make_unique<sg::writer<group_type>>(*g);
 		p->opening = start(p->loop_ref(), g->open());
 	}

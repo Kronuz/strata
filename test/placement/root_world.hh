@@ -6,7 +6,7 @@
 
 #include "../group/host_io.hh"
 
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 #include "strata/group/submit.hh"
 #include "strata/placement/root.hh"
 
@@ -26,7 +26,7 @@ namespace root_test {
 
 namespace cs = kronuz::consensus;
 namespace j = kronuz::journal;
-namespace ff = strata::faultfs;
+namespace fl = kronuz::faultlab;
 namespace sg = strata::group;
 namespace sp = strata::placement;
 
@@ -129,7 +129,7 @@ struct envelope {
 // One voter: what survives its power cut (disks, the entries it applied), and its process.
 struct node {
 	cs::NodeId id = 0;
-	ff::filesystem host_disk, dir_disk;
+	fl::filesystem host_disk, dir_disk;
 	strata::byte_budget storage{std::uint64_t(1) << 30};
 	std::map<std::uint64_t, traced::seen_entry> log;
 	traced app;
@@ -195,7 +195,7 @@ struct world {
 		auto* raw = p.get();
 		task::spawn(p->loop_ref(), p->host->driver(0).run(j::completion_ref::of(p->held), p->stop.token()), [raw](std::exception_ptr) { raw->turns_done = true; });
 		task::spawn(p->loop_ref(), p->lp->run(p->stop.token()), [raw](std::exception_ptr) { raw->driver_done = true; });
-		p->g = std::make_unique<group_type>(*p->lp, config(x.id, voters, x.storage), std::make_unique<ff::io>(x.dir_disk), x.app, task::scheduler_ref::of(p->chore_s));
+		p->g = std::make_unique<group_type>(*p->lp, config(x.id, voters, x.storage), std::make_unique<fl::io>(x.dir_disk), x.app, task::scheduler_ref::of(p->chore_s));
 		p->writer = std::make_unique<sg::writer<group_type>>(*p->g);
 		p->opening = start(p->loop_ref(), p->g->open());
 		x.p = std::move(p);

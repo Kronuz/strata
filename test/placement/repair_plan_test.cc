@@ -7,7 +7,7 @@
 // over seeded clusters: every change valid, and every shard at its rf wherever a node exists.
 #include "strata/placement/repair.hh"
 
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 
 #include <cstdio>
 #include <iostream>
@@ -21,7 +21,7 @@ namespace {
 namespace sp = strata::placement;
 namespace sg = strata::group;
 namespace cs = kronuz::consensus;
-namespace ff = strata::faultfs;
+namespace fl = kronuz::faultlab;
 
 int failures = 0;
 std::string context;
@@ -224,11 +224,11 @@ void replace_after() {
 
 // replace_after is the root's record, read at each pass: changed by a command, the next pass uses it.
 struct root_index {
-	ff::filesystem fs;
-	ff::io io{fs};
+	fl::filesystem fs;
+	fl::io io{fs};
 	sp::index_type ix = make(io);
 	std::uint64_t at = 0;
-	static sp::index_type make(ff::io& io) {
+	static sp::index_type make(fl::io& io) {
 		strata::basic_index_options<strata::document_layout> o;
 		o.keyed = true;
 		return sp::index_type::create(io, o, {'r', 'p', 't'});

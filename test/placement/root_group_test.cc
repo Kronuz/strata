@@ -29,8 +29,8 @@ std::map<std::string, std::pair<std::uint64_t, std::string>> records(sp::index_t
 
 // A replay from empty of a log's commands through the application alone, on a fresh index.
 std::map<std::string, std::pair<std::uint64_t, std::string>> replay(const std::map<std::uint64_t, traced::seen_entry>& log, std::uint64_t through) {
-	ff::filesystem fs;
-	ff::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	strata::basic_index_options<strata::document_layout> o;
 	o.keyed = true;
 	auto ix = sp::index_type::create(io, o, {'r', 'e', 'f'});
