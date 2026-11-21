@@ -11,7 +11,7 @@
 #include "host_io.hh"
 #include "oracle.hh"
 
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -26,7 +26,7 @@ namespace {
 
 namespace cs = kronuz::consensus;
 namespace j = kronuz::journal;
-namespace ff = strata::faultfs;
+namespace fl = kronuz::faultlab;
 namespace sg = strata::group;
 using group_test::group_type;
 using group_test::digest;
@@ -82,7 +82,7 @@ group_type::config config(strata::byte_budget& storage) {
 
 // What survives a power cut: three directories, and the node's storage budget.
 struct disks {
-	ff::filesystem host, dir;  // dir: the group's, strata's names and the file set's under its prefix
+	fl::filesystem host, dir;  // dir: the group's, strata's names and the file set's under its prefix
 	strata::byte_budget storage{std::uint64_t(1) << 30};
 };
 
@@ -111,7 +111,7 @@ struct process {
 	}
 	// A new group object over the same directory, as a host does after a close.
 	void attach(blob::app& app) {
-		g = std::make_unique<group_type>(*lp, config(d.storage), std::make_unique<ff::io>(d.dir), app, task::scheduler_ref::of(chore_s));
+		g = std::make_unique<group_type>(*lp, config(d.storage), std::make_unique<fl::io>(d.dir), app, task::scheduler_ref::of(chore_s));
 	}
 	task::scheduler_ref loop_ref() { return task::scheduler_ref::of(loop_s); }
 
@@ -334,7 +334,7 @@ struct run {
 		checkpointed();  // the rewritten push under a bundle, past any replay's reach
 		// A checkpoint whose file sync fails: the replica fences and reopens through recovery.
 		put("P|i|iiii");
-		d.dir.add_fault(ff::fault{ff::op::sync, 1, EIO, false, true});
+		d.dir.add_fault(fl::fault{fl::op::sync, 1, EIO, false, true});
 		checkpointed(false);
 		d.dir.clear_faults();
 		expect(p->g->fenced(), "a failed file sync fences the replica");

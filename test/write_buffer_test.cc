@@ -196,8 +196,8 @@ void lane_refs() {
 // D3, D4, D6: every version is a record; the slot names the newest; a delete appends a
 // tombstone the slot then names; prev links each record to the one its slot named before.
 void tombstones_and_prev() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, opts(), uuid_of("tomb"));
 	CHECK(ok(ix.apply(tx({replace("ka", "v1")}), {})));
 	CHECK(ok(ix.apply(tx({replace("ka", "v2")}), {})));
@@ -219,8 +219,8 @@ void tombstones_and_prev() {
 // D4: a rejected transaction restores the slots it changed and rewinds the position index; its
 // records are never flushed.
 void rejection_restores() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, opts(), uuid_of("reject"));
 	CHECK(ok(ix.apply(tx({replace("ka", "v1")}), {})));
 	const std::size_t records = index_test_access::records(ix), keys = index_test_access::key_entries(ix);
@@ -264,8 +264,8 @@ void rejection_frees() {
 	CHECK(live == 0);
 	const std::string big(64 * 1024, 'z');
 	for (const bool in_segment : {false, true}) {
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		auto ix = kv_index::create(io, opts(), uuid_of("frees"));
 		CHECK(ok(ix.apply(tx({replace("kexisting", "x")}), {})));
 		if (in_segment) { ix.refresh(); }  // the buffer then holds no accepted record
@@ -288,8 +288,8 @@ void rejection_frees() {
 // D6, D8: a replace or delete of a segment's copy is pending until the freeze, shadowed meanwhile;
 // the freeze applies it to the segment's bits.
 void pending_until_freeze() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, opts(), uuid_of("pending"));
 	CHECK(ok(ix.apply(tx({replace("ka", "v1"), replace("kb", "b"), keyless("loose")}), {})));
 	const std::uint64_t loose = 3;
@@ -308,8 +308,8 @@ void pending_until_freeze() {
 
 // WB-2: a merge's install carries the pending deletes naming its sources to its output.
 void merge_carries_pending() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, opts(), uuid_of("merge"));
 	CHECK(ok(ix.apply(tx({replace("ka", "a"), replace("kb", "b")}), {})));
 	ix.refresh();
@@ -331,8 +331,8 @@ void merge_carries_pending() {
 // the merged segment drops the documents the buffer deleted.
 void forced_merges_drop_pending() {
 	for (int how = 0; how < 3; ++how) {
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		auto ix = kv_index::create(io, opts(), uuid_of("forced"));
 		for (int s = 0; s < 2; ++s) {
 			std::vector<operation> ops;
@@ -370,8 +370,8 @@ void forced_merges_drop_pending() {
 // WB-16: a frozen buffer keeps no live bits; a newer record or tombstone shadows its copies, and
 // its flush's install clears in the new segment every copy a newer buffer holds.
 void flush_install_clears() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, opts(), uuid_of("install"));
 	CHECK(ok(ix.apply(tx({replace("ka", "a1"), replace("kb", "b"), replace("kx", "x")}), {})));
 	index_test_access::freeze(ix);
@@ -396,8 +396,8 @@ void flush_install_clears() {
 // WB-16, D6: keyless documents in a frozen buffer, deleted or replaced by docid, are shadowed
 // through the active buffer's docid map, and the frozen buffer's install drops them.
 void keyless_docid_shadowing() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, opts(), uuid_of("keyless"));
 	const auto v = ix.apply(tx({keyless("one"), keyless("two"), replace("ka", "a")}), {});
 	CHECK(ok(v) && v.docids.size() == 3);
@@ -425,8 +425,8 @@ void keyless_docid_shadowing() {
 // D8: writes after a freeze land in a new buffer; a scan merges the frozen and active buffers
 // newest first, a tombstone hiding the frozen copy; a failed flush keeps its frozen buffer.
 void freeze_and_scan() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, opts(), uuid_of("scan"));
 	for (int i = 0; i < 6000; ++i) { CHECK(ok(ix.apply(tx({replace("k" + std::to_string(10000 + i), "f")}), {}))); }
 	index_test_access::freeze(ix);
@@ -455,8 +455,8 @@ void checkout_and_check_in() {
 	WorkPool pool(po);
 	work_pool_executor ex(pool);
 	reader_registry reg(4);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto o = opts();
 	o.background = &ex;
 	o.readers = &reg;
@@ -501,8 +501,8 @@ void checkin_fences() {
 	po.name_format = "wbfence{:02}";
 	WorkPool pool(po);
 	work_pool_executor ex(pool);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto o = opts();
 	o.background = &ex;
 	o.policy.segments_per_tier = 2;
@@ -512,7 +512,7 @@ void checkin_fences() {
 		CHECK(ok(ix.apply(tx({replace("k" + std::to_string(s), "v")}), {})));
 		ix.refresh();
 	}
-	fs.add_fault({faultfs::op::create, 1, EIO, false});  // the merge's first create
+	fs.add_fault({fl::op::create, 1, EIO, false});  // the merge's first create
 	ix.maybe_merge();
 	CHECK(index_test_access::wait_merges_done(ix));
 	{
@@ -532,8 +532,8 @@ void checkin_fences() {
 // flag after its handoff, so none stays owed with the lease free, whatever the call (here apply,
 // refresh and the short wait_merges) and however the check-in's timing falls against the handoff.
 void owed_chores_run() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, opts(), uuid_of("owed"));
 	const int trials = 40000;
 	const auto span = [](int t) { return t % 4 < 2 ? 3000u : 200u; };  // short calls, short delays
@@ -574,8 +574,8 @@ void owed_chores_run() {
 // D2: a writer that finds a check-in's chores running waits for them instead of reporting a
 // second holder; two writers at once are still reported (SR-D20).
 void writer_waits_for_chores() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, opts(), uuid_of("waits"));
 	std::atomic<bool> in{false}, go{false};
 	const std::uint64_t n = breaks([&] {
@@ -729,8 +729,8 @@ void lane_growth() {
 // CR9: with a three-chunk lane, transactions of every size are accepted or invalid, none throws
 // halfway; a buffer too full for one freezes first.
 void chunk_limit_transactions() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto o = opts();
 	o.lane_chunks_cap = 3;
 	auto ix = kv_index::create(io, o, uuid_of("lane"));
@@ -766,8 +766,8 @@ void chunk_limit_transactions() {
 // (a whole record past 1 KiB), empty values, keyless documents, rejected transactions that cut
 // inline and whole records, reads before and after a flush, against a model.
 void inline_records() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, opts(), uuid_of("inline"));
 	std::map<std::string, std::string> model;
 	const std::size_t sizes[] = {0, 1, 7, 100, 500, 900, 940, 960, 1000, 1100, 4000, 70000};
@@ -802,8 +802,8 @@ void inline_records() {
 // CR9 with records of every size: the room check counts each operation's bytes, so a transaction
 // is accepted or invalid and none throws halfway.
 void chunk_limit_sized_transactions() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto o = opts();
 	o.lane_chunks_cap = 3;
 	auto ix = kv_index::create(io, o, uuid_of("lanesz"));
@@ -842,8 +842,8 @@ void chunk_limit_sized_transactions() {
 // chunk in every build, so a missed bound throws here even without a sanitizer.
 void long_key_records() {
 	for (const std::size_t klen : {500, 980, 990, 1000, 2000, 5000, 70000}) {
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		auto ix = kv_index::create(io, opts(), uuid_of("longkey"));
 		const std::string k(klen, 'K'), k2 = k + "2";
 		try {
@@ -863,8 +863,8 @@ void long_key_records() {
 			CHECK(false);
 		}
 	}
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto o = opts();
 	o.lane_chunks_cap = 2;
 	auto ix = kv_index::create(io, o, uuid_of("longcap"));

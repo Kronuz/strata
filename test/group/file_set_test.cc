@@ -6,7 +6,7 @@
 // only against its CRC32C.
 #include "blob_app.hh"
 
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 
 #include <iostream>
 #include <set>
@@ -14,7 +14,7 @@
 
 namespace {
 
-namespace ff = strata::faultfs;
+namespace fl = kronuz::faultlab;
 namespace sg = strata::group;
 
 int failures = 0;
@@ -47,8 +47,8 @@ blob::transaction put(std::uint64_t i) {
 }  // namespace
 
 int main() {
-	ff::filesystem disk;
-	ff::io io(disk);
+	fl::filesystem disk;
+	fl::io io(disk);
 	strata::byte_budget storage{std::uint64_t(1) << 30};
 	strata::basic_index_options<strata::document_layout> o;
 	o.keyed = true;
@@ -103,8 +103,8 @@ int main() {
 	// A sealed file recovers against its CRC32C: intact it recovers, and one flipped byte at any
 	// offset fails the recovery closed.
 	for (std::uint64_t at = 0; at < 6; ++at) {
-		ff::filesystem d;
-		ff::io dio(d);
+		fl::filesystem d;
+		fl::io dio(d);
 		try {
 			sg::file_set files(dio);
 			files.write("vol-0", 0, "sealed");
@@ -135,8 +135,8 @@ int main() {
 	// A deferred create: no index before its first commit; after it, a power cut at any seed
 	// leaves the index at that commit, the set's file beside it.
 	for (std::uint64_t seed = 1; seed <= 64; ++seed) {
-		ff::filesystem d;
-		ff::io dio(d);
+		fl::filesystem d;
+		fl::io dio(d);
 		try {
 			sg::file_set files(dio);
 			files.write("vol-0", 0, "abc");

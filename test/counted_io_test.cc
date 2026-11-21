@@ -29,8 +29,8 @@ using std::chrono::seconds;
 
 // A faultfs, the kernel model, a budget and one catalog's counted IO.
 struct fx {
-	faultfs::filesystem fs;
-	faultfs::io inner{fs};
+	fl::filesystem fs;
+	fl::io inner{fs};
 	kernel kern;
 	resource_counts catalog, slot;
 	std::chrono::steady_clock::time_point now{seconds(1000)};
@@ -236,7 +236,7 @@ void lifetimes() {
 		auto c = f.io->open_reclaim_candidate("a");
 		CHECK(c && f.used(D) == 2);
 		c.reset();
-		CHECK(code_of([&] { (void)f.io->open_reclaim_candidate("missing"); }) == ENOENT && f.used(D) == 1 && f.agrees());
+		CHECK(!f.io->open_reclaim_candidate("missing") && f.used(D) == 1 && f.agrees());
 	}
 	{
 		// sync_files and the ordering calls reach the inner files through their wrappers.
@@ -410,9 +410,9 @@ void sweep(const char* name, Call call, Live live, int expect_points) {
 void two_catalogs() {
 	fx a(256, 1000, 1000, 64, false);
 	resource_counts catalog_b;
-	faultfs::filesystem fs_b;
+	fl::filesystem fs_b;
 	fs_b.map_files(true);
-	faultfs::io inner_b(fs_b);
+	fl::io inner_b(fs_b);
 	{
 		auto f = inner_b.create_exclusive("a");
 		f->write_at(0, std::string(100, 'b'));
@@ -729,9 +729,9 @@ void posix_counts() {
 void stress() {
 	fx f(100, 40, 100, 8, false);  // descriptors 87, maps 36, vnodes 60
 	const std::uint64_t hard_d = f.budget.hard(D), hard_m = f.budget.hard(M), hard_v = f.budget.hard(V);
-	faultfs::filesystem fs_b;
+	fl::filesystem fs_b;
 	fs_b.map_files(true);
-	faultfs::io inner_b(fs_b);
+	fl::io inner_b(fs_b);
 	{
 		auto w = inner_b.create_exclusive("a");
 		w->write_at(0, std::string(512, 'b'));

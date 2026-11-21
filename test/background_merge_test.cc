@@ -88,7 +88,7 @@ static void fill(kv_index& ix, int segments, int docs, std::size_t bytes, std::u
 }
 
 // Segment files on disk, and those the manifest names.
-static std::set<std::string> segment_files(const faultfs::filesystem& fs) {
+static std::set<std::string> segment_files(const fl::filesystem& fs) {
 	std::set<std::string> out;
 	for (const auto& n : fs.list()) {
 		if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::segment) { out.insert(n); }
@@ -100,17 +100,17 @@ static std::set<std::string> named_segments(const kv_index& ix) {
 	for (const auto& [id, s] : ix.manifest().segments) { named.insert(index_detail::segment_name(id)); }
 	return named;
 }
-static bool no_spills(const faultfs::filesystem& fs) {
+static bool no_spills(const fl::filesystem& fs) {
 	for (const auto& n : fs.list()) {
 		if (n.ends_with(".spill")) { return false; }
 	}
 	return true;
 }
 
-// faultfs::io whose segment creations wait while it is held, counting the arrivals.
+// faultfs's io whose segment creations wait while it is held, counting the arrivals.
 class gate_io final : public kronuz::journal::IO {
 public:
-	explicit gate_io(faultfs::io& inner) : inner_(&inner) {}
+	explicit gate_io(fl::io& inner) : inner_(&inner) {}
 	void hold() {
 		std::lock_guard l(mu_);
 		held_ = true;
@@ -152,7 +152,7 @@ public:
 	void sync_directory() override { inner_->sync_directory(); }
 
 private:
-	faultfs::io* inner_;
+	fl::io* inner_;
 	std::mutex mu_;
 	std::condition_variable cv_;
 	bool held_ = false;
@@ -164,8 +164,8 @@ private:
 // read its sources and waits to create its output while they arrive.
 static void carry_over(std::size_t threads) {
 	background bg(threads);
-	faultfs::filesystem fs, tfs;
-	faultfs::io inner(fs), tio(tfs);
+	fl::filesystem fs, tfs;
+	fl::io inner(fs), tio(tfs);
 	gate_io gate(inner);
 	kronuz::journal::IO& io = bg.threaded() ? static_cast<kronuz::journal::IO&>(gate) : static_cast<kronuz::journal::IO&>(inner);
 	auto ix = kv_index::create(io, bg.options(), uuid);
@@ -214,8 +214,8 @@ static void carry_over(std::size_t threads) {
 // segments in increasing id order and reopens.
 static void id_order(std::size_t threads) {
 	background bg(threads);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, bg.options(), uuid);
 	fill(ix, 6, 4, 300, 11);
 	ix.maybe_merge();
@@ -263,8 +263,8 @@ struct index_test_access {
 // Segments out of id order fence the commit before it writes anything: no new manifest,
 // no new file, and the index stays fenced.
 static void order_check_fences() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	background bg(0);
 	auto ix = kv_index::create(io, bg.options(false), uuid);
 	fill(ix, 2, 2, 100, 12);
@@ -286,8 +286,8 @@ static void order_check_fences() {
 // index reports the segment through needs_heal() and keeps serving; heal() clears it.
 static void inconsistent_source(std::size_t threads, bool dropped_key) {
 	background bg(threads);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, bg.options(), uuid);
 	fill(ix, 6, 4, 300, 13);  // segment 0 holds Q0..Q3 at ordinals 0..3
 	std::string bytes;
@@ -314,8 +314,8 @@ static void inconsistent_source(std::size_t threads, bool dropped_key) {
 // the index still fences.
 static void shared_docid_fences(std::size_t threads) {
 	background bg(threads);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, bg.options(), uuid);
 	fill(ix, 6, 4, 300, 14);
 	std::string bytes;
@@ -333,8 +333,8 @@ static void shared_docid_fences(std::size_t threads) {
 // One index merging in the background and its twin merging inline, fed the same
 // transactions: their verdicts, digests, and contents must agree at every point.
 struct twins {
-	faultfs::filesystem fs, tfs;
-	faultfs::io io{fs}, tio{tfs};
+	fl::filesystem fs, tfs;
+	fl::io io{fs}, tio{tfs};
 	kv_index::options bo, to;
 	kv_index ix, twin;
 	explicit twins(background& bg)
@@ -414,8 +414,8 @@ static void random_schedules(std::size_t threads, std::uint64_t seed) {
 // ones stopped, promptly, and reopening finds the last commit and no merge's file.
 static void close_while_merging(std::size_t threads) {
 	background bg(threads, 8 << 10);  // each merge here takes seconds at this rate
-	faultfs::filesystem fa, fb, fc;
-	faultfs::io ia(fa), ib(fb), ic(fc);
+	fl::filesystem fa, fb, fc;
+	fl::io ia(fa), ib(fb), ic(fc);
 	const auto o = bg.options();
 	auto a = kv_index::create(ia, o, uuid);
 	auto b = kv_index::create(ib, o, uuid);
@@ -455,8 +455,8 @@ static void close_while_merging(std::size_t threads) {
 static void rate_limit(std::size_t threads) {
 	const std::uint64_t rate = 64 << 10;
 	background bg(threads, rate);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, bg.options(), uuid);
 	fill(ix, 4, 4, 3000, 4);
 	const auto digest = ix.digest();
@@ -493,8 +493,8 @@ private:
 static void memory_held(std::size_t threads) {
 	background bg(threads);
 	counting_executor counted(*bg.exec);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	byte_budget memory(4 << 20);
 	auto o = bg.options();
 	o.background = &counted;
@@ -522,8 +522,8 @@ static void memory_held(std::size_t threads) {
 // yet still flushes under pressure well before the buffer reaches its share.
 static std::size_t pressure_segments(std::optional<std::uint64_t> divisor, std::uint64_t share, int applies, std::size_t body) {
 	background bg(0);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	byte_budget memory(4 << 20);
 	auto o = bg.options();
 	o.budget = &memory;
@@ -566,8 +566,8 @@ static void pressure_flush_bounded() {
 static void budget_below_inputs(std::size_t threads) {
 	background bg(threads);
 	counting_executor counted(*bg.exec);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	byte_budget memory(16 << 10);
 	auto o = bg.options();
 	o.background = &counted;
@@ -597,8 +597,8 @@ static void budget_below_inputs(std::size_t threads) {
 // EIO fences, and reopening recovers the last commit.
 static void space_and_faults(std::size_t threads) {
 	background bg(threads);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	const auto o = bg.options();
 	auto ix = kv_index::create(io, o, uuid);
 	fill(ix, 6, 4, 3000, 5);
@@ -625,7 +625,7 @@ static void space_and_faults(std::size_t threads) {
 	ix.commit();
 	fill(ix, 3, 4, 3000, 6, 100);
 	const auto committed = ix.digest();
-	fs.add_fault({faultfs::op::create, 1, EIO, false});  // the merge's first create
+	fs.add_fault({fl::op::create, 1, EIO, false});  // the merge's first create
 	ix.maybe_merge();
 	CHECK(ix.merges_pending() >= 1);
 	CHECK(throws([&] { ix.wait_merges(); }));
@@ -640,9 +640,9 @@ static void space_and_faults(std::size_t threads) {
 // policy leaves it out until heal() reads it back whole.
 static void damaged_source(std::size_t threads) {
 	background bg(threads);
-	faultfs::filesystem fs;
+	fl::filesystem fs;
 	fs.map_files(false);  // media faults act on reads
-	faultfs::io io(fs);
+	fl::io io(fs);
 	const auto o = bg.options();
 	auto ix = kv_index::create(io, o, uuid);
 	fill(ix, 6, 4, 3000, 10);
@@ -653,7 +653,7 @@ static void damaged_source(std::size_t threads) {
 	{
 		const kv_index::segment seg(fs.view(name));
 		for (const auto& e : seg.core().sections()) {
-			if (e.kind == format::section::stored) { fs.add_media_fault(name, faultfs::media::bit_flip, e.offset + e.length / 2, e.offset + e.length / 2 + 1, 0); }
+			if (e.kind == format::section::stored) { fs.add_media_fault(name, fl::media::bit_flip, e.offset + e.length / 2, e.offset + e.length / 2 + 1, 0); }
 		}
 	}
 	ix = kv_index::open(io, o);
@@ -670,8 +670,8 @@ static void damaged_source(std::size_t threads) {
 // the index holds exactly the checkpoint, and no merge's file stays behind.
 static void install_while_merging(std::size_t threads) {
 	background bg(threads, 8 << 10);
-	faultfs::filesystem fs, sfs;
-	faultfs::io io(fs), sio(sfs);
+	fl::filesystem fs, sfs;
+	fl::io io(fs), sio(sfs);
 	const auto o = bg.options();
 	auto src = kv_index::create(sio, bg.options(false), uuid);
 	fill(src, 2, 5, 100, 7, 1000);
@@ -700,8 +700,8 @@ static void install_while_merging(std::size_t threads) {
 
 // The merge build stops at its next document or stored frame once cancelled.
 static void build_cancellation() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	kv_index::options o;
 	o.keyed = true;
 	auto ix = kv_index::create(io, o, uuid);
