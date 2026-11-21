@@ -727,8 +727,10 @@ strata's docs:
    whose turn cost task 13 bounds.
 3. A current-generation log whose loop is L or more is neither read nor removed
    (`host.h:450-454`): task 9 refuses it as corruption.
-4. No strata test reopens a logged index at another loop count, and `kv_strata` derives group ids
-   from L (`kv_strata.hh:288-290`): D10 item 2. Production must never derive a group id from L.
+4. Closed by task 8 (D10 item 2): `test/test_reopen_loops.cc` reopens four logged indexes at
+   L = 1, 3, then 2, with a power cut before each reopen and at every mutation inside it, and
+   `kv_strata` stores each index's group in `<dir>/<i>/kv-group`. Production never derives a
+   group id from L.
 5. Creating a group rewrites its slot's shard and pays two barriers: three sync calls per create in
    probe D, 30,023 for 10k, 11 hours for a million created one at a time. Idle-park D5 makes
    creates and wakes join the turn, and D6's handoff item 7 keeps that on one log per device.
