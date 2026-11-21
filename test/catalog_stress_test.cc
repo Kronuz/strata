@@ -644,9 +644,7 @@ task::task<void> two_op(cat_t* const (&cats)[2], PW& w, std::mt19937_64& rng, ca
 	}
 }
 
-// Returns whether the run met the maps cap with an overload and merged; timing decides it, so the
-// caller repeats a run short of it. The caps, the kernel's limits and the counts are checked always.
-bool stress_two(bool defer, int ops, int pinners) {
+void stress_two(bool defer, int ops, int pinners) {
 	std::deque<mt_sched> scheds(std::size_t(pinners) + 2);
 	PW w(two_keys, 2, defer, true, {}, 2, 132, 18);  // descriptors 51 soft, 64 hard; maps 9 soft, 16 hard
 	const std::uint64_t hard_d = w.budget.hard(strata::resource::descriptors), hard_m = w.budget.hard(strata::resource::maps);
@@ -754,8 +752,31 @@ bool stress_two(bool defer, int ops, int pinners) {
 		(unsigned long long)hard_d, (unsigned long long)(sa.wake_failures + sb.wake_failures), (unsigned long long)(sa.bound_closes + sb.bound_closes),
 		(unsigned long long)w.kern.refused.load(), (unsigned long long)over.load());
 	CHECK(over == 0 && w.kern.refused == 0);   // the caps hold and the kernel's limits never answer
-	CHECK(sa.passes > 0 && sb.passes > 0);
-	const bool reached = overloads > 0 && peak_m == hard_m && t.merges > 0;
+	CHECK(sa.passes > 0 && sb.passes > 0 && t.merges > 0);
+	// The maps cap at its hard value whatever the run's timing: with the sweeps stopped nothing demotes, so
+	// request pins held on every key take maps until the budget refuses them. The kernel's peak is exact.
+	std::vector<cat_t::pin> filled;
+	std::uint64_t refused = 0;
+	for (int key = 0; key < two_keys; ++key) {
+		std::atomic<bool> done{false};
+		std::function<task::task<void>()> body = [&]() -> task::task<void> {
+			try {
+				filled.push_back(co_await cats[key / (two_keys / 2)]->pin_request(kn(key)));
+			} catch (const std::system_error&) {  // too_many_open, or a wake failed by it or in its backoff
+				++refused;
+			} catch (const index_fenced&) {
+			}
+		};
+		task::spawn(task::scheduler_ref::of(scheds.back()), body(), [&](std::exception_ptr e) {
+			if (e) { std::terminate(); }
+			done = true;
+		});
+		CHECK(scheds.back().run_until([&] { return done.load(); }, std::chrono::seconds(60)));
+	}
+	std::printf("stress two catalogs %s: filled %zu pins, %llu refused; maps %llu of %llu, kernel peak %lld\n", defer ? "defer_io" : "plain", filled.size(),
+		(unsigned long long)refused, (unsigned long long)w.budget.used(strata::resource::maps), (unsigned long long)hard_m, (long long)w.kern.map_peak.load());
+	CHECK(refused > 0 && w.kern.map_peak.load() == std::int64_t(hard_m) && w.kern.refused == 0);  // the maps cap met at its hard value
+	filled.clear();
 	for (cat_t* cat : cats) {
 		const auto res = shut_down(*cat, scheds.back());
 		CHECK(cat->shut_down() && cat->occupied() == 0);
@@ -764,7 +785,6 @@ bool stress_two(bool defer, int ops, int pinners) {
 	first.reset();
 	CHECK(w.kern.fds.load() == 0 && w.kern.maps.load() == 0);
 	CHECK(w.budget.used(strata::resource::descriptors) == 0 && w.budget.used(strata::resource::maps) == 0);
-	return reached;
 }
 
 // Joins racing shutdown's completion (S7-T3): with no slot occupied every join may complete it, so one
@@ -1007,11 +1027,7 @@ int main(int argc, char** argv) {
 	burst_closes(ops / 10);
 	stress(false, ops, pinners, true);
 	stress(true, ops, pinners, true);
-	for (const bool defer : {false, true}) {
-		bool met = false;
-		for (int again = 0; again < 8 && !met; ++again) { met = stress_two(defer, std::max(ops, 3000), pinners); }
-		CHECK(met);  // the maps cap met at its hard value
-	}
+	for (const bool defer : {false, true}) { stress_two(defer, std::max(ops, 3000), pinners); }
 	for (int again = 0; again < 8 && !t5.missing().empty(); ++again) { stress(true, ops, pinners, true); }
 	t5.print();
 	for (const char* name : t5.missing()) {
