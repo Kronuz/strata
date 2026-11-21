@@ -3578,6 +3578,7 @@ private:
 						opened = j.opened;
 						break;
 					}
+					opts_.log->joined(false);  // a full record seals next turn: it need not wait for this writer
 					const auto* st = logged_.get();
 					opts_.log->await_sealed(logged_->group, [st, s = j.full] { return st->handed.load(std::memory_order_acquire) >= s; });
 				}
@@ -3587,7 +3588,7 @@ private:
 			}
 			changed();
 			count_writing(true);
-			if (opened) { opts_.log->wake(); }
+			opts_.log->joined(opened);
 		}
 	}
 	// No flush publishes above V (D4, F5): a logged index's flush, and its pending deletes' move
