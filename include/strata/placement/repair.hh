@@ -171,7 +171,6 @@ struct planner {
 		const auto* s = status(x.node);
 		return s && !s->down;
 	}
-	const cs::Member* by_incarnation(cs::NodeId inc) const { return cs::find_member(m, inc); }
 	const cs::Member* on_node(node_id n) const {
 		for (const auto& x : m.members) {
 			if (x.node == n) { return &x; }
@@ -180,7 +179,7 @@ struct planner {
 	}
 
 	// The preferred leader: the recorded one while a healthy voter, unless another healthy voter
-	// leads two fewer groups; else the healthy voter with the fewest leaderships.
+	// has two fewer leaderships; else the healthy voter with the fewest.
 	node_id preferred() const {
 		const cs::Member* best = nullptr;
 		for (const auto& x : m.members) {

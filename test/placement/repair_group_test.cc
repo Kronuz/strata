@@ -144,7 +144,10 @@ struct driver {
 				auto* l = w.find(p.group, reports.at(p.group)->leader);
 				if (!l || !l->leads()) { break; }
 				for (const auto& m : p.next.next.members) {
-					if (cs::find_member(reports.at(p.group)->membership, m.incarnation) || w.find(p.group, m.incarnation)) { continue; }
+					if (cs::find_member(reports.at(p.group)->membership, m.incarnation)) { continue; }
+					// A joiner of a refused change, planned again on another node, starts over there.
+					if (auto* old = w.find(p.group, m.incarnation); old && old->node != m.node) { w.discard(p.group, m.incarnation); }
+					if (w.find(p.group, m.incarnation)) { continue; }
 					if (p.group == root_gid) {
 						w.join<root_replica>(p.group, m.incarnation, m.node);
 					} else {
