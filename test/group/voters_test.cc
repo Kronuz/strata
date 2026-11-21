@@ -805,6 +805,21 @@ void deposed_read(unsigned voters) {
 	check(!r->done || r->error || (r->value && *r->value >= 2), "the healed read answers the second write's state or fails");
 }
 
+// Every node applied the same entries, and its digest equals a replay from empty of the log.
+void same_digests(world& w) {
+	const auto& first = *w.nodes.begin()->second;
+	const auto through = first.p->g->applied();
+	const auto log = merged_log(w, through);
+	if (!log) { return; }
+	const auto reference = replay(*log, through);
+	for (auto& [id, x] : w.nodes) {
+		const auto who = "node " + std::to_string(id);
+		check(!x->p->g->fenced(), who + " is not fenced: " + x->p->g->fence_reason());
+		check(x->p->g->applied() == through, who + " applied what node 1 did");
+		check(of(*x->p->g, x->app) == reference, who + "'s digest equals the replay");
+	}
+}
+
 // A replica behind the leader's checkpoint catches up only by install: the leader names it in
 // `installs_needed` until the install ends, and it installs the bundle and applies past it.
 void install_gap(unsigned voters) {
@@ -978,20 +993,6 @@ bool is_superseded(std::exception_ptr e) {
 		return true;
 	} catch (...) {}
 	return false;
-}
-// Every node applied the same entries, and its digest equals a replay from empty of the log.
-void same_digests(world& w) {
-	const auto& first = *w.nodes.begin()->second;
-	const auto through = first.p->g->applied();
-	const auto log = merged_log(w, through);
-	if (!log) { return; }
-	const auto reference = replay(*log, through);
-	for (auto& [id, x] : w.nodes) {
-		const auto who = "node " + std::to_string(id);
-		check(!x->p->g->fenced(), who + " is not fenced: " + x->p->g->fence_reason());
-		check(x->p->g->applied() == through, who + " applied what node 1 did");
-		check(of(*x->p->g, x->app) == reference, who + "'s digest equals the replay");
-	}
 }
 
 // --- A1: growth and healing by install (group-heal) ---------------------------------------

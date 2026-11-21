@@ -304,7 +304,7 @@ void release_pin(basic_index<Layout>& ix, const install_pin& p) {
 // reopened source releases every pin its index keeps.
 template <class Layout>
 void release_pins(basic_index<Layout>& ix, kronuz::journal::IO& dir) {
-	for (const auto g : basic_index<Layout>::read_generation(dir, std::nullopt).pins) { ix.release(g); }
+	for (const auto g : index_detail::read_state(dir).pins) { ix.release(g); }
 }
 
 // Names on the fetch lane, the group's own routing ahead of them: a pin by its bundle's
