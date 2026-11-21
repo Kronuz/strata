@@ -7,6 +7,8 @@
 // acknowledged at apply (ack=none). Under `sync` a batch is one transaction, as RocksDB's
 // WriteBatch is one synced write: applied at durable(), which waits for its record's barrier. A
 // loop thread writes the turns, one barrier for every index's records; commit() is a checkpoint.
+// Each index's group id is chosen at create and kept in <dir>/<i>/kv-group: a reopen at another
+// loop count finds its group there, never from L (rocksdb-parity D10).
 //
 // A get is basic_index::get(key, f), the record lent to the copy into the caller's value; a
 // scan is basic_index::scan(from, n, f), the records lent to the copy into the caller's sink.
@@ -24,6 +26,7 @@
 #include "completion/posix.h"
 #include "journal/host.h"
 
+#include <charconv>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -65,6 +68,12 @@ namespace {
 
 constexpr kronuz::journal::PosixIOOptions host_io{true, true};
 
+// How the engine starts: creating its indexes or reopening them, at `loops` loops (0: KV_LOOPS, or 1).
+struct kv_opening {
+	bool create = true;
+	std::uint32_t loops = 0;
+};
+
 class strata_kv {
 public:
 	static constexpr const char* name = "strata";
@@ -77,7 +86,10 @@ public:
 		return std::make_shared<kronuz::journal::PosixIO>(dir, 0600, host_io);
 	}
 
-	explicit strata_kv(const kvbench::config& c, io_maker io = posix_io) : c_(c), io_of_(std::move(io)), budget_(std::max<std::uint64_t>(c.memory / 4, 1 << 20)) {
+	using opening = kv_opening;
+
+	explicit strata_kv(const kvbench::config& c, io_maker io = posix_io, opening at = {})
+		: c_(c), io_of_(std::move(io)), loops_wanted_(at.loops), budget_(std::max<std::uint64_t>(c.memory / 4, 1 << 20)) {
 		if (c.background) {
 			WorkPool::Options po;
 			po.threads = c.background;
@@ -87,8 +99,15 @@ public:
 			exec_ = std::make_unique<strata::work_pool_executor>(*pool_);
 		}
 		shards_.resize(c.indexes > 1 ? c.indexes : c.threads);
-		open_host();
-		for (std::size_t i = 0; i < shards_.size(); ++i) { open(i, true); }
+		groups_.resize(shards_.size());
+		try {
+			open_host();
+			for (std::size_t i = 0; i < shards_.size(); ++i) { open(i, at.create); }
+		} catch (...) {
+			shards_.clear();
+			close_host();
+			throw;
+		}
 	}
 	~strata_kv() {
 		shards_.clear();
@@ -205,6 +224,10 @@ public:
 		open_host();
 		for (std::size_t i = 0; i < shards_.size(); ++i) { open(i, false); }
 	}
+	// Tests: index i, its group, and the host's loop count (0 unlogged).
+	const kv_index& index(std::size_t i) const { return *shards_[i].ix; }
+	std::uint64_t group(std::size_t i) const { return groups_[i]; }
+	std::uint32_t loops() const { return host_ ? host_->loops() : 0; }
 	std::string stats() {
 		std::uint64_t segments = 0, docs = 0;
 		for (auto& s : shards_) {
@@ -279,19 +302,48 @@ private:
 	void open_host() {
 		if (!logged()) { return; }
 		const kronuz::journal::Identity id{'k', 'v', 'b', 'e', 'n', 'c', 'h', '-', 'h', 'o', 's', 't'};
-		// KV_LOOPS: the host's loops, one turn log each (M3's N-log row); index i's group is on loop
-		// i mod L.
+		// KV_LOOPS: the host's loops, one turn log each (M3's N-log row).
 		const char* l = std::getenv("KV_LOOPS");
-		const std::uint32_t loops = l ? std::max(1u, unsigned(std::strtoul(l, nullptr, 10))) : 1u;
+		const std::uint32_t loops = loops_wanted_ ? loops_wanted_ : l ? std::max(1u, unsigned(std::strtoul(l, nullptr, 10))) : 1u;
 		host_ = std::make_unique<kronuz::journal::Host>(io_of_(c_.dir + "/host"), id, kronuz::journal::HostOptions{loops, turns()});
-		groups_.clear();
-		for (std::uint64_t g = 1; groups_.size() < shards_.size(); ++g) {
-			if (host_->loop(g) == groups_.size() % loops) { groups_.push_back(g); }
-		}
 		for (std::uint32_t i = 0; i < loops; ++i) {
 			sealers_.push_back(std::make_unique<strata::turn_sealer>(*host_, i, id, turns(), command_bytes));
-			loops_.emplace_back([s = sealers_.back().get()] { s->serve(); });
+			// A failed turn ends the loop: the sealer keeps the failure, and its writers' waits throw it.
+			loops_.emplace_back([s = sealers_.back().get()] {
+				try {
+					s->serve();
+				} catch (const std::exception&) {
+				}
+			});
 		}
+	}
+	// A created index's group: the next id after index i - 1's on loop i mod L, so the indexes
+	// spread over the loops at create.
+	std::uint64_t pick_group(std::size_t i) const {
+		std::uint64_t g = i ? groups_[i - 1] + 1 : 1;
+		while (host_->loop(g) != i % host_->loops()) { ++g; }
+		return g;
+	}
+	static constexpr std::string_view group_file = "kv-group";
+	static void store_group(kronuz::journal::IO& io, std::uint64_t g) {
+		const std::string text = std::to_string(g);
+		auto f = io.create_exclusive(group_file);
+		for (std::size_t at = 0; at < text.size();) { at += f->write_at(at, std::string_view(text).substr(at)); }
+		f->sync();
+		io.sync_directory();
+	}
+	static std::uint64_t stored_group(kronuz::journal::IO& io) {
+		auto f = io.open_existing_read_only(group_file);
+		std::string text(f->size(), '\0');
+		for (std::size_t at = 0; at < text.size();) {
+			const std::size_t n = f->read_at(at, std::span<char>(text.data() + at, text.size() - at));
+			if (!n) { break; }
+			at += n;
+		}
+		std::uint64_t g = 0;
+		const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), g);
+		if (ec != std::errc{} || end != text.data() + text.size() || !g) { throw std::runtime_error("kv_strata: a damaged kv-group file"); }
+		return g;
 	}
 	void close_host() {
 		for (auto& s : sealers_) { s->stop(); }
@@ -316,6 +368,8 @@ private:
 		o.background = exec_.get();
 		o.identity_seed = c_.seed + i;
 		if (!sealers_.empty()) {
+			groups_[i] = create ? pick_group(i) : stored_group(*s.io);
+			if (create) { store_group(*s.io, groups_[i]); }
 			o.log_group = groups_[i];  // the index joins its group at create (D7)
 			o.log = sealers_[host_->loop(o.log_group)].get();
 			o.command_bytes = command_bytes;
@@ -331,7 +385,8 @@ private:
 	std::unique_ptr<kronuz::journal::Host> host_;
 	std::vector<std::unique_ptr<strata::turn_sealer>> sealers_;  // one per loop
 	std::vector<std::thread> loops_;
-	std::vector<std::uint64_t> groups_;  // index i's group
+	std::vector<std::uint64_t> groups_;  // index i's group, stored in its directory
+	std::uint32_t loops_wanted_ = 0;
 	strata::byte_budget budget_;
 	std::unique_ptr<WorkPool> pool_;
 	std::unique_ptr<strata::executor> exec_;
