@@ -173,6 +173,7 @@ struct replica {
 	virtual void fence_group() = 0;
 	virtual cs::Index applied() const = 0;
 	virtual bool fenced() const = 0;
+	virtual std::string fence_reason() const = 0;
 };
 
 template <class App>
@@ -196,6 +197,7 @@ struct replica_of final : replica {
 	}
 	cs::Index applied() const override { return g ? g->applied() : 0; }
 	bool fenced() const override { return g && g->fenced(); }
+	std::string fence_reason() const override { return g ? g->fence_reason() : std::string(); }
 };
 using root_replica = replica_of<sp::root>;
 using shard_replica = replica_of<blob::app>;
@@ -451,7 +453,7 @@ struct world {
 			}
 			auto s = r->state();
 			std::cerr << "  replica " << k.first << "/" << k.second << " on node " << r->node << (r->open() ? "" : " not open: " + what(r->p->opening->error)) << " applied "
-					  << r->applied() << (r->fenced() ? " fenced" : "") << ", role " << (s ? int(s->role) : -1) << " term " << (s ? s->term : 0) << " committed "
+					  << r->applied() << (r->fenced() ? " fenced (" + r->fence_reason() + ")" : "") << ", role " << (s ? int(s->role) : -1) << " term " << (s ? s->term : 0) << " committed "
 					  << (s ? s->committed : 0) << (s ? ", " + text(s->membership) : std::string()) << '\n';
 		}
 	}
