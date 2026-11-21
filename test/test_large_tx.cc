@@ -3,7 +3,8 @@
 // as chunk records and is all or nothing across a crash.
 // admit: a logged index admits what an unlogged one does, past 64 MiB, and refuses what it refuses;
 // sweep: a power cut (8 seeds) and a process crash at every mutation of a run with a multi-chunk
-// transaction and a kv-shaped batch at 4 KiB chunks, then writes and a second crash;
+// transaction and a kv-shaped batch at 4 KiB chunks, then a close, a reopen, writes and a second
+// crash;
 // big: the same at strided cuts over a kv batch past 1 MiB and a transaction past 64 MiB at kv's
 // 1 MiB chunks; visible: a served loop and a view reader, which never sees the transaction before
 // its last chunk is durable (run under TSan).
@@ -216,8 +217,9 @@ struct tally {
 };
 
 // The run cut at mutation k, then a process crash (no seed) or a power loss: recovery holds one
-// prefix of whole transactions, at least the acknowledged ones. The index writes again, commits,
-// and a second crash of the same kind keeps all of it.
+// prefix of whole transactions, at least the acknowledged ones. The index then closes before any
+// write, so its leave checkpoints the recovered state over a dropped run's records, and reopens
+// with the same state. It writes again, commits, and a second crash of the same kind keeps it all.
 void crash_case(const run_plan& p, std::uint64_t k, std::optional<std::uint64_t> seed, tally& t) {
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
@@ -253,6 +255,16 @@ void crash_case(const run_plan& p, std::uint64_t k, std::optional<std::uint64_t>
 		if (at >= p.prefixes.size()) { return; }
 		t.partial += at != acked;
 		expected = got;
+		ix.close();
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "cut %llu seed %lld: recovery or its close threw: %s\n", (unsigned long long)k, label, e.what());
+		CHECK(!"recovery or its close threw");
+		return;
+	}
+	try {
+		host h(io, p.s);
+		kv_index ix = kv_index::open(io, logged_options(h.sealer, p.s.command));
+		CHECK(state_of(ix, p.keys) == expected);
 		for (const auto& m : p.more) {
 			CHECK(ix.apply(m, {}).result == verdict::accepted);
 			apply_to(expected, m);
@@ -261,8 +273,8 @@ void crash_case(const run_plan& p, std::uint64_t k, std::optional<std::uint64_t>
 		while (h.sealer.turn()) {}
 		CHECK(ix.log_synced() >= ix.applied().index);
 	} catch (const std::exception& e) {
-		std::fprintf(stderr, "cut %llu seed %lld: recovery threw: %s\n", (unsigned long long)k, label, e.what());
-		CHECK(!"recovery threw");
+		std::fprintf(stderr, "cut %llu seed %lld: the reopen after the close threw: %s\n", (unsigned long long)k, label, e.what());
+		CHECK(!"reopen threw");
 		return;
 	}
 	cut(1);
