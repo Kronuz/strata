@@ -236,6 +236,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_include_directories(test_reopen_loops PRIVATE bench/kv)
   target_link_libraries(test_reopen_loops PRIVATE strata::core)
   add_test(NAME reopen_loops COMMAND test_reopen_loops)
+  add_executable(test_tolerant_open test/test_tolerant_open.cc)
+  target_link_libraries(test_tolerant_open PRIVATE strata::core)
+  add_test(NAME tolerant_open COMMAND test_tolerant_open)
   # An idle index's checkpoint moves forward while another writes 10 x retain_segments segments;
   # the log keeps at most retain + spare + 1 segment files (rocksdb-parity D2's test).
   add_executable(test_checkpoint_window test/test_checkpoint_window.cc)
