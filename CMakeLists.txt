@@ -123,6 +123,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(group_voters_test PRIVATE strata::group)
   add_test(NAME group_voters COMMAND group_voters_test)
   set_tests_properties(group_voters PROPERTIES TIMEOUT 1500)
+  # Two data voters and a witness: any one member lost, the log carried by the witness (group-heal A4).
+  add_executable(group_witness_test test/group/witness_test.cc)
+  target_link_libraries(group_witness_test PRIVATE strata::group)
+  add_test(NAME group_witness COMMAND group_witness_test)
   # A learner installs a pinned pack and file set through the Driver's install surface (group-heal A1).
   add_executable(group_install_test test/group/install_test.cc)
   target_link_libraries(group_install_test PRIVATE strata::group)
