@@ -836,86 +836,28 @@ public:
 	// The owner lock is the directory's own (D2, lock_directory): busy is EWOULDBLOCK, and
 	// a refusal writes nothing. The directory's entry in its parent is the host's
 	// to make durable; one parent sync can cover many creates (SI-R21).
-	static basic_index create(kronuz::journal::IO& io, const options& opts, const std::array<char, 16>& uuid) {
-		basic_index ix = create_deferred(io, opts, uuid);
-		ix.commit();  // generation 1 (D3-C)
-		return ix;
-	}
+	static basic_index create(kronuz::journal::IO& io, const options& opts, const std::array<char, 16>& uuid);
 
 	// A create that writes nothing until its first commit (D3-C): the directory lock, an
 	// interrupted create's residue cleared, the state of an empty index in memory. Until that
 	// commit an open finds no index here (strata::group recreates it from its log, D112).
-	static basic_index create_deferred(kronuz::journal::IO& io, const options& opts, const std::array<char, 16>& uuid) {
-		basic_index ix(io);
-		const lease_scope leased{ix.lease_};
-		ix.lock_directory(opts);
-		ix.clear_uncreated();
-		ix.cur_.uuid = uuid;
-		ix.m_.uuid = uuid;
-		// Every structure the index's layout builds, keys only in a keyed index (F4, F20), and
-		// index_sort's key order with keys in a key-ordered layout (format-14-kv D1a).
-		ix.cur_.configured = segment::readable & ~(opts.keyed ? 0 : format::bit::keys) & ~format::bit::index_sort;
-		if (segment_policy<Layout>::key_order && (ix.cur_.configured & format::bit::keys)) { ix.cur_.configured |= format::bit::index_sort; }
-		ix.opts_ = opts;
-		if (ix.opts_.defer_io) { ix.opts_.eager_segments = true; }  // a first-read map would be I/O inside apply()
-		ix.seed_identities();
-		if (opts.budget) { ix.permit_ = opts.budget->open(); }
-		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
-		ix.start_merges();
-		ix.attach_log(true);
-		return ix;
-	}
+	static basic_index create_deferred(kronuz::journal::IO& io, const options& opts, const std::array<char, 16>& uuid);
 
 	// Opens the highest durable manifest (or `to`, committed again as the newest), fails
 	// closed when a file it names is missing or differs, then deletes orphans. An open at a
 	// `to` older than the newest manifest is a fallback and says so in fallback(), never silently.
-	static basic_index open(kronuz::journal::IO& io, const options& opts = {}, std::optional<std::uint64_t> to = std::nullopt) {
-		basic_index ix(io);
-		const lease_scope leased{ix.lease_};
-		ix.lock_directory(opts);
-		ix.opts_ = opts;
-		if (ix.opts_.defer_io) { ix.opts_.eager_segments = true; }  // a first-read map would be I/O inside apply()
-		if (opts.budget) { ix.permit_ = opts.budget->open(); }
-		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
-		ix.start_merges();
-		ix.recover(to);
-		ix.seed_identities();  // after recovery: a seeded base counts from the next generation
-		ix.attach_log();
-		return ix;
-	}
+	static basic_index open(kronuz::journal::IO& io, const options& opts = {}, std::optional<std::uint64_t> to = std::nullopt);
 
 	// A moved index keeps its readers' shared state: handles follow it (D11).
 	basic_index(basic_index&&) noexcept = default;
 	// The target runs its destructor first (its merges' jobs and its views let go under its
 	// lease: SR-D5, SR-D2), then takes o's state.
-	basic_index& operator=(basic_index&& o) noexcept {
-		if (this != &o) {
-			std::destroy_at(this);
-			std::construct_at(this, std::move(o));
-		}
-		return *this;
-	}
+	basic_index& operator=(basic_index&& o) noexcept;
 	// Runs close()'s first half (SR-D2): merges ended, the current view retired, released views
 	// freed. A view readers still protect is a host bug, since a finished close is its duty: it
 	// is reported (an abort in debug builds) and leaks with its segments and the directory lock,
 	// so no reader faults and no reopen in this process truncates its files.
-	~basic_index() {
-		const lease_scope leased{lease_};
-		detach_log();
-		end_merges();
-		if (pub_) {
-			retire_current();
-			free_views();
-			if (!pub_->retired.empty()) {
-				detail::owner_break("strata: an index destroyed while readers hold its views");
-				pub_->retired.leak();
-				for (auto& t : pub_->tables) { detail::keep_forever(std::move(t.second)); }  // their readers' tables too
-				detail::keep_forever(std::shared_ptr<const kronuz::journal::OwnerLock>(std::move(lock_)));
-			}
-			pub_.reset();
-		}
-		segs_.clear();  // the segments drop here, under the lease
-	}
+	~basic_index();
 
 	// Releases the owner lock and drops all state; uncommitted work is lost, except that a logged
 	// index first leaves its group (D7), so its head covers every logged batch. Background
@@ -923,63 +865,13 @@ public:
 	// afterwards. Never waits for readers (D11): views they still protect keep their segments,
 	// files, and the directory lock, and the index is closing() until try_finish_close() frees
 	// the last of them. Readers' acquires throw index_closed from here on.
-	void close() {
-		// Refused inside a flush or a scan's callback before anything is reset, and before the
-		// lease: a flush's run thread may call it, and a refusal changes nothing.
-		require_buffers_unpinned();
-		if (scanning_) { throw std::logic_error("strata: the index was closed inside a scan's callback"); }
-		const writer_scope leased{*this};
-		if (closing()) { throw index_fenced("strata: the index is closing"); }
-		leave();  // a failure throws before anything is torn down; the log keeps the group stored
-		detach_log();
-		end_merges();
-		segs_.clear();
-		clear_buffer();
-		appender_.reset();
-		log_.reset();
-		permit_ = {};
-		fenced_ = true;
-		map_asked_ = false;
-		if (pub_) {
-			retire_current();
-			free_views();
-			if (!pub_->retired.empty()) {
-				pub_->closing = true;
-				return;
-			}
-		}
-		storage_permit_ = {};
-		lock_.reset();
-	}
+	void close();
 
 	// A closing index (D11): frees the views readers released since, and once none is held
 	// releases its files' accounting and the directory lock. Past `deadline` (the executor's
 	// clock) with views still held, throws readers_active naming their records. True once
 	// closed; false while closing.
-	bool try_finish_close(std::optional<std::uint64_t> deadline = std::nullopt) {
-		const writer_scope leased{*this};
-		if (!closing()) {
-			if (!fenced_) { throw std::logic_error("strata: try_finish_close() on an open index"); }
-			return true;
-		}
-		free_views();
-		if (pub_->retired.empty()) {
-			pub_->closing = false;
-			storage_permit_ = {};
-			lock_.reset();
-			return true;
-		}
-		if (deadline && exec_->now() >= *deadline) {
-			std::vector<reader_registry::claim_time> mine;
-			for (const auto& c : pub_->rs->registry->claims()) {
-				pub_->retired.for_each([&](const view& v) {
-					if (c.p == &v) { mine.push_back(c); }
-				});
-			}
-			throw readers_active("strata: readers hold a closing index's views past the deadline", std::move(mine));
-		}
-		return false;
-	}
+	bool try_finish_close(std::optional<std::uint64_t> deadline = std::nullopt);
 	bool closing() const noexcept { return pub_ && pub_->closing; }
 
 	// --- writer ---------------------------------------------------------------------------
@@ -991,123 +883,7 @@ public:
 	// A logged index (options::log) given no position logs an accepted transaction (standalone-turn-log
 	// D2, D3): its command, refused as invalid past options::command_bytes before stage 1, joins
 	// the group's open record, and the position it takes there becomes the applied one.
-	verdict apply(const transaction& t, files::position at) {
-		const writer_scope leased{*this, opts_.defer_io};
-		live();
-		const bool logs = logged_ && at == files::position{};
-		std::string cmd;
-		if constexpr (command::loggable<Layout>) {
-			if (logs) {
-				if (opts_.log->failed()) {
-					fenced_ = true;  // fail-stop (D9): nothing appends until the host reopens the log
-					throw index_fenced("strata: the turn log failed; reopen the index");
-				}
-				if (join_owed_) { throw std::logic_error("strata: a logged index applies after its first commit (D7's join)"); }
-				command::encode(cmd, t);
-				if (cmd.size() > opts_.command_bytes) {
-					verdict v;
-					v.result = verdict::invalid;
-					return v;
-				}
-			}
-		}
-		assert(!logged_ || at == files::position{} || at.index <= logged_->synced.load(std::memory_order_relaxed));  // replay: durable
-		turn_guard turn{map_asked_};
-		// Stage 1 waits for room: the flush happens before this transaction, so a flush
-		// failure never loses an accepted transaction's verdict.
-		const auto flush_due = [&] { return needs_flush() || !fits(t) || buffer_size() + t.ops.size() > opts_.buffered_docs_cap; };
-		if (!opts_.defer_io && (flush_due() || log_due())) { flush_point(); }
-		verdict v;
-		if (at != files::position{} && at <= cur_.applied) {
-			v.result = verdict::skipped;
-			return v;
-		}
-		// Host mode, after a demote(): no segment read may map inside apply, so the bodies are owed
-		// until promote(). The bit keeps demote() out until the turn ends (cold-tier D3, CT-R22).
-		if (opts_.defer_io && promote_owed_.load(std::memory_order_acquire)) {
-			map_asked_ = turn.owed = true;
-			v.result = verdict::map_owed;
-			return v;
-		}
-		assert(!opts_.defer_io || std::all_of(segs_.begin(), segs_.end(), [](const auto& s) { return s->bodied() || s->failed(); }));
-		// Host mode: the flush is owed only while the buffer holds something it could write, so an
-		// oversize transaction on an empty buffer is invalid, not owed again after every refresh.
-		if (opts_.defer_io && flush_due() && (buffered_records() != 0 || holds_rejected())) {
-			turn.owed = true;
-			v.result = verdict::flush_owed;
-			return v;
-		}
-		if (t.ops.size() > opts_.buffered_docs_cap || !lane_fits(t)) {
-			v.result = verdict::invalid;
-			return v;
-		}
-		// Storage admission: the transaction's estimated bytes (and a segment's fixed bytes
-		// when it starts a buffer), then any growth of the commit allowance it causes (a
-		// first delete in a segment adds a deleted set to the edit), or no_space.
-		const std::uint64_t reserve = storage_permit_ ? estimate_bytes(t) + (buffer_size() == 0 ? segment_overhead : 0) : 0;
-		const bool drained = std::exchange(drain_ran_, false);
-		if (opts_.defer_io) {
-			if (reserve && !storage_permit_.try_grow(reserve)) {
-				// Owed once per round: the retry after reclaim_for_space() answers no_space.
-				if (!drained && drain_pending()) {
-					drain_asked_ = true;
-					turn.owed = true;
-					v.result = verdict::drain_owed;
-				} else {
-					v.result = verdict::no_space;
-				}
-				return v;
-			}
-		} else if (reserve && !storage_permit_.try_grow(reserve) && !(drain() && storage_permit_.try_grow(reserve))) {
-			v.result = verdict::no_space;
-			return v;
-		}
-		undo_.clear();
-		const std::size_t fields_before = fields_.size();
-		try {
-			v = evaluate(t);
-		} catch (...) {
-			// Each step is logged before its change can fail, so the undo log covers whatever
-			// stage 1 had done when it threw.
-			abandon(reserve);
-			throw;
-		}
-		std::uint64_t allowance = allowance_;
-		if (v.result == verdict::accepted && storage_permit_) {
-			allowance = commit_allowance();
-			if (allowance > allowance_ && !storage_permit_.try_grow(allowance - allowance_)) { v.result = verdict::no_space; }
-		}
-		if (v.result != verdict::accepted) {
-			abandon(reserve);
-		} else {
-			reserved_ += reserve;
-			allowance_ = std::max(allowance, allowance_);
-			++wb_->transactions;
-			visible_ = wb_->base + wb_->transactions;
-			wb_->order.publish();
-			invert_pending();
-			charge();
-			if (t.set_schema) { set_schema(*t.set_schema); }
-			if (fields_.size() != fields_before) { ++fields_epoch_; }
-			++applied_since_commit_;
-			changed();
-		}
-		undo_.clear();
-		if (at != files::position{}) {
-			assert(at > cur_.applied);  // the applied position never moves back
-			cur_.applied = at;
-			changed();  // a rejected transaction moves the position too (SR-D16)
-			if (logged_ && v.result == verdict::accepted) { logged_->replayed(visible_); }  // replay: durable
-		}
-		// The group's end (D7): the cover first (rule 4), then V, before the writer resumes (rule 3).
-		// A logged index's V is the watcher's (D4), and the cover precedes the append, so V never
-		// passes it.
-		publish_cover();
-		if (pub_ && !logged_) { pub_->rs->visible.store(visible_, std::memory_order_release); }
-		if (logs && v.result == verdict::accepted) { join_log(cmd); }
-		if (!opts_.defer_io && chores_owed_.load(std::memory_order_acquire)) { run_chores(); }
-		return v;
-	}
+	verdict apply(const transaction& t, files::position at);
 
 	// A logged index's V (D4): what its log made durable, and its group's last durable sequence.
 	std::uint64_t logged_visible() const noexcept { return logged_ ? logged_->visible.load(std::memory_order_acquire) : visible_; }
@@ -1120,26 +896,11 @@ public:
 	// a close that left (D7) made every accepted transaction durable in the head, so the
 	// transaction is durable; after a close that could not leave, an open's recovery tells.
 	// Reads only the options, so a close on the owner thread does not race it.
-	void await_durable(files::position at) const {
-		if constexpr (command::loggable<Layout>) {
-			if (!opts_.log || !at.index) { return; }
-			try {
-				opts_.log->await(opts_.log_group, at.index);
-			} catch (const kronuz::journal::group_closed&) {
-				throw index_closed("strata: the index closed before its write's wait returned");
-			}
-		}
-	}
+	void await_durable(files::position at) const;
 
 	// Undoes a transaction's stage 1: its slots, pending deletes and records, its documents and
 	// its storage reservation. Kept rejected records stay counted against the budget.
-	void abandon(std::uint64_t reserve) {
-		rollback();
-		pending_docs_.clear();
-		storage_permit_.shrink(reserve);
-		charge();
-		undo_.clear();
-	}
+	void abandon(std::uint64_t reserve);
 
 	// A client's hold on the index for one request (write-buffer D2): never exclusive, never
 	// waits. Its end checks the index in (check_in(), with its thread condition). It names the
@@ -1167,21 +928,7 @@ public:
 	// no thread reads the index outside a writer call (get, scan, find_key, has_docid, segments,
 	// digest, buffered_count take no lease; debug builds report the overlap); reads off the
 	// owner's thread go through views (reader(), D5), which no check-in races (CR3).
-	void check_in() noexcept {
-		do {
-			const chore_scope chores{lease_};
-			if (!chores) {
-				// Dekker with writer_scope (CR4): a holder that hands off after this store sees it; one
-				// that handed off before lets the retry take the lease.
-				chores_owed_.store(true, std::memory_order_seq_cst);
-				const chore_scope retry{lease_};
-				if (!retry) { return; }
-				run_chores();
-			} else {
-				run_chores();
-			}
-		} while (chores_owed_.load(std::memory_order_seq_cst));  // a check-in that met these chores
-	}
+	void check_in() noexcept;
 	// Whether a check-in found the lease held and left its chores to the holder.
 	bool chores_owed() const noexcept { return chores_owed_.load(std::memory_order_acquire); }
 	// Whether a durability failure fenced the writer: every writer call throws index_fenced until the host
@@ -1189,9 +936,7 @@ public:
 	bool fenced() const noexcept { return fenced_; }
 	// Whether a published merge's output awaits the next commit's sync with nothing else uncommitted: warm
 	// (demote(), close_ready()) cannot hold until a commit makes it durable. Read under the lease.
-	bool merge_output_unsynced() const noexcept {
-		return applied_since_commit_ == 0 && std::any_of(segs_.begin(), segs_.end(), [](const auto& s) { return bool(s->unsynced); });
-	}
+	bool merge_output_unsynced() const noexcept;
 	// A host that owns the index's lifetime (the catalog) registers the word that says whether a caller
 	// holds it: in debug builds every writer call checks `held(*word)` and reports a breach (CT-R15).
 	using call_guard = bool (*)(std::uint64_t) noexcept;
@@ -1199,75 +944,36 @@ public:
 
 	// Writes the buffer as a segment (searchable, not yet durable). ENOSPC leaves the
 	// buffer in place to retry once space returns; other failures fence.
-	void refresh() {
-		const writer_scope leased{*this};
-		live();
-		guarded([&] { flush(); });
-		publish_merges(false, false);
-		if (opts_.auto_merge) { maybe_merge(); }
-		publish_point();
-	}
+	void refresh();
 
 	// Merges the given segments into one (searchable, not yet durable), waiting for it: their
 	// live documents in docid order, deleted ones dropped. Nothing is written when none is
 	// live; no room for the output throws, after the merge leaves no trace.
-	void merge(const std::vector<std::uint64_t>& ids) {
-		const writer_scope leased{*this};
-		live();
-		apply_pending();  // the merge drops what the buffer deleted (CR5)
-		publish_merges(true, false);
-		schedule(ids);
-		publish_merges(true, true);
-	}
+	void merge(const std::vector<std::uint64_t>& ids);
 
 	// Merges until at most `max_segments` remain and none holds deletes, by the policy's
 	// forced merges. With an executor it waits for every background merge, then for its own.
 	// The buffer's pending deletes count as deletes, as in merge().
-	void force_merge(std::size_t max_segments = 1) {
-		const writer_scope leased{*this};
-		apply_pending();
-		run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_forced_merges(std::move(c), max_segments); }, true, true);
-	}
+	void force_merge(std::size_t max_segments = 1);
 
 	// Merges away the segments whose deleted fraction passes the policy's
 	// force_merge_deletes_pct_allowed, waiting like force_merge().
-	void force_merge_deletes() {
-		const writer_scope leased{*this};
-		apply_pending();
-		run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_forced_deletes_merges(std::move(c)); }, true);
-	}
+	void force_merge_deletes();
 
 	// Runs the policy's merges until it asks for none, or until storage admission has no
 	// room for the next; those wait for space. With an executor it hands one round to it,
 	// leaving out segments already under merge or damaged, and returns.
-	void maybe_merge() {
-		const writer_scope leased{*this};
-		try {
-			run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_merges(std::move(c)); }, false);
-		} catch (const map_failure&) {
-			// The round is skipped and counted; the next one retries. merge(), force_merge() and
-			// force_merge_deletes() rethrow it, as the host asked for those (cold-tier D9).
-			load_->skipped.fetch_add(1, std::memory_order_relaxed);
-		} catch (const std::system_error& e) {
-			if (e.code().value() != ENOSPC) { throw; }
-		}
-	}
+	void maybe_merge();
 
 	// Waits for this index's background merges and publishes them. One that ran out of
 	// space is discarded, its sources left for a later merge; any other failure fences.
-	void wait_merges() {
-		const writer_scope leased{*this};
-		live();
-		publish_merges(true, false);
-	}
+	void wait_merges();
 	// Background merges handed to the executor and not yet published.
 	std::size_t merges_pending() const noexcept { return pending_.size(); }
 	// Whether a background merge found a damaged segment, or a first map failed its checks
 	// (cold-tier D11); merges skip the first until heal(), and a commit throws corrupt_segment
 	// at the second until it.
-	bool needs_heal() const noexcept {
-		return std::any_of(segs_.begin(), segs_.end(), [](const auto& s) { return s->damaged || s->failed(); });
-	}
+	bool needs_heal() const noexcept;
 
 	// Makes everything applied durable (design D1), then reclaims what retention allows.
 	// ENOSPC from a write before that file's sync leaves the index as it was (the partial
@@ -1279,56 +985,25 @@ public:
 	// A logged index's commit is its checkpoint (standalone-turn-log D5): the log durable through
 	// the applied position X before the edit (I1), then the checkpoint record staged once the edit
 	// is durable (I2), all under one lease, so no batch record lands between X and the record.
-	void commit() {
-		const writer_scope leased{*this};
-		live();
-		await_log();
-		guarded([&] { flush(); });
-		publish_merges(false, false);
-		if (opts_.auto_merge) { maybe_merge(); }
-		prepare_commit();  // the input maps, outside guarded(): a failure leaves the index as refresh() does
-		guarded([&] { commit_files(); });
-		// The log moved: a failure from here fences, so a throw never hides a durable commit (SR4).
-		durable([&] {
-			publish_point();
-			free_views();
-			retain();
-			reclaim_files(opts_.reclaim_slice);
-		});
-		stage_checkpoint();
-	}
+	void commit();
 
 	// Frees queued obsolete files, about `bytes` of them, each truncated from its end in
 	// `reclaim_step` steps and then removed. Returns the bytes freed. Views readers released
 	// are freed first, and the files only they held are queued then (D6), so an idle index
 	// returns a released view's space here, not at its next commit. With a host executor the
 	// files are posted to it, and the bytes returned are the ones posted.
-	std::uint64_t reclaim(std::uint64_t bytes = ~std::uint64_t(0)) {
-		const writer_scope leased{*this};
-		live();
-		if (free_views() || retain_owed_) { retain(true); }
-		return reclaim_files(bytes);
-	}
+	std::uint64_t reclaim(std::uint64_t bytes = ~std::uint64_t(0));
 	std::size_t reclaim_pending() const noexcept { return reclaim_.size(); }
 	// The chore behind drain_owed (options::defer_io): reclaims every queued file, waits for the
 	// posted deletes and syncs the directory, as storage admission does when space is short. True
 	// when something was reclaimed or removed. Answering drain_owed ends with this call: the next
 	// apply then answers no_space if the room is still short.
-	bool reclaim_for_space() {
-		const writer_scope leased{*this};
-		live();
-		if (std::exchange(drain_asked_, false)) { drain_ran_ = true; }
-		return drain();
-	}
+	bool reclaim_for_space();
 	// Owner thread. Waits for the deletes posted to the host's executor and takes their
 	// outcomes; a failed one is queued again. It does not sync the directory, so the permit
 	// still counts the removed bytes until the next commit or drain(). Without an executor
 	// there is nothing to wait for.
-	void wait_deletes() {
-		const writer_scope leased{*this};
-		live();
-		finish_deletes();
-	}
+	void wait_deletes();
 	// Files posted for deletion whose outcome the owner has not yet collected.
 	std::size_t deletes_pending() const noexcept { return posted_.size(); }
 
@@ -1362,53 +1037,7 @@ public:
 	// replica. Segments a background merge found damaged, or whose first map failed its checks,
 	// are among those checked, and merges take them again once they pass. A segment never read
 	// has nothing to check (cold-tier D9). Like a merge, it invalidates segment views.
-	std::vector<std::uint64_t> heal() {
-		const writer_scope leased{*this};
-		live();
-		std::vector<std::uint64_t> damaged;
-		for (auto& s : segs_) {
-			if (s->unsynced) {  // built in memory, never read from disk
-				if (s->damaged) { damaged.push_back(s->ref.id); }
-				continue;
-			}
-			if (!s->damaged && !s->failed() && !s->bodied()) { continue; }
-			try {
-				const segment& sg = s->seg();  // a marked record throws corrupt_segment
-				if (s->damaged) {  // a merge found it inconsistent: the checksums alone do not clear it
-					basic_check_report<Layout> r;
-					check_segment(sg, &s->deleted, r);
-				} else {
-					sg.verify_all();
-				}
-				s->damaged = false;
-				continue;
-			} catch (const corrupt_segment&) {
-			}
-			try {
-				auto fresh = read_checked([&] { return load_segment(*io_, vouch_of(m_), s->ref, true, load_); }, nullptr);
-				if (s->damaged) {
-					basic_check_report<Layout> r;
-					check_segment(fresh->mapped(), &s->deleted, r);
-				}
-				// The record's own state carries over; the facts are the fresh body's.
-				fresh->deleted = std::move(s->deleted);
-				fresh->dead = s->dead;
-				fresh->deletes_dirty = s->deletes_dirty;
-				fresh->ref = s->ref;
-				s = std::move(fresh);  // a view keeps the failing object until it is freed (D11)
-				load_->retries.fetch_add(1, std::memory_order_relaxed);
-				changed();
-			} catch (const corrupt_index&) {
-				damaged.push_back(s->ref.id);
-			} catch (const corrupt_segment&) {
-				damaged.push_back(s->ref.id);
-			} catch (const std::system_error&) {
-				damaged.push_back(s->ref.id);
-			}
-		}
-		publish_point();
-		return damaged;
-	}
+	std::vector<std::uint64_t> heal();
 
 	// --- warm (cold-tier D3, D10) -------------------------------------------------------------
 
@@ -1418,53 +1047,20 @@ public:
 	// commit. False, and nothing changed (not the flag nor the bit), when a record is buffered, a
 	// merge is pending, a segment is unsynced, or a map_owed turn is outstanding (CT-R22). Under
 	// defer_io a twin that can still map sets the flag: apply answers map_owed until promote().
-	bool demote() {
-		const writer_scope leased{*this};
-		live();
-		if (!warm_quiescent()) { return false; }
-		std::vector<std::shared_ptr<open_segment>> twins;
-		twins.reserve(segs_.size());
-		for (auto& s : segs_) { twins.push_back(s->twin()); }
-		const bool owed = opts_.defer_io && std::any_of(twins.begin(), twins.end(), [](const auto& t) { return !t->failed(); });
-		segs_ = std::move(twins);
-		appender_.reset();  // warm holds the directory alone: the next commit opens the log again
-		log_.reset();
-		if (owed) { promote_owed_.store(true, std::memory_order_release); }
-		changed();
-		publish_point();  // the new view over the twins; it frees the retired views no reader holds
-		return true;
-	}
+	bool demote();
 	// Whether close() would lose nothing and leave nothing unaccounted (cold-tier D10, CT-R4), a
 	// chore under the lease: warm's predicate, nothing uncommitted, and, after a non-blocking
 	// collect of the posted deletes' outcomes, no posted delete, an empty reclaim queue and no
 	// debt, so that close() releases the storage permit only for bytes no queue still owes.
 	// False asks the host to commit, reclaim() or collect and ask again later; it changes nothing
 	// but that collect, and never waits.
-	bool close_ready() {
-		const writer_scope leased{*this};
-		live();
-		if (!warm_quiescent() || applied_since_commit_ != 0) { return false; }
-		collect_deletes();
-		return posted_.empty() && reclaim_.empty() && debt_ == 0;
-	}
+	bool close_ready();
 	// The wake chore of a demoted defer_io index: maps every record without a body, so the next
 	// apply makes no device call. A record whose checks fail takes the marker and counts as done
 	// (D9); a host error (EMFILE, ENOMEM) rethrows unchanged with the bodies mapped so far kept, the
 	// flag set and nothing fenced. It writes and publishes nothing. With the flag clear it does
 	// nothing, and makes no device call.
-	void promote() {
-		const writer_scope leased{*this};
-		live();
-		if (!promote_owed_.load(std::memory_order_acquire)) { return; }
-		for (const auto& s : segs_) {
-			if (s->bodied()) { continue; }
-			try {
-				(void)s->seg();
-			} catch (const corrupt_segment&) {  // marked, by this map or a reader's: done (D9)
-			}
-		}
-		promote_owed_.store(false, std::memory_order_release);
-	}
+	void promote();
 	// Whether anything applied since the last commit is still uncommitted, a chore under the lease
 	// (the catalog commits before it closes a slot at the wake's bound, cold-tier D5).
 	bool uncommitted() const noexcept { return applied_since_commit_ != 0; }
@@ -1518,28 +1114,7 @@ public:
 	// Null bitmaps for segments without deletes, so searches skip the live check without
 	// scanning the bitmap. The pending deletes are applied, as the index's own reads apply them
 	// (write-buffer D6): a segment that has one gets a private copy of its bits.
-	segment_list segments() const {
-		lease_.check_read();
-		segment_list out;
-		out.views_.reserve(segs_.size());
-		out.bits_.reserve(segs_.size());
-		for (const auto& s : segs_) { out.views_.push_back({s->ref.id, s.get(), s->dead ? &s->deleted : nullptr, s->dead}); }
-		if (!wb_ || wb_->pending.empty()) { return out; }
-		std::vector<deleted_bits*> own(segs_.size(), nullptr);
-		for (const auto& [id, ord] : wb_->pending) {
-			const auto it = std::lower_bound(segs_.begin(), segs_.end(), id, [](const auto& x, std::uint64_t y) { return x->ref.id < y; });
-			const std::size_t i = std::size_t(it - segs_.begin());
-			if (!own[i]) {
-				own[i] = &out.bits_.emplace_back((*it)->deleted.clone());
-				out.views_[i].deleted = own[i];
-			}
-			if (!own[i]->test(ord)) {
-				own[i]->set(ord);
-				++out.views_[i].dead;
-			}
-		}
-		return out;
-	}
+	segment_list segments() const;
 	// A snapshot holds no buffer, so its scan needs only the keys and the records.
 	static constexpr bool snapshot_scannable() { return segment::template contains<keys_plugin>() && segment::template contains<stored_plugin>(); }
 	// Segments as of one moment, oldest first, as segments() lists them and a shared reader's view
@@ -1778,34 +1353,12 @@ public:
 
 	// Starts publishing views, under the write lease (D4), and returns a handle on them. The first
 	// call refreshes, so the handle never starts empty (D1). Uses options::readers, or a registry of its own.
-	reader_handle reader() {
-		const writer_scope leased{*this};
-		live();
-		if (!pub_) {
-			pub_ = std::make_unique<publication>();
-			std::unique_ptr<reader_registry> own;
-			if (!opts_.readers) { own = std::make_unique<reader_registry>(opts_.reader_records); }
-			pub_->rs = std::make_shared<reader_state>(opts_.readers ? opts_.readers : own.get(), std::move(own));
-			if (logged_) {
-				logged_->attach_readers(std::shared_ptr<std::atomic<std::uint64_t>>(pub_->rs, &pub_->rs->visible));
-			} else {
-				pub_->rs->visible.store(visible_, std::memory_order_release);
-			}
-		}
-		if (!pub_->current) { refresh(); }
-		return reader_handle(pub_->rs);
-	}
+	reader_handle reader();
 
 	// Under the write lease (D9, SR-D20): refreshes only when the current view is behind `p`.
 	// Each holder checks after it takes the lease, so of the calls the host's lease order queues
 	// behind one that refreshed, none flushes again.
-	void publish_through(files::position p) {
-		const writer_scope leased{*this};
-		live();
-		if (!pub_) { throw std::logic_error("strata: publish_through() needs a reader()"); }
-		if (pub_->current && pub_->current->position_ >= p) { return; }
-		refresh();
-	}
+	void publish_through(files::position p);
 
 	// The views not yet freed (current and retired), and the bytes of the segments only they
 	// hold (SR-D7). A view a reader released is freed at the owner's next publication, commit,
@@ -1814,19 +1367,7 @@ public:
 		std::size_t views = 0;
 		std::uint64_t bytes = 0;
 	};
-	views_report views_held() const {
-		views_report r;
-		if (!pub_) { return r; }
-		std::set<std::uint64_t> mine, theirs;  // by segment id: a twin and the record it replaced are one file
-		for (const auto& s : segs_) { mine.insert(s->ref.id); }
-		for_each_view([&](const view& v) {
-			++r.views;
-			for (const auto& s : v.keep_) {
-				if (!mine.count(s->ref.id) && theirs.insert(s->ref.id).second) { r.bytes += s->ref.size; }
-			}
-		});
-		return r;
-	}
+	views_report views_held() const;
 
 	// The durable head: the state the manifest log's last record describes (manifest-log D1).
 	const files::log_state& manifest() const noexcept { return m_; }
@@ -1839,10 +1380,7 @@ public:
 	// writer's thread), with its mark for `expected_fields` (fields-and-keys D2).
 	const field_table& fields() const noexcept { return fields_; }
 	field_mark fields_mark() const noexcept { return fields_.mark(); }
-	std::size_t buffered_count() const noexcept {
-		lease_.check_read();
-		return buffer_size();
-	}
+	std::size_t buffered_count() const noexcept;
 	// The replicated log's term that produces this replica's segments from now on (F6,
 	// F13-R41; durability D8): the host sets it when its leader's term changes; 0 standalone.
 	void set_producer_term(std::uint64_t term) noexcept { producer_term_ = term; }
@@ -1855,48 +1393,7 @@ public:
 	// `lastdocid`, the schema version, and each metadata entry. Equal content gives equal
 	// digests whatever its segment layout. It checks at most one live copy per docid and per
 	// key, every docid at or below `lastdocid`, and throws std::logic_error otherwise.
-	std::uint64_t digest() const {
-		const segment_list views = segments();  // the pending deletes applied, as the freeze applies them (D6)
-		std::vector<const buffer*> all;  // oldest first
-		for_each_buffer([&](const buffer& b) { all.push_back(&b); });
-		// A buffer's record counts when it is its buffer's newest and no newer buffer supersedes it.
-		const auto live = [&](std::size_t j, wbuf::ref_t r) {
-			if (!newest(*all[j], r)) { return false; }
-			const record& x = all[j]->lane.at(r);
-			for (std::size_t k = j + 1; k < all.size(); ++k) {
-				if (!x.key().empty() && find_key_in(*all[k], x.key()) != wbuf::no_ref) { return false; }
-				if (all[k]->docids.built() && find_docid_in(*all[k], x.docid) != wbuf::no_ref) { return false; }
-			}
-			return true;
-		};
-		return digest_of(views, configured_structures(), cur_.last_docid, cur_.schema_version, meta_, fields_, [&](auto& document_record, auto& emit) {
-			const format::structure_bits configured = configured_structures();
-			for (std::size_t j = 0; j < all.size(); ++j) {
-				const buffer& b = *all[j];
-				if (inverting()) {  // the inverter's buffer: the same records as its documents' (F21)
-					if (!b.inv) { continue; }
-					std::vector<bool> keep(b.inv->buf.doc_count());
-					for (std::size_t i = 0; i < b.order.size(); ++i) {
-						const record& x = b.lane.at(b.order[i].ref);
-						if (!x.tombstone() && x.ordinal() < keep.size()) { keep[x.ordinal()] = live(j, b.order[i].ref); }
-					}
-					b.inv->buf.digest(configured, [&](ordinal_t o) { return !keep[o]; }, document_record, emit);
-					continue;
-				}
-				for (std::size_t i = 0; i < b.order.size(); ++i) {
-					if (!live(j, b.order[i].ref)) { continue; }
-					const record& x = b.lane.at(b.order[i].ref);
-					document_record(x.docid, x.version, x.key());
-					const document whole = x.materialize();
-					for_each_entry<Layout>([&]<class E>(std::type_identity<E>) {
-						if constexpr (requires { typename E::part; E::records(x.docid, static_cast<const typename E::part&>(whole), emit); }) {
-							if (configured & E::structure) { E::records(x.docid, static_cast<const typename E::part&>(whole), emit); }
-						}
-					});
-				}
-			}
-		});
-	}
+	std::uint64_t digest() const;
 
 	// The structures this index is configured with, from the manifest (F20, F13-R28). Flushes
 	// and merges write them; the digest records them (F21).
@@ -1904,47 +1401,13 @@ public:
 
 	// Checks every segment whole (check_segment) and the digest's invariants: one live copy
 	// per docid and per key, every docid at or below lastdocid. Throws at the first problem.
-	basic_check_report<Layout> check() const {
-		basic_check_report<Layout> r;
-		for (const auto& s : segs_) { check_segment(s->seg(), &s->deleted, r); }
-		if (log_g_) {  // the log replays to the head in memory (manifest-log D3)
-			const files::log_read lr = files::read_log(index_detail::read_all(*io_->open_existing(index_detail::manifest_name(log_g_))), log_g_, readable());
-			if (!(lr.state == m_)) { throw corrupt_index("the manifest log differs from the head"); }
-			// The head's table is the table's prefix, and each segment without uncommitted deletes
-			// holds the head's deleted set.
-			const auto chain = fields_.chain_at(m_.fields.size());
-			if (!chain || m_.fields.mark().chain != *chain) { throw corrupt_index("the field table differs from its log"); }
-			for (const auto& s : segs_) {
-				const auto it = m_.segments.find(s->ref.id);
-				if (it == m_.segments.end() || s->deletes_dirty) { continue; }
-				bool same = it->second.deleted.size() == s->dead;
-				it->second.deleted.for_each([&](std::uint64_t o) { same = same && s->deleted.test(o); });
-				if (!same) { throw corrupt_index("a segment's deleted set differs from its log"); }
-			}
-		}
-		(void)digest();
-		return r;
-	}
+	basic_check_report<Layout> check() const;
 
 	// Commits and pins the manifest; the generation names the checkpoint (design D4).
-	std::uint64_t checkpoint() {
-		const writer_scope leased{*this};
-		live();
-		commit();
-		const std::uint64_t generation = m_.generation;
-		// The pin lives in the next manifest; committing again makes it durable.
-		pending_pin_ = generation;
-		commit();
-		return generation;
-	}
+	std::uint64_t checkpoint();
 
 	// Unpins a checkpoint; retention reclaims it once nothing else keeps it.
-	void release(std::uint64_t generation) {
-		const writer_scope leased{*this};
-		live();
-		pending_unpin_ = generation;
-		commit();
-	}
+	void release(std::uint64_t generation);
 
 	static files::log_state read_generation(kronuz::journal::IO& io, std::uint64_t g) { return index_detail::read_state(io, g, readable()); }
 
@@ -1958,139 +1421,29 @@ public:
 	// and UUID are adopted. A crash at any point opens the old content or the installed one.
 	// A failure reopening a written copy (EIO as corrupt_index, or a host error as itself)
 	// leaves the index as it was, unfenced, the copies orphaned for retention to remove.
-	void install(kronuz::journal::IO& source, std::uint64_t generation) {
-		const writer_scope leased{*this};
-		live();
-		const files::log_state theirs = read_generation(source, generation);
-		check_readable(theirs.configured);
-		auto got = load_files(source, theirs, true, load_);
-		// The copy, and the rollover's snapshot of it.
-		std::uint64_t need = files::snapshot_bytes(theirs) + 160 * theirs.segments.size();
-		for (const auto& s : got) { need += s->ref.size; }
-		if (storage_permit_ && !storage_permit_.try_grow(need) && !(drain() && storage_permit_.try_grow(need))) {
-			throw std::system_error(std::make_error_code(std::errc::no_space_on_device), "strata: no storage reserved for an install");
-		}
-		hold held{this};
-		if (storage_permit_) { held.add(need); }
-		abandon_merges();  // their sources leave with the old content
-		std::vector<files::segment_ref> mines;
-		guarded([&] {
-			for (auto& s : got) {
-				files::segment_ref mine = s->ref;
-				mine.id = cur_.next_segment++;
-				write_new(index_detail::segment_name(mine.id), s->bytes());  // loaded whole: its body is here
-				mines.push_back(mine);
-			}
-		});
-		// Every copy is written and synced and nothing here has changed, so a host error reopening
-		// one (EMFILE, ENOMEM) leaves the index as it was, unfenced; the copies are orphans.
-		for (std::size_t i = 0; i < got.size(); ++i) {
-			auto& s = got[i];
-			if (!opts_.eager_segments) {  // an unmapped record with the facts of the incoming body (cold-tier D9)
-				auto mine = std::make_unique<open_segment>(mines[i], load_, vouch_of(theirs));
-				mine->structures = s->structures;
-				mine->version = s->version;
-				mine->total_length = s->total_length;
-				mine->facts_known = true;
-				mine->deleted = std::move(s->deleted);
-				mine->dead = s->dead;
-				s = std::move(mine);
-			} else if (s->body().mapping) {  // map the copy this index owns: the source may reclaim its file
-				auto mine = read_checked([&] { return load_segment(*io_, vouch_of(theirs), mines[i], false, load_); }, &load_->retries);
-				mine->deleted = std::move(s->deleted);
-				mine->dead = s->dead;
-				s = std::move(mine);
-			} else {
-				s->ref = mines[i];
-			}
-		}
-		guarded([&] {
-			segs_ = std::move(got);
-			clear_buffer();
-			reserved_ = 0;  // the discarded buffer's reservations
-			if (permit_) { permit_.settle(); }
-			meta_ = theirs.metadata;
-			fields_ = theirs.fields;
-			++fields_epoch_;
-			cur_.uuid = theirs.uuid;
-			cur_.last_docid = theirs.last_docid;
-			cur_.schema_version = theirs.schema_version;
-			cur_.applied = {theirs.applied_index, theirs.applied_count};
-			cur_.configured = theirs.configured;
-			// The content is replaced whole: a rollover, the pins dropped, the change list moot.
-			rollover_owed_ = true;
-			drop_pins_ = true;
-			deleted_since_.clear();
-			meta_since_.clear();
-			applied_since_commit_ = 1;
-			changed();
-			commit_files();
-		});
-		durable([&] {  // the log moved, as after a commit
-			publish_point();  // earlier views keep the old segments until freed (D11)
-			free_views();
-			retain();
-		});
-	}
+	void install(kronuz::journal::IO& source, std::uint64_t generation);
 
 	// The live document's (docid, version) for a key, if any.
-	std::optional<std::pair<std::uint64_t, std::uint64_t>> find_key(std::string_view key) const {
-		lease_.check_read();
-		if (const copy c = lookup_key(key)) { return std::pair{c.docid, c.version}; }
-		return std::nullopt;
-	}
+	std::optional<std::pair<std::uint64_t, std::uint64_t>> find_key(std::string_view key) const;
 	// The live document's stored record for a key, if any: the buffered copy, else the newest
 	// segment that holds the key live. For layouts with the `stored` plugin. It allocates the
 	// string returned and nothing else (format-14-kv K4).
 	std::optional<std::string> get(std::string_view key) const
-		requires(segment::template contains<stored_plugin>())
-	{
-		std::optional<std::string> out;
-		get(key, [&](std::string_view v) { out.emplace(v); });
-		return out;
-	}
+		requires(segment::template contains<stored_plugin>());
 	// The same, lending the record to f(std::string_view) for the call, and whether the key
 	// is live. A segment's block decodes into this thread's buffer, reused from get to get,
 	// so nothing is allocated; a get inside f decodes into a buffer of its own.
 	template <class F>
 	bool get(std::string_view key, F&& f) const
-		requires(segment::template contains<stored_plugin>())
-	{
-		lease_.check_read();
-		// The buffers newest first: the key's newest record answers, a tombstone "absent" (D5, D6).
-		const auto in = [&](const buffer& b) -> int {
-			const wbuf::ref_t r = find_key_in(b, key);
-			if (r == wbuf::no_ref) { return -1; }
-			const record& x = b.lane.at(r);
-			if (x.tombstone()) { return 0; }
-			f(buffered_stored(b, x));
-			return 1;
-		};
-		if (wb_) {
-			if (const int got = in(*wb_); got >= 0) { return got; }
-		}
-		for (std::size_t i = frozen_.size(); i-- > 0;) {
-			if (const int got = in(*frozen_[i]); got >= 0) { return got; }
-		}
-		return get_segments(owned_segments{segs_}, key, f, pending_index());
-	}
+		requires(segment::template contains<stored_plugin>());
 	// The live document's version for a docid, if any: the buffers and the segments, with no
 	// flush. It reads as apply() does, so the active buffer's docid map answers it (WB-23).
-	std::optional<std::uint64_t> find_docid(std::uint64_t docid) const {
-		lease_.check_read();
-		if (const copy c = locate_docid(docid)) { return c.version; }
-		return std::nullopt;
-	}
+	std::optional<std::uint64_t> find_docid(std::uint64_t docid) const;
 	// Builds no docid map (WB-23): a buffer without one is walked, newest record first.
-	bool has_docid(std::uint64_t docid) const {
-		lease_.check_read();
-		return bool(locate_docid(docid, false));
-	}
+	bool has_docid(std::uint64_t docid) const;
 
 	// Whether scan applies to this layout.
-	static constexpr bool scannable() {
-		return segment::template contains<keys_plugin>() && segment::template contains<stored_plugin>() && std::is_same_v<inverter, detail::no_inverter>;
-	}
+	static constexpr bool scannable();
 
 	// The live records with keys >= from, in key order: the buffer's and each segment's, merged
 	// by key. f(key, value, version) gets views valid for the call and may return false to stop
@@ -2116,29 +1469,17 @@ public:
 	// are skipped with it.
 	template <class F>
 	std::size_t scan(std::string_view from, F&& f) const
-		requires(scannable())
-	{
-		return scan_keys(from, nullptr, ~std::size_t(0), f);
-	}
+		requires(scannable());
 	template <class F>
 	std::size_t scan(std::string_view from, std::size_t n, F&& f) const
-		requires(scannable())
-	{
-		return scan_keys(from, nullptr, n, f);
-	}
+		requires(scannable());
 	// The same for keys in [from, to).
 	template <class F>
 	std::size_t scan(std::string_view from, std::string_view to, F&& f) const
-		requires(scannable())
-	{
-		return scan_keys(from, &to, ~std::size_t(0), f);
-	}
+		requires(scannable());
 	template <class F>
 	std::size_t scan(std::string_view from, std::string_view to, std::size_t n, F&& f) const
-		requires(scannable())
-	{
-		return scan_keys(from, &to, n, f);
-	}
+		requires(scannable());
 
 private:
 	friend struct index_test_access;  // tests reach invariants no public call can break
@@ -2147,99 +1488,19 @@ private:
 	// With an executor they run there, on segments not under merge or damaged: one round
 	// without `wait`, otherwise every round, each waited for and published.
 	template <class Find>
-	void run_merges(Find find, bool wait, bool forced = false) {
-		live();
-		if (wait) { publish_merges(true, false); }
-		for (;;) {
-			std::vector<merge_policy::candidate> c;
-			for (const auto& s : segs_) {
-				if (merging(*s) || s->damaged) { continue; }
-				std::uint64_t deleted = 0;
-				for (auto w : s->deleted) { deleted += std::uint64_t(std::popcount(w)); }
-				c.push_back({s->ref.id, s->ref.size, s->ref.doc_count, deleted});
-			}
-			const auto merges = find(std::move(c));
-			if (merges.empty()) { return; }
-			for (const auto& ids : merges) { schedule(ids, forced); }
-			if (!wait && !own_exec_) { return; }  // the index's own executor runs them now
-			publish_merges(true, true);
-		}
-	}
+	void run_merges(Find find, bool wait, bool forced = false);
 
 	explicit basic_index(kronuz::journal::IO& io) : load_(std::make_shared<load_context>(&io)), io_(&io) {}
 
 	// Merges run on the host's executor, or on the index's own inline one, synchronously
 	// on the writer's thread, when it passes none: one merge implementation either way.
-	void start_merges() {
-		exec_ = opts_.background;
-		if (!exec_) {
-			own_exec_ = std::make_unique<inline_executor>();
-			exec_ = own_exec_.get();
-		}
-		group_ = exec_->open();
-		if (!own_exec_) {
-			runs_group_ = exec_->open();  // scan runs' builds, beside the merges (D9, D12)
-			del_group_ = exec_->open();  // reclaim's deletes, apart from the merges
-			del_chan_ = std::make_shared<delete_chan>();
-		}
-	}
+	void start_merges();
 
 	// The digest over segments (an index's or a view's), then what `buffer` adds: one
 	// implementation for both (D8).
 	template <class Segs, class Buffer>
 	static std::uint64_t digest_of(const Segs& segs, format::structure_bits configured, std::uint64_t last_docid, std::uint64_t schema_version,
-		const std::map<std::string, std::string>& meta, const field_table& table, Buffer&& buffer) {
-		std::uint64_t sum = 0;
-		auto emit = [&](std::string_view rec) { sum += xxh64::hash(rec); };
-		std::set<std::uint64_t> docids;
-		std::set<std::string> keys;
-		auto document_record = [&](std::uint64_t docid, std::uint64_t version, std::string_view key) {
-			if (docid == 0 || docid > last_docid || !docids.insert(docid).second) { throw std::logic_error("strata: digest: docid invariant"); }
-			if (!key.empty() && !keys.insert(std::string(key)).second) { throw std::logic_error("strata: digest: key invariant"); }
-			digest_record rec('D');
-			rec.u64(docid);
-			rec.u64(version);
-			rec.bytes(key);
-			emit(rec.data());
-		};
-		for (std::size_t i = 0; i < segs.size(); ++i) {
-			const segment_view s = segs[i];
-			auto live = [&](ordinal_t o) { return s.live(o); };
-			const segment& sg = *s.seg();
-			const core_segment& core = sg.core();
-			std::vector<std::string> key_of(core.doc_count());  // walked through the keys reader's checks (L3, MR2)
-			sg.template get<keys_plugin>().each_key([&](std::string_view key, ordinal_t o) { key_of[o] = key; });
-			for (ordinal_t o = 0; o < core.doc_count(); ++o) {
-				if (live(o)) { document_record(core.docid(o), sg.template get<keys_plugin>().version(o), key_of[o]); }
-			}
-			for_each_entry<Layout>([&]<class E>(std::type_identity<E>) {
-				if constexpr (requires { E::records(sg.template get<E>(), core, live, emit); }) {
-					if (configured & E::structure) { E::records(sg.template get<E>(), core, live, emit); }
-				}
-			});
-		}
-		buffer(document_record, emit);
-		digest_record last('L');
-		last.u64(last_docid);
-		emit(last.data());
-		digest_record schema('S');
-		schema.u64(schema_version);
-		emit(schema.data());
-		for (const auto& [k, v] : meta) {
-			digest_record m('M');
-			m.bytes(k);
-			m.bytes(v);
-			emit(m.data());
-		}
-		for (std::size_t id = 0; id < table.size(); ++id) {  // the field table, in id order
-			digest_record f('F');
-			f.u32(std::uint32_t(id));
-			f.bytes(table[id].name);
-			f.u32(std::uint32_t(table[id].role) | std::uint32_t(table[id].postings) << 8 | std::uint32_t(table[id].norms) << 16);
-			emit(f.data());
-		}
-		return sum;
-	}
+		const std::map<std::string, std::string>& meta, const field_table& table, Buffer&& buffer);
 
 	// --- scans (D9) ------------------------------------------------------------------------
 
@@ -2257,173 +1518,41 @@ private:
 		}
 	};
 	// Whether an entry's key is at or after `key`, whose prefix is `prefix`: a record read only on a tie.
-	static bool entry_from(const buffer& b, const wbuf::pos_entry& e, std::uint64_t prefix, std::string_view key) {
-		const std::uint64_t p = e.prefix();
-		return p != prefix ? p > prefix : std::string_view(b.lane.at(e.ref).key()) >= key;
-	}
+	static bool entry_from(const buffer& b, const wbuf::pos_entry& e, std::uint64_t prefix, std::string_view key);
 	// Keyless records sit in the position index with a zero prefix and in no run.
 	static bool keyed(const buffer& b, const wbuf::pos_entry& e) { return e.prefix() != 0 || !b.lane.at(e.ref).key().empty(); }
 
 	// The lease holder's (D9): installs the splices finished jobs left, then posts a fresh job when
 	// a scan asked and a compaction when the big levels call for one. Without a host executor the
 	// jobs run here, as merges do. Whether a run set was replaced or first installed.
-	bool maintain_runs() const {
-		if constexpr (!scannable()) {
-			return false;
-		} else {
-			bool any = false;
-			for (const auto& b : frozen_) { any |= maintain_runs(b); }
-			if (wb_) { any |= maintain_runs(wb_); }
-			return any;
-		}
-	}
-	bool maintain_runs(const std::shared_ptr<buffer>& sb) const {
-		buffer& b = *sb;
-		bool installed = take_runs(b, b.fresh);
-		installed |= take_runs(b, b.compaction);
-		const wbuf::run_set* cur = b.runs.load(std::memory_order_relaxed);
-		if (!b.fresh.live && b.wants_runs.load(std::memory_order_relaxed)) {
-			const std::size_t n1 = b.order.published(), from = cur ? cur->cover : 0;
-			if (n1 > from + wbuf::tail_build) {
-				b.wants_runs.store(false, std::memory_order_relaxed);
-				std::vector<wbuf::level> lv;
-				if (cur) { lv = cur->levels; }
-				start_runs(sb, b.fresh, [sb, &j = b.fresh, lv = std::move(lv), from, n1, cap = run_cap_]() mutable {
-					finish_job(j, [&] {
-						std::vector<wbuf::pos_entry> fresh;
-						fresh.reserve(n1 - from);
-						for (std::size_t i = from; i < n1; ++i) {
-							if (keyed(*sb, sb->order[i])) { fresh.push_back(sb->order[i]); }
-						}
-						return wbuf::fresh_splice(std::move(lv), std::move(fresh), n1, cap, entry_less{sb.get()});
-					});
-				});
-				if (take_runs(b, b.fresh)) {
-					installed = true;
-					cur = b.runs.load(std::memory_order_relaxed);
-				}
-			}
-		}
-		if (cur && !b.compaction.live) {
-			std::size_t nb = 0;  // the leading levels past the fresh jobs' cap
-			while (nb < cur->levels.size() && cur->levels[nb]->size() > run_cap_) { ++nb; }
-			std::vector<wbuf::level> big(cur->levels.begin(), cur->levels.begin() + std::ptrdiff_t(nb));
-			if (wbuf::counter_merges(big)) {
-				start_runs(sb, b.compaction, [sb, &j = b.compaction, big = std::move(big)] {
-					finish_job(j, [&] { return wbuf::compact_splice(big, entry_less{sb.get()}); });
-				});
-				installed |= take_runs(b, b.compaction);
-			}
-		}
-		return installed;
-	}
+	bool maintain_runs() const;
+	bool maintain_runs(const std::shared_ptr<buffer>& sb) const;
 	// A job's end on the pool: its splice, or a failed one, then ready with release.
 	template <class Build>
-	static void finish_job(wbuf::run_job& j, Build&& build) noexcept {
-		try {
-			j.out = build();
-		} catch (...) {
-			j.out = {};
-			j.out.failed = true;
-		}
-		j.ready.store(true, std::memory_order_release);
-	}
+	static void finish_job(wbuf::run_job& j, Build&& build) noexcept;
 	template <class Job>
-	void start_runs(const std::shared_ptr<buffer>& sb, wbuf::run_job& j, Job&& job) const {
-		if (!runs_group_) {
-			j.live = true;
-			job();
-			return;
-		}
-		runs_group_->post([sb, job = std::forward<Job>(job)](const task::cancel_token&) mutable { job(); });
-		j.live = true;  // a post that throws leaves it clear, so the buffer can post again
-	}
+	void start_runs(const std::shared_ptr<buffer>& sb, wbuf::run_job& j, Job&& job) const;
 	// Applies a finished job's splice to the installed set and installs the result with release;
 	// the replaced set waits for D10's stamp while readers may hold it.
-	bool take_runs(buffer& b, wbuf::run_job& j) const {
-		if (!j.live || !j.ready.load(std::memory_order_acquire)) { return false; }
-		j.live = false;
-		j.ready.store(false, std::memory_order_relaxed);
-		const wbuf::splice sp = std::exchange(j.out, {});
-		const wbuf::run_set* cur = b.runs.load(std::memory_order_relaxed);
-		auto next = wbuf::apply_splice(cur, sp);
-		if (!next) { return false; }
-		b.runs.store(next.release(), std::memory_order_release);
-		std::unique_ptr<const wbuf::run_set> old(cur);
-		if (old && pub_ && live_reads()) { b.retired_runs.push_back(std::shared_ptr<const void>(std::move(old))); }
-		return true;
-	}
+	bool take_runs(buffer& b, wbuf::run_job& j) const;
 
 	template <class F>
-	std::size_t scan_keys(std::string_view from, const std::string_view* to, std::size_t n, F& f) const {
-		lease_.check_read();
-		struct guard {
-			std::uint32_t& depth;
-			explicit guard(std::uint32_t& d) : depth(d) { ++depth; }
-			~guard() { --depth; }
-		} in_scan(scanning_);
-		if (!n || (to && *to <= from)) { return 0; }
-		// The lease holder's scan asks for its own builds and installs what finished first.
-		for_each_buffer([&](const buffer& b) {
-			const wbuf::run_set* rs = b.runs.load(std::memory_order_relaxed);
-			if (b.order.published() > (rs ? rs->cover : 0) + wbuf::tail_build) { b.wants_runs.store(true, std::memory_order_relaxed); }
-		});
-		maintain_runs();
-		std::vector<buffer_part> parts;  // oldest first
-		parts.reserve(frozen_.size() + 1);
-		for_each_buffer([&](const buffer& b) { parts.push_back(part_at(b, ~std::uint64_t(0), from, to)); });
-		return scan_segments(owned_segments{segs_}, std::span<buffer_part>(parts), pending_index(), from, to, n, f);
-	}
+	std::size_t scan_keys(std::string_view from, const std::string_view* to, std::size_t n, F& f) const;
 
 	// --- reads at a position from any thread (write-buffer D5, D6, D9) ----------------------
 
 	static std::uint64_t position_of(const buffer& b, const record& x) noexcept { return b.base + x.position; }
 	// The key's newest record at or below r: its slot, then prev while newer (D5).
-	static const record* key_at(const buffer& b, std::string_view key, std::uint64_t r) {
-		for (wbuf::ref_t x = find_key_in(b, key); x != wbuf::no_ref;) {
-			const record& rec = b.lane.at(x);
-			if (position_of(b, rec) <= r) { return &rec; }
-			x = rec.prev;
-		}
-		return nullptr;
-	}
+	static const record* key_at(const buffer& b, std::string_view key, std::uint64_t r);
 	// The docid walk at r (D5): whether b holds a record of the docid at or below r. It follows
 	// the docid prev field when it names a record, else prev; another docid ends it.
-	static bool docid_at(const buffer& b, std::uint64_t docid, std::uint64_t r) {
-		for (wbuf::ref_t x = probe_docid(b, docid); x != wbuf::no_ref;) {
-			const record& rec = b.lane.at(x);
-			if (rec.docid != docid) { return false; }
-			if (position_of(b, rec) <= r) { return true; }
-			x = rec.docid_prev() != wbuf::no_ref ? rec.docid_prev() : rec.prev;
-		}
-		return false;
-	}
+	static bool docid_at(const buffer& b, std::uint64_t docid, std::uint64_t r);
 	// D6's docid check: a segment copy is superseded at r when the view's active buffer holds a
 	// record of its docid at or below r; below the first docid-only supersession it is skipped.
-	static bool superseded(const buffer* active, const segment_view& s, ordinal_t ord, std::uint64_t r) {
-		if (!active || r < active->first_docid_only.load(std::memory_order_acquire)) { return false; }
-		return docid_at(*active, s.seg()->core().docid(ord), r);
-	}
+	static bool superseded(const buffer* active, const segment_view& s, ordinal_t ord, std::uint64_t r);
 	template <class F>
 	static bool get_at(const view& v, std::string_view key, std::uint64_t r, F& f)
-		requires(segment::template contains<stored_plugin>())
-	{
-		const auto in = [&](const buffer& b) -> int {
-			const record* x = key_at(b, key, r);
-			if (!x) { return -1; }
-			if (x->tombstone()) { return 0; }
-			f(x->stored());
-			return 1;
-		};
-		if (v.active_) {
-			if (const int got = in(*v.active_); got >= 0) { return got; }
-		}
-		for (std::size_t i = v.frozen_.size(); i-- > 0;) {
-			if (const int got = in(*v.frozen_[i]); got >= 0) { return got; }
-		}
-		const buffer* a = v.active_.get();
-		return get_segments(v.views_, key, f, nullptr, [&](const segment_view& s, ordinal_t o) { return superseded(a, s, o, r); });
-	}
+		requires(segment::template contains<stored_plugin>());
 	// One buffer's part of a scan at r (D9): its run set, loaded once, and a private tail, the
 	// position-index entries past that set's cover, at or below r, in [from, to). Only the tail's
 	// tail_select smallest entries are sorted until the scan passes them.
@@ -2438,47 +1567,10 @@ private:
 			sorted = tail.size();
 		}
 	};
-	static buffer_part part_at(const buffer& b, std::uint64_t r, std::string_view from, const std::string_view* to) {
-		buffer_part p{&b, r, b.runs.load(std::memory_order_acquire), {}, 0};
-		const std::size_t cover = p.runs ? p.runs->cover : 0;
-		std::size_t end = b.order.published();
-		for (std::size_t lo = cover; lo < end;) {  // positions never decrease along the index
-			const std::size_t mid = lo + (end - lo) / 2;
-			if (position_of(b, b.lane.at(b.order[mid].ref)) <= r) {
-				lo = mid + 1;
-			} else {
-				end = mid;
-			}
-		}
-		if (end > cover + wbuf::tail_build && !b.wants_runs.load(std::memory_order_relaxed)) { b.wants_runs.store(true, std::memory_order_relaxed); }
-		const std::uint64_t pf = wbuf::key_head(from), pt = to ? wbuf::key_head(*to) : 0;
-		for (std::size_t i = cover; i < end; ++i) {
-			const wbuf::pos_entry e = b.order[i];
-			if (keyed(b, e) && entry_from(b, e, pf, from) && !(to && entry_from(b, e, pt, *to))) { p.tail.push_back(e); }
-		}
-		const entry_less less{&b};
-		if (p.tail.size() > 2 * wbuf::tail_select) {  // a seek and a few nexts need only the smallest
-			std::nth_element(p.tail.begin(), p.tail.begin() + wbuf::tail_select, p.tail.end(), less);
-			std::sort(p.tail.begin(), p.tail.begin() + wbuf::tail_select, less);
-			p.sorted = wbuf::tail_select;
-		} else {
-			std::sort(p.tail.begin(), p.tail.end(), less);
-			p.sorted = p.tail.size();
-		}
-		return p;
-	}
+	static buffer_part part_at(const buffer& b, std::uint64_t r, std::string_view from, const std::string_view* to);
 	template <class F>
 	static std::size_t scan_at(const view& v, std::uint64_t r, std::string_view from, const std::string_view* to, std::size_t n, F& f)
-		requires(snapshot_scannable())
-	{
-		if (!n || (to && *to <= from)) { return 0; }
-		std::vector<buffer_part> parts;  // oldest first
-		parts.reserve(v.frozen_.size() + 1);
-		for (const auto& b : v.frozen_) { parts.push_back(part_at(*b, r, from, to)); }
-		if (v.active_) { parts.push_back(part_at(*v.active_, r, from, to)); }
-		const buffer* a = v.active_.get();
-		return scan_segments(v.views_, std::span<buffer_part>(parts), nullptr, from, to, n, f, [&](const segment_view& s, ordinal_t o) { return superseded(a, s, o, r); });
-	}
+		requires(snapshot_scannable());
 
 	// --- the segment reads (D8): one implementation for the index and its snapshots -----------
 
@@ -2494,19 +1586,7 @@ private:
 		bool operator()(const segment_view&, ordinal_t) const noexcept { return false; }
 	};
 	template <class Segs, class F, class Gone = no_check>
-	static bool get_segments(const Segs& segs, std::string_view key, F& f, const pending_set* pending = nullptr, Gone&& gone = {}) {
-		const std::uint64_t hash = xxh64::hash(key);
-		for (std::size_t i = segs.size(); i-- > 0;) {
-			const segment_view s = segs[i];
-			if (const auto ord = s.seg()->template get<keys_plugin>().find(key, live_bits{s.deleted ? s.deleted->data() : nullptr}, hash)) {
-				if (pending_has(pending, s.id, *ord) || gone(s, *ord)) { return false; }
-				index_detail::lent_frame lent;
-				f(s.seg()->template get<stored_plugin>().stored(*ord, lent.frame()));
-				return true;
-			}
-		}
-		return false;
-	}
+	static bool get_segments(const Segs& segs, std::string_view key, F& f, const pending_set* pending = nullptr, Gone&& gone = {});
 
 	// A scan's k-way merge over the segments, oldest first, and the buffers' parts, oldest buffer
 	// first (D9). One pass finds the smallest key, comparing prefixes first, and the sources
@@ -2514,231 +1594,34 @@ private:
 	// segment's, a newer buffer's over an older's, within a buffer the newest record at or below
 	// its r. A winning tombstone emits nothing (D6).
 	template <class Segs, class F, class Gone = no_check>
-	static std::size_t scan_segments(const Segs& segs, std::span<buffer_part> buffers, const pending_set* pending, std::string_view from, const std::string_view* to, std::size_t n, F& f, Gone&& gone = {}) {
-		if (!n || (to && *to <= from)) { return 0; }
-		struct seg_source {
-			segment_view seg;
-			keys::reader::range cur;
-			typename stored_plugin::reader::stored_frame frame;
-		};
-		const auto skip_dead = [&](seg_source& s) {
-			while (s.cur.valid() && ((s.seg.dead && s.seg.deleted->test(s.cur.ordinal())) || pending_has(pending, s.seg.id, s.cur.ordinal()))) { s.cur.next(); }
-		};
-		std::vector<seg_source> segsrc;  // by segment, oldest first
-		segsrc.reserve(segs.size());
-		for (std::size_t i = 0; i < segs.size(); ++i) {
-			const segment_view sv = segs[i];
-			const auto& k = sv.seg()->template get<keys_plugin>();
-			if (!k.key_count() || k.max_key() < from || (to && k.min_key() >= *to)) { continue; }
-			segsrc.push_back({sv, k.range(from), {}});
-			skip_dead(segsrc.back());
-		}
-		struct source {
-			std::uint64_t pre = 0;
-			std::string_view key;
-			bool valid = false;
-			seg_source* seg = nullptr;
-			buffer_part* part = nullptr;  // a buffer's level or tail:
-			const std::vector<wbuf::pos_entry>* a = nullptr;
-			std::size_t at = 0;
-			const record* rec = nullptr;
-		};
-		const auto settle = [](source& s) {
-			if (s.seg) {
-				s.valid = s.seg->cur.valid();
-				if (s.valid) {
-					s.key = s.seg->cur.key();
-					s.pre = wbuf::key_head(s.key);
-				}
-				return;
-			}
-			const buffer& b = *s.part->b;
-			for (s.valid = false; s.at < s.a->size(); ++s.at) {
-				if (s.a == &s.part->tail && s.at == s.part->sorted) { s.part->finish(); }
-				const wbuf::pos_entry& e = (*s.a)[s.at];
-				const record& x = b.lane.at(e.ref);
-				if (position_of(b, x) <= s.part->r) {  // run entries may be newer than r
-					s.valid = true;
-					s.key = x.key();
-					s.pre = e.prefix();
-					s.rec = &x;
-					return;
-				}
-			}
-		};
-		std::vector<source> src;  // the segments oldest first, then each buffer's levels and tail
-		src.reserve(segsrc.size() + 8 * buffers.size());
-		for (auto& s : segsrc) {
-			src.push_back({.seg = &s});
-			settle(src.back());
-		}
-		const std::uint64_t pf = wbuf::key_head(from);
-		for (buffer_part& p : buffers) {
-			if (p.runs) {
-				for (const auto& l : p.runs->levels) {
-					const auto it = std::partition_point(l->begin(), l->end(), [&](const wbuf::pos_entry& e) { return !entry_from(*p.b, e, pf, from); });
-					src.push_back({.part = &p, .a = l.get(), .at = std::size_t(it - l->begin())});
-					settle(src.back());
-				}
-			}
-			src.push_back({.part = &p, .a = &p.tail});
-			settle(src.back());
-		}
-		const auto cmp = [](const source& x, const source& y) { return x.pre != y.pre ? (x.pre < y.pre ? -1 : 1) : x.key.compare(y.key); };
-		const auto newer = [](const source& x, const source& y) {  // within one buffer
-			return x.rec->position != y.rec->position ? x.rec->position > y.rec->position : (*x.a)[x.at].ref > (*y.a)[y.at].ref;
-		};
-		std::vector<std::size_t> tied;
-		tied.reserve(src.size());
-		std::size_t count = 0;
-		while (count < n) {
-			tied.clear();
-			const source* min = nullptr;
-			for (std::size_t i = 0; i < src.size(); ++i) {
-				if (!src[i].valid) { continue; }
-				const int c = min ? cmp(src[i], *min) : -1;
-				if (c < 0) {
-					min = &src[i];
-					tied.clear();
-				}
-				if (c <= 0) { tied.push_back(i); }
-			}
-			if (!min || (to && min->key >= *to)) { break; }
-			// The newest: the last tied source's buffer or segment; within a buffer, its newest record.
-			std::size_t pick = tied.back();
-			if (src[pick].part) {
-				for (const std::size_t i : tied) {
-					if (src[i].part == src[pick].part && newer(src[i], src[pick])) { pick = i; }
-				}
-			}
-			const std::string_view key = min->key;
-			const std::uint64_t pre = min->pre;
-			bool emit = true;
-			std::string_view value;
-			std::uint64_t version = 0;
-			if (seg_source* s = src[pick].seg) {
-				const ordinal_t ord = s->cur.ordinal();
-				emit = !gone(s->seg, ord);  // the docid check, emitted or not (D9, WB-22)
-				if (emit) {
-					value = s->seg.seg()->template get<stored_plugin>().stored(ord, s->frame);
-					version = s->seg.seg()->template get<keys_plugin>().version(ord);
-				}
-			} else {
-				const record& x = *src[pick].rec;
-				emit = !x.tombstone();
-				if (emit) {
-					value = x.stored();
-					version = x.version;
-				}
-			}
-			bool more = true;
-			if (emit) {
-				++count;
-				if constexpr (std::is_void_v<std::invoke_result_t<F&, std::string_view, std::string_view, std::uint64_t>>) {
-					f(key, value, version);
-				} else {
-					more = f(key, value, version);
-				}
-			}
-			if (!more) { break; }
-			// Every source holding the key moves past it: the buffers' first, while `key` (perhaps a
-			// segment cursor's) is still valid.
-			for (const std::size_t i : tied) {
-				source& s = src[i];
-				if (s.seg) { continue; }
-				while (s.valid && s.pre == pre && s.key == key) {
-					++s.at;
-					settle(s);
-				}
-			}
-			for (const std::size_t i : tied) {
-				source& s = src[i];
-				if (!s.seg) { continue; }
-				s.seg->cur.next();
-				skip_dead(*s.seg);
-				settle(s);
-			}
-		}
-		return count;
-	}
+	static std::size_t scan_segments(const Segs& segs, std::span<buffer_part> buffers, const pending_set* pending, std::string_view from, const std::string_view* to, std::size_t n, F& f, Gone&& gone = {});
 
 	// --- memory -----------------------------------------------------------------------------
 
 	// A document's stored bytes: none in a layout without a stored plugin.
-	static std::string_view stored_bytes(const document& d) noexcept {
-		if constexpr (std::is_base_of_v<stored_part, document>) {
-			return static_cast<const stored_part&>(d).stored;
-		} else {
-			return {};
-		}
-	}
+	static std::string_view stored_bytes(const document& d) noexcept;
 	// Whether plugin E's part may be buffered as its stored bytes alone: the stored plugin's own part,
 	// or a part whose plugin opts in with `inline_part` and keeps the stored plugin's builder, so the
 	// flush's add_stored_view does all its add would (writer.hh). Any other part keeps its documents
 	// whole, so no plugin's add is skipped.
 	template <class E>
-	static constexpr bool inline_kind() noexcept {
-		if constexpr (!requires { typename E::part; }) {
-			return true;
-		} else {
-			constexpr bool opts_in = requires(const typename E::part& p) { { E::inline_part(p) } -> std::convertible_to<bool>; };
-			static_assert(!opts_in || basic_segment_writer<Layout>::template views_stored<E>(), "strata: a plugin with inline_part derives from stored_plugin and keeps its builder");
-			return opts_in || (std::is_same_v<typename E::part, stored_part> && basic_segment_writer<Layout>::template views_stored<E>());
-		}
-	}
-	static constexpr bool inline_layout() noexcept {
-		return []<class... E>(std::type_identity<layout<E...>>) { return (inline_kind<E>() && ...); }(std::type_identity<Layout>{});
-	}
+	static constexpr bool inline_kind() noexcept;
+	static constexpr bool inline_layout() noexcept;
 	// Whether the record can hold this document as its key and stored bytes: an inline layout, and
 	// each opted-in plugin's `inline_part` says the writer reads nothing else in its part.
-	static bool inline_parts(const document& d) noexcept {
-		if constexpr (!inline_layout()) {
-			return false;
-		} else {
-			bool ok = true;
-			for_each_entry<Layout>([&]<class E>(std::type_identity<E>) {
-				if constexpr (requires(const typename E::part& p) { E::inline_part(p); }) { ok = ok && E::inline_part(static_cast<const typename E::part&>(d)); }
-			});
-			return ok;
-		}
-	}
+	static bool inline_parts(const document& d) noexcept;
 	// Whether a plugin rewrites a part on its way into the buffer.
-	static constexpr bool has_buffer_hooks() noexcept {
-		bool any = false;
-		for_each_entry<Layout>([&]<class E>(std::type_identity<E>) {
-			if constexpr (requires { typename E::part; }) {
-				if constexpr (requires(typename E::part& p) { E::buffered(p); } || requires(typename E::part& p, const field_resolution& r) { E::resolve(p, r); }) { any = true; }
-			}
-		});
-		return any;
-	}
+	static constexpr bool has_buffer_hooks() noexcept;
 	static constexpr std::uint64_t doc_overhead = 96;  // a document's allocations beyond its object and parts
 	static std::uint64_t doc_bytes(const document& d) { return sizeof(document) + doc_overhead + d.part_bytes(); }
 	// The buffers' maps, position indexes, and scan runs.
-	std::uint64_t map_bytes() const {
-		std::uint64_t n = 0;
-		for_each_buffer([&](const buffer& b) { const wbuf::run_set* rs = b.runs.load(std::memory_order_relaxed);
-			n += b.keys.bytes() + b.docids.bytes() + b.order.bytes() + (rs ? rs->bytes() : 0); });
-		return n;
-	}
+	std::uint64_t map_bytes() const;
 
 	// Brings the permit to what the buffer and version map hold now.
 	// The buffer's memory: the lane's chunks as they are taken (D3), and beyond it the whole
 	// records' estimate, or in an inverting layout the inverter's allocations.
-	std::uint64_t buffered_bytes() const noexcept {
-		std::uint64_t n = 0;
-		for_each_buffer([&](const buffer& b) { n += (inverting() ? (b.inv ? b.inv->held.held() : 0) : b.bytes) + b.lane.bytes(); });
-		return n;
-	}
-	void charge() {
-		if (!permit_) { return; }
-		const std::uint64_t want = buffered_bytes() + map_bytes();
-		if (want > permit_.bytes()) {
-			permit_.grow(want - permit_.bytes());
-		} else {
-			permit_.shrink(permit_.bytes() - want);
-		}
-	}
+	std::uint64_t buffered_bytes() const noexcept;
+	void charge();
 	// A buffer no accepted record references still holds a rejected transaction's records.
 	bool holds_rejected() const noexcept { return wb_ && wb_->order.size() == 0 && (wb_->bytes != 0 || wb_->lane.tell().chunks != 0); }
 	// The flush's working set past the buffer, in percent of the buffer: RSS grew 26% of the
@@ -2746,18 +1629,8 @@ private:
 	static constexpr std::uint64_t flush_working_pct = 26;
 	// The buffer's limit: its share, and under a budget the part of the capacity that leaves
 	// the flush its working set.
-	std::uint64_t buffer_limit() const noexcept {
-		if (!opts_.budget) { return opts_.buffer_share; }
-		return std::min(opts_.buffer_share, opts_.budget->capacity() / (100 + flush_working_pct) * 100);
-	}
-	bool needs_flush() const {
-		if (buffered_records() == 0 && !holds_rejected()) { return false; }
-		if (buffered_bytes() >= buffer_limit() || map_bytes() >= opts_.buffer_share / 4) { return true; }
-		if (!opts_.budget || !opts_.budget->pressure()) { return false; }
-		const std::uint64_t div = opts_.pressure_flush_divisor;
-		const std::uint64_t share = std::min(opts_.buffer_share, opts_.budget->capacity());
-		return !div || buffered_bytes() + map_bytes() >= share / div;
-	}
+	std::uint64_t buffer_limit() const noexcept;
+	bool needs_flush() const;
 
 	// --- in-memory state ------------------------------------------------------------------
 
@@ -3133,19 +2006,10 @@ private:
 		explicit operator bool() const noexcept { return where != none; }
 	};
 	template <class F>
-	void for_each_buffer(F&& f) const {
-		for (const auto& b : frozen_) { f(*b); }
-		if (wb_) { f(*wb_); }
-	}
+	void for_each_buffer(F&& f) const;
 	const pending_set* pending_index() const noexcept { return wb_ && !wb_->pending.empty() ? &wb_->pending_keys : nullptr; }
 
-	void live() const {
-#ifndef NDEBUG
-		if (guard_word_ && !guard_held_(guard_word_->load(std::memory_order_acquire))) { detail::owner_break("strata: a catalog index was called with no pin held"); }
-#endif
-		if (fenced_) { throw index_fenced("strata: the writer is fenced; reopen the index"); }
-		if (scanning_) { throw std::logic_error("strata: the index changed inside a scan's callback"); }
-	}
+	void live() const;
 
 	// A host error mapping a merge's source at scheduling: the round is dropped, nothing reserved.
 	struct map_failure : std::system_error {
@@ -3157,62 +2021,19 @@ private:
 		using std::system_error::system_error;
 	};
 	template <class F>
-	void guarded(F&& f) {
-		try {
-			const detail::no_input_map_scope noinput;
-			f();
-		} catch (const space_error& e) {
-			throw std::system_error(e.code(), e.what());
-		} catch (const std::system_error& e) {
-			fenced_ = true;
-			throw index_fenced(std::string("strata: durability failure: ") + e.what());
-		}
-	}
+	void guarded(F&& f);
 
 	// A segment just streamed to `file`: mapped when the backend maps and the mapping holds
 	// what was written, so its bytes leave memory; else read back through the file (and charged
 	// to `held`). A map that fails keeps the bytes: an output map never fails on a host error and
 	// never fences (cold-tier D9).
-	std::unique_ptr<open_segment> streamed_segment(std::unique_ptr<kronuz::journal::File> file, files::segment_ref ref, flush_charge* held = nullptr) {
-		auto seg = std::make_unique<open_segment>(ref, load_);
-		std::shared_ptr<const kronuz::journal::Mapping> m = map_output(*file);
-		if (m && m->bytes().size() == ref.size) {
-			seg->ref.footer_crc = format::decode_footer(m->bytes()).toc_crc;
-			seg->adopt(std::make_unique<segment_body>(std::move(m)));
-		} else {
-			std::string bytes = index_detail::read_all(*file);  // a backend that cannot map
-			seg->ref.footer_crc = format::decode_footer(bytes).toc_crc;
-			if (held) { held->grow(bytes.capacity()); }
-			seg->adopt(std::make_unique<segment_body>(std::move(bytes)));
-		}
-		seg->unsynced = std::move(file);
-		return seg;
-	}
+	std::unique_ptr<open_segment> streamed_segment(std::unique_ptr<kronuz::journal::File> file, files::segment_ref ref, flush_charge* held = nullptr);
 	// A file this index just wrote, mapped: null when the backend cannot map or the map fails.
-	static std::shared_ptr<const kronuz::journal::Mapping> map_output(kronuz::journal::File& f) noexcept {
-		try {
-			return f.map();
-		} catch (...) {
-			return nullptr;
-		}
-	}
+	static std::shared_ptr<const kronuz::journal::Mapping> map_output(kronuz::journal::File& f) noexcept;
 
 	// Creates a file and writes it whole. ENOSPC removes the partial file and throws
 	// space_error; the caller has changed nothing yet.
-	std::unique_ptr<kronuz::journal::File> write_unsynced(const std::string& name, std::string_view bytes) {
-		auto f = io_->create_exclusive(name);
-		try {
-			index_detail::write_all(*f, bytes);
-		} catch (const std::system_error& e) {
-			if (e.code().value() != ENOSPC) { throw; }
-			f.reset();
-			io_->remove(name);
-			sync_dir();  // the partial file's space returns once its removal is durable
-			throw space_error(e.code(), e.what());
-		}
-		track(name, bytes.size());
-		return f;
-	}
+	std::unique_ptr<kronuz::journal::File> write_unsynced(const std::string& name, std::string_view bytes);
 
 	// An apply's turn under defer_io (cold-tier D3): the map_owed bit holds through the owed answers
 	// of one transaction and ends with any other outcome, a throw included.
@@ -3248,19 +2069,7 @@ private:
 	// A check-in's chores, under the lease: merges finished on the pool published, views no
 	// reader holds freed and their files queued. They never throw: a failure fences the index,
 	// and the next writer call reports it through live() (CR2).
-	void run_chores() noexcept {
-		chores_owed_.exchange(false, std::memory_order_acq_rel);
-		if (fenced_ || closing()) { return; }
-		try {
-			if (!pending_.empty()) {
-				guarded([&] { publish_merges(false, false); });
-				publish_point();
-			}
-			if (free_views()) { retain(true); }
-		} catch (...) {
-			fenced_ = true;
-		}
-	}
+	void run_chores() noexcept;
 
 	// --- publication (shared-reader D1, D4, D6) -----------------------------------------------
 
@@ -3277,63 +2086,14 @@ private:
 	};
 
 	// The state changed in a way readers see: an accepted transaction, segments replaced, an install.
-	void changed() noexcept {
-		if (pub_) { ++pub_->changes; }
-	}
+	void changed() noexcept;
 
 	// A publication point (D1): a new view when the state is publishable, with no document
 	// buffered, so no transaction is seen in part (SR-D1), and changed since the current view
 	// (SR-D16). Then the registry scan frees what no record names (D6).
-	void publish_point() {
-		if (!pub_ || fenced_ || buffered_records() != 0) { return; }
-		if (pub_->current && pub_->changes == pub_->published && !retire_tables()) { return; }
-		publish_view(build_view());
-		free_views();
-	}
+	void publish_point();
 
-	std::unique_ptr<const view> build_view() {
-		auto v = std::make_unique<view>();
-		v->keep_.reserve(segs_.size());
-		v->bits_.reserve(segs_.size());  // segment_views point into it
-		v->views_.reserve(segs_.size());
-		for (const auto& s : segs_) {
-			v->keep_.push_back(s);
-			v->bits_.push_back(s->dead ? s->deleted.share() : deleted_bits{});
-			v->views_.push_back({s->ref.id, s.get(), s->dead ? &v->bits_.back() : nullptr, s->dead});
-		}
-		const view* last = pub_->current.get();
-		v->visible_ = logged_visible();
-		v->generation_ = pub_->generation + 1;
-		if (last && ahead_of_log()) {
-			// A logged index's index-level state may include transactions past V: the last view's stays.
-			v->meta_ = last->meta_;
-			v->fields_ = last->fields_;
-			v->fields_epoch_ = last->fields_epoch_;
-			v->last_docid_ = last->last_docid_;
-			v->schema_version_ = last->schema_version_;
-			v->configured_ = last->configured_;
-			v->position_ = last->position_;
-		} else {
-			v->meta_ = last && *last->meta_ == meta_ ? last->meta_ : std::make_shared<const std::map<std::string, std::string>>(meta_);
-			if (last && last->fields_epoch_ == fields_epoch_) {
-				v->fields_ = last->fields_;
-			} else {
-				v->fields_ = std::make_shared<const field_table>(fields_);
-			}
-			v->fields_epoch_ = fields_epoch_;
-			v->last_docid_ = cur_.last_docid;
-			v->schema_version_ = cur_.schema_version;
-			v->configured_ = cur_.configured;
-			v->position_ = cur_.applied;
-		}
-		if (live_reads()) {
-			// An empty active buffer now, so the next write needs no view of its own (D5).
-			if (!wb_) { wb_ = std::make_shared<buffer>(visible_, opts_.lane_chunks_cap); }
-			v->active_ = wb_;
-			v->frozen_.assign(frozen_.begin(), frozen_.end());
-		}
-		return v;
-	}
+	std::unique_ptr<const view> build_view();
 
 	// Whether readers on other threads read the buffers: not an inverting layout's (D11).
 	bool live_reads() const noexcept { return !inverting(); }
@@ -3347,242 +2107,42 @@ private:
 	// stored replays the log's records. A head applied past the log's last durable record, or older
 	// than its checkpoint record, names records the log lost (D6.4); a checkpoint record of another
 	// UUID is another index's group. `created`: create_deferred's, whose first commit joins.
-	void attach_log(bool created = false) {
-		if constexpr (command::loggable<Layout>) {
-			const std::optional<index_detail::turn_member> member = index_detail::turn_group_of(m_.attributes);
-			if (!opts_.log) {
-				if (member) { throw log_mismatch("strata: a logged index opens only on its turn-log host"); }
-				return;
-			}
-			const std::uint64_t g = opts_.log_group;
-			if (!g) { throw std::invalid_argument("strata: a logged index needs a group"); }
-			if (member && (member->host != opts_.log->identity() || member->group != g)) {
-				throw log_mismatch("strata: the index's turn_group names another host or group");
-			}
-			const kronuz::journal::GroupStatus status = opts_.log->status(g);
-			if (status == kronuz::journal::GroupStatus::lost) { throw log_lost("strata: the turn log lost the index's group"); }
-			if (status == kronuz::journal::GroupStatus::none) {
-				join(member.has_value(), created);
-				return;
-			}
-			if (!member) { throw log_mismatch("strata: the group is another index's"); }
-			if (status == kronuz::journal::GroupStatus::closed) { opts_.log->reopen(g); }
-			const std::vector<kronuz::journal::TurnRecord> records = opts_.log->records(g);
-			std::optional<std::pair<std::uint64_t, std::string>> table;
-			if (records.empty()) {
-				table = opts_.log->table_record(g);
-				if (table && opts_.log->sequence(g) > table->first) { table.reset(); }
-			}
-			std::optional<command::checkpoint_record> cp;
-			if (table) {
-				// The reopen (D7): the table's record covers every batch through its base.
-				cp = command::decode_checkpoint(table->second);
-				if (cp->uuid != m_.uuid) { throw log_mismatch("strata: the host's record of the group is another index's"); }
-				if (cur_.applied < cp->at) { throw log_lost("strata: the index's head is older than its turn-log checkpoint"); }
-				if (cp->at < cur_.applied) { throw log_mismatch("strata: the index's head is past the host's record of it"); }
-				kronuz::journal::TurnRecord r;
-				r.group = g;
-				r.sequence = std::max(table->first, opts_.log->retired(g)) + 1;  // after what a closed life retired
-				r.kind = kronuz::journal::TurnRecordKind::Checkpoint;
-				r.covers = table->first;
-				r.payload = table->second;
-				opts_.log->stage(std::move(r));
-			}
-			const std::uint64_t staged = seal_log(table ? table->first : ~std::uint64_t(0));
-			if (table) {
-				logged_->checkpointed = cp->at;
-				logged_->last_checkpoint = staged;
-				logged_->checkpoint_payload = std::move(table->second);
-				opts_.log->attach(g);
-				return;
-			}
-			if (cur_.applied.index > staged) { throw log_lost("strata: the index's head names turn-log records its log lacks"); }
-			if (records.empty() && staged > cur_.applied.index) { throw log_lost("strata: the host released the group's records; reopen the host"); }
-			if (!records.empty() && records.front().kind == kronuz::journal::TurnRecordKind::Checkpoint) {
-				const command::checkpoint_record front = command::decode_checkpoint(records.front().payload);
-				if (front.uuid != m_.uuid) { throw log_mismatch("strata: the turn log's group holds another index's checkpoint"); }
-				if (cur_.applied < front.at) { throw log_lost("strata: the index's head is older than its turn-log checkpoint"); }
-				logged_->checkpointed = front.at;
-				logged_->last_checkpoint = records.front().sequence;
-				logged_->checkpoint_payload = records.front().payload;
-			}
-			replay_log(records);
-			opts_.log->release(g);
-			opts_.log->attach(g);
-		}
-	}
+	void attach_log(bool created = false);
 	// Registers the group's sealer and watcher; records follow the group's last staged one, and
 	// the log is durable through it, or through `durable` when a staged record is not yet.
 	std::uint64_t seal_log(std::uint64_t durable)
-		requires(command::loggable<Layout>)
-	{
-		auto st = std::make_shared<index_detail::log_state>();
-		st->group = opts_.log_group;
-		st->command_bytes = opts_.command_bytes;
-		st->block = opts_.log->block_bytes();
-		st->visible.store(visible_, std::memory_order_relaxed);
-		const std::uint64_t staged = opts_.log->seal(
-			st->group,
-			[st, log = opts_.log](std::uint64_t room, bool first) {
-				auto r = st->seal(room, first);
-				if (r) { log->sealed(); }
-				return r;
-			},
-			[st](std::uint64_t s) { st->durable_through(s); }, st.get());
-		st->synced.store(std::min(staged, durable), std::memory_order_release);
-		st->next = staged + 1;
-		logged_ = std::move(st);  // from here the destructor unseals it
-		return staged;
-	}
+		requires(command::loggable<Layout>);
 	// D7's join: the group created in the table, durable; the edit that sets the head's turn_group
 	// attribute (now, or at create's first commit); then the first record, a checkpoint at the
 	// head. A crash before that record's barrier leaves the group none, and the next open joins
 	// again. An index the attribute names already took the edit.
 	void join(bool member, bool created)
-		requires(command::loggable<Layout>)
-	{
-		if (cur_.applied != files::position{}) {
-			if (member) { throw log_lost("strata: the index's head names turn-log records its host lacks"); }
-			throw std::invalid_argument("strata: an index with log positions cannot join a turn log");
-		}
-		opts_.log->create(opts_.log_group);
-		seal_log(~std::uint64_t(0));
-		join_owed_ = true;
-		if (member) {
-			stage_checkpoint();
-			return;
-		}
-		attributes_owed_ = m_.attributes;
-		attributes_owed_->push_back(index_detail::turn_group_attribute(opts_.log->identity(), opts_.log_group));
-		std::sort(attributes_owed_->begin(), attributes_owed_->end(), [](const auto& a, const auto& b) { return a.tag < b.tag; });
-		changed();
-		if (!created) { commit(); }
-	}
+		requires(command::loggable<Layout>);
 	// D7's leave, at close(): a checkpoint covering every batch with nothing after it, durable,
 	// then the table takes it as the group's base and the log forgets the group.
-	void leave() {
-		if constexpr (command::loggable<Layout>) {
-			if (!logged_ || fenced_ || opts_.log->failed()) { return; }
-			commit();
-			if (logged_->last_checkpoint + 1 != logged_->next) { stage_checkpoint(true); }
-			await_log_through(logged_->last_checkpoint);
-			opts_.log->close(logged_->group, logged_->last_checkpoint, logged_->checkpoint_payload);
-		}
-	}
+	void leave();
 	// Replays the group's recovered records (D6.5): each logged transaction applies at its position
 	// {s, i}, skipped at or below the head's. An owed verdict runs its chore and applies again;
 	// no_space fails the open; any other verdict throws replay_diverged, naming the position. No
 	// flush is a checkpoint until the group is released.
 	void replay_log(const std::vector<kronuz::journal::TurnRecord>& records)
-		requires(command::loggable<Layout>)
-	{
-		replaying_ = true;
-		struct done {
-			bool& on;
-			~done() { on = false; }
-		} ended{replaying_};
-		for (const auto& r : records) {
-			if (r.kind != kronuz::journal::TurnRecordKind::Batch) {
-				// The front checkpoint is attach_log's; any other kind is another build's log.
-				if (&r == &records.front() && r.kind == kronuz::journal::TurnRecordKind::Checkpoint) { continue; }
-				throw unsupported_index("strata: a turn-log record of a kind strata does not write");
-			}
-			const std::vector<std::string_view> commands = command::decode_batch(r.payload);
-			for (std::size_t i = 0; i < commands.size(); ++i) {
-				const files::position at{r.sequence, i + 1};
-				const transaction t = command::decode<Layout>(commands[i]);
-				for (int chores = 0;; ++chores) {
-					const verdict v = apply(t, at);
-					if (v.result == verdict::accepted || v.result == verdict::skipped) { break; }
-					if (v.result == verdict::no_space) { throw std::system_error(std::make_error_code(std::errc::no_space_on_device), "strata: replay: no space"); }
-					// Each owed answer comes at most once per transaction: map, flush, drain.
-					if (chores == 3) { throw replay_diverged(at, v.result); }
-					if (v.result == verdict::flush_owed) {
-						flush_point();
-					} else if (v.result == verdict::drain_owed) {
-						(void)reclaim_for_space();
-					} else if (v.result == verdict::map_owed) {
-						promote();
-					} else {
-						throw replay_diverged(at, v.result);
-					}
-				}
-			}
-		}
-	}
+		requires(command::loggable<Layout>);
 	// A write-buffer flush (D5's first trigger): a logged index's is a checkpoint, except during
 	// replay, whose flushes publish segments and stage nothing (D6.5).
-	void flush_point() {
-		if (logged_ && !replaying_) {
-			commit();
-		} else {
-			refresh();
-		}
-	}
+	void flush_point();
 	// D5's second trigger: the commands logged since the last checkpoint pass its byte bound.
 	bool log_due() const noexcept { return logged_ && !replaying_ && logged_->logged_bytes >= opts_.checkpoint_log_bytes; }
 	// D5's step 4, after commit_files() made the edit durable: the checkpoint record {UUID, g, X},
 	// unless nothing was logged since the last one and no join or leave owes one (`force`).
-	void stage_checkpoint(bool force = false) {
-		if constexpr (command::loggable<Layout>) {
-			if (!logged_ || replaying_) { return; }
-			const files::position x = cur_.applied;
-			if (!force && !join_owed_ && (x == files::position{} || x == logged_->checkpointed)) { return; }
-			command::checkpoint_record cp;
-			cp.uuid = m_.uuid;
-			cp.generation = m_.generation;
-			cp.at = x;
-			logged_->checkpoint(command::encode_checkpoint(cp), x, visible_);
-			join_owed_ = false;
-			opts_.log->wake();
-		}
-	}
-	void detach_log() noexcept {
-		if constexpr (command::loggable<Layout>) {
-			if (logged_ && opts_.log) { opts_.log->unseal(logged_->group, logged_.get()); }
-		}
-		logged_.reset();
-	}
+	void stage_checkpoint(bool force = false);
+	void detach_log() noexcept;
 	// The logged append (D3): the test seam, then the critical section. A failure there leaves an
 	// accepted transaction the log lacks, so the index fences.
-	void join_log(std::string_view cmd) {
-		if constexpr (command::loggable<Layout>) {
-			bool opened = false;
-			try {
-				if (opts_.log_seam) { opts_.log_seam(); }
-				for (;;) {
-					const auto j = logged_->join(cmd, visible_, cur_.applied);
-					if (!j.full) {
-						opened = j.opened;
-						break;
-					}
-					const auto* st = logged_.get();
-					opts_.log->await_sealed(logged_->group, [st, s = j.full] { return st->handed.load(std::memory_order_acquire) >= s; });
-				}
-			} catch (...) {
-				fenced_ = true;
-				throw;
-			}
-			changed();
-			if (opened) { opts_.log->wake(); }
-		}
-	}
+	void join_log(std::string_view cmd);
 	// No flush publishes above V (D4, F5): a logged index's flush, and its pending deletes' move
 	// into segment bits, wait first until the log is durable through the applied position.
-	void await_log() {
-		if (logged_) { await_log_through(cur_.applied.index); }
-	}
-	void await_log_through(std::uint64_t s) {
-		if constexpr (command::loggable<Layout>) {
-			if (logged_->synced.load(std::memory_order_acquire) >= s) { return; }
-			try {
-				opts_.log->await(logged_->group, s);
-			} catch (...) {
-				fenced_ = true;  // fail-stop (D9)
-				throw;
-			}
-		}
-	}
+	void await_log();
+	void await_log_through(std::uint64_t s);
 	// Whether the applied state is ahead of the log: a logged index's views then keep their
 	// predecessor's index-level state (metadata, fields, schema, last docid, position), which V's
 	// prefix may not include yet.
@@ -3590,148 +2150,39 @@ private:
 
 	// D7's rule 4 at a group's end: V never passes the newest view's cover, so a view is
 	// published when its buffers are not the index's, or a map table was replaced (D10).
-	void publish_cover() {
-		maintain_runs();
-		const bool stamped = retire_tables();
-		if (!pub_ || !pub_->current || fenced_ || !live_reads()) { return; }
-		const view& c = *pub_->current;
-		bool same = stamped ? false : c.active_ == wb_ && c.frozen_.size() == frozen_.size();
-		for (std::size_t i = 0; same && i < frozen_.size(); ++i) { same = c.frozen_[i] == frozen_[i]; }
-		if (!same) { publish_view(build_view()); }
-		// The registry scan, every 8 groups or past 32 retired objects (D10).
-		if (++pub_->groups >= 8 || pub_->retired.size() + pub_->tables.size() > 32) { free_views(); }
-	}
+	void publish_cover();
 
 	// Moves the map tables growth replaced into the retire list, stamped with the current view's
 	// generation (D10); freed at once when no reader reads the buffers. Whether any moved.
-	bool retire_tables() {
-		std::vector<std::shared_ptr<const void>> old;
-		const auto take = [&](buffer& b) {
-			b.keys.take_retired(old);
-			b.docids.take_retired(old);
-			for (auto& r : b.retired_runs) { old.push_back(std::move(r)); }
-			b.retired_runs.clear();
-		};
-		if (wb_) { take(*wb_); }
-		for (auto& b : frozen_) { take(*b); }
-		if (old.empty() || !pub_ || !live_reads()) { return false; }
-		for (auto& t : old) { pub_->tables.push_back({pub_->generation, std::move(t)}); }
-		return true;
-	}
+	bool retire_tables();
 
 	// Frees the retired tables no reader can still probe: stamped below every view a record names.
-	void free_tables() {
-		if (!pub_ || pub_->tables.empty()) { return; }
-		std::uint64_t oldest = pub_->current ? pub_->current->generation_ : ~std::uint64_t(0);
-		pub_->retired.for_each([&](const view& v) { oldest = std::min(oldest, v.generation_); });
-		std::erase_if(pub_->tables, [&](const auto& t) { return t.first < oldest; });
-	}
+	void free_tables();
 
 	// The view's pointer first, sequentially consistent so the scan's loads come after it (D5);
 	// then its position and generation (SR-D15). The old view is retired into room made before the
 	// publish, so nothing after it can fail.
-	void publish_view(std::unique_ptr<const view> next) {
-		reader_state& rs = *pub_->rs;
-		pub_->retired.reserve();
-		const std::uint64_t g = next->generation_;
-		reader_registry::publish(rs.current, next.get());
-		if (rs.probe) { rs.probe(0); }
-		rs.seq.store(2 * g - 1, std::memory_order_release);
-		rs.at_index.store(next->position_.index, std::memory_order_release);
-		if (rs.probe) { rs.probe(1); }
-		rs.at_applied.store(next->position_.applied, std::memory_order_release);
-		rs.seq.store(2 * g, std::memory_order_release);
-		if (rs.probe) { rs.probe(2); }
-		if (pub_->current) { pub_->retired.retire(std::move(pub_->current)); }
-		pub_->current = std::move(next);
-		pub_->published = pub_->changes;
-		pub_->generation = g;
-	}
+	void publish_view(std::unique_ptr<const view> next);
 
 	// Closing: readers' acquires find null from here on, and the current view is retired.
-	void retire_current() {
-		pub_->retired.reserve();
-		reader_registry::publish(pub_->rs->current, static_cast<const view*>(nullptr));
-		if (pub_->current) { pub_->retired.retire(std::move(pub_->current)); }
-	}
+	void retire_current();
 
 	// Scans the registry and frees every retired view no record names; whether it freed any.
 	// What remains is at most one view per record (D6).
-	bool free_views() {
-		if (!pub_) { return false; }
-		pub_->groups = 0;
-		if (pub_->retired.empty()) {
-			free_tables();
-			return false;
-		}
-		const std::size_t before = pub_->retired.size();
-		const std::size_t left = pub_->retired.reclaim(*pub_->rs->registry, exec_->now());
-		assert(left <= pub_->rs->registry->capacity());
-		free_tables();
-		return left < before;
-	}
+	bool free_views();
 
 	template <class F>
-	void for_each_view(F&& f) const {
-		if (!pub_) { return; }
-		if (pub_->current) { f(*pub_->current); }
-		pub_->retired.for_each(f);
-	}
+	void for_each_view(F&& f) const;
 
 	// --- background merges (D11, D18) ------------------------------------------------------
 
-	bool merging(const open_segment& s) const {
-		for (const auto& job : pending_) {
-			for (const auto& src : job->sources) {
-				if (src.get() == &s) { return true; }
-			}
-		}
-		return false;
-	}
+	bool merging(const open_segment& s) const;
 
 	// Hands the merge of `ids` to the executor. It shares the sources and reads a copy of
 	// their deletes so far; storage admission reserves the output's estimate as merge()
 	// does, on a permit of the merge's own.
 	// `forced`: a merge force_merge() asked for.
-	void schedule(const std::vector<std::uint64_t>& ids, bool forced = false) {
-		auto job = std::make_shared<merge_job>();
-		job->reserved = segment_overhead;
-		std::uint64_t live_docs = 0;
-		for (const auto& s : segs_) {
-			if (std::find(ids.begin(), ids.end(), s->ref.id) == ids.end() || merging(*s) || s->damaged) { continue; }
-			// A map point, before anything is reserved (cold-tier D9): a source that fails its checks
-			// is marked and left out; a host error drops the round.
-			try {
-				(void)s->seg();
-			} catch (const corrupt_segment&) {
-				s->damaged = true;
-				continue;
-			} catch (const std::system_error& e) {
-				throw map_failure(e.code(), e.what());
-			}
-			const std::uint64_t docs = s->ref.doc_count;
-			job->sources.push_back(s);
-			job->deleted.emplace_back(s->deleted.begin(), s->deleted.end());
-			job->reserved += s->ref.size + 18 * docs + 16 * (docs / format::block + 1);
-			live_docs += docs - s->dead;
-		}
-		using mode = typename options::reorder_mode;
-		job->reorder = (opts_.reordering == mode::force_merge && forced) || (opts_.reordering == mode::merges && (forced || live_docs >= opts_.reorder_min_docs));
-		if (job->sources.empty()) { return; }
-		if (storage_permit_) {
-			job->storage = opts_.storage->open();
-			if (!job->storage.try_grow(job->reserved) && !(drain() && job->storage.try_grow(job->reserved))) {
-				throw std::system_error(std::make_error_code(std::errc::no_space_on_device), "strata: no storage reserved for a merge");
-			}
-		}
-		job->id = cur_.next_segment++;
-		job->header = new_identity();
-		pending_.reserve(pending_.size() + 1);
-		const merge_env ctx{io_, exec_, opts_.rate, opts_.budget, opts_.reorder_settings, configured_structures(),
-			opts_.zstd_merged ? std::optional<format::stored_codec>(format::zstd_codec(1)) : std::nullopt, load_};
-		group_->post([job, ctx](const task::cancel_token& stop) { run_merge(*job, ctx, stop); });
-		pending_.push_back(std::move(job));
-	}
+	void schedule(const std::vector<std::uint64_t>& ids, bool forced = false);
 
 	// What a merge uses besides its job; the index's, never the index.
 	struct merge_env {
@@ -3907,251 +2358,30 @@ private:
 	// the output to its file unsynced (as a flush leaves it) under the rate limit with
 	// positions spilled to a file, then reads it back as the segment. A failed or stopped
 	// build removes its files.
-	static void run_merge(merge_job& job, const merge_env& ctx, const task::cancel_token& stop) {
-		try {
-			if (stop.requested()) { throw task::cancelled{}; }
-			std::uint64_t live = 0;
-			for (std::size_t k = 0; k < job.sources.size(); ++k) {
-				std::uint64_t dead = 0;
-				for (auto w : job.deleted[k]) { dead += std::uint64_t(std::popcount(w)); }
-				live += job.sources[k]->ref.doc_count - dead;
-			}
-			if (live == 0) {  // nothing to write: publication drops the sources
-				job.done.store(true, std::memory_order_release);
-				return;
-			}
-			job.memory = flush_charge(ctx.budget);
-			if (!ctx.exec->checkpoint(stop)) { throw task::cancelled{}; }
-			std::vector<basic_merge_source<Layout>> sources;
-			for (std::size_t k = 0; k < job.sources.size(); ++k) { sources.push_back({&job.sources[k]->mapped(), &job.deleted[k]}); }  // scheduling mapped them (D9)
-			const std::string name = index_detail::segment_name(job.id);
-			auto file = ctx.io->create_exclusive(name);
-			std::string bytes;
-			std::shared_ptr<const kronuz::journal::Mapping> mapped;  // the output, mapped; else read into bytes
-			merge_file out(*file, ctx, job, stop);
-			try {
-				const std::size_t chunk = ctx.rate ? ctx.rate->chunk() : std::size_t(1) << 20;
-				std::uint64_t used = 0;
-				merge_output sink(out, used, chunk);
-				std::vector<merge_ref> order;
-				// A key-ordered layout's merges order by key themselves and read each source in
-				// order, so they take neither a reordering nor a records scratch (format-14-kv D4).
-				constexpr bool by_key = segment_policy<Layout>::key_order;
-				if constexpr (order_source<Layout>::exists && !by_key) {
-					if (job.reorder) {
-						merge_scratch forward(ctx, job, used, stop, chunk, index_detail::forward_name(job.id));
-						order = order_source<Layout>::order(sources, forward, ctx.reorder, &stop, &job.memory);
-					}
-				}
-				{
-					std::optional<merge_scratch> records;
-					if (!by_key && (!order.empty() || (sources.size() == 1 && !sources[0].seg->core().docid_ordered()))) {
-						records.emplace(ctx, job, used, stop, chunk, index_detail::records_name(job.id));
-					}
-					merge_spill positions(ctx, job, used, stop, chunk);
-					job.plan = detail::merge_layout(std::span<const basic_merge_source<Layout>>(sources), job.header, sink, positions,
-						{.cancel = &stop, .memory = &job.memory, .order = order, .records = records ? &*records : nullptr,
-							.structures = ctx.structures, .stored_codec = ctx.stored_codec});
-				}
-				sink.finish();
-				job.memory.shrink(job.memory.held());  // the build's buffers are gone
-				if (!(mapped = map_output(*file))) {
-					bytes = index_detail::read_all(*file);  // through the file it holds: no new descriptor
-					job.memory.grow(bytes.capacity());
-				}
-				if ((mapped ? mapped->bytes().size() : bytes.size()) != out.size()) {
-					throw std::system_error(EIO, std::generic_category(), "strata: a merge's output reads back short");
-				}
-			} catch (...) {
-				file.reset();
-				ctx.io->remove(name);
-				job.removed = out.size();  // the writer's directory sync returns it: one sync path (sync-at-first-commit D4)
-				throw;
-			}
-			const std::string_view view = mapped ? mapped->bytes() : std::string_view(bytes);
-			files::segment_ref ref;
-			ref.id = job.id;
-			ref.identity = job.header;
-			ref.size = view.size();
-			ref.footer_crc = format::decode_footer(view).toc_crc;
-			ref.doc_count = job.plan.doc_count;
-			job.output = std::make_unique<open_segment>(ref, ctx.load);
-			job.output->adopt(mapped ? std::make_unique<segment_body>(std::move(mapped)) : std::make_unique<segment_body>(std::move(bytes)));  // facts before it is published
-			job.output->unsynced = std::move(file);
-		} catch (const std::system_error& e) {
-			job.error = e.code().value() == ENOSPC ? std::make_exception_ptr(space_error(e.code(), e.what())) : std::current_exception();
-		} catch (...) {
-			job.error = std::current_exception();
-		}
-		job.done.store(true, std::memory_order_release);
-	}
+	static void run_merge(merge_job& job, const merge_env& ctx, const task::cancel_token& stop);
 
 	// Publishes the background merges that finished, after waiting for all of them with
 	// `wait`. One that ran out of space, or that the executor stopped, is dropped, its
 	// sources left for a later merge (and with `space_throws`, ENOSPC is thrown once the
 	// rest are published). A corrupt source is marked for heal() and skipped until then.
 	// Any other failure fences: an I/O error, or a broken invariant.
-	void publish_merges(bool wait, bool space_throws) {
-		if (!group_ || pending_.empty()) { return; }
-		if (wait) { group_->wait(); }
-		obsoleted_ = 0;
-		std::optional<std::string> space;  // the first refusal's own message: admission's or the disk's
-		for (std::size_t i = 0; i < pending_.size();) {
-			if (!pending_[i]->done.load(std::memory_order_acquire)) {
-				++i;
-				continue;
-			}
-			const auto job = std::move(pending_[i]);
-			pending_.erase(pending_.begin() + std::ptrdiff_t(i));
-			const job_drop drop{*job};  // whether installed, dropped, or fencing
-			if (job->error) {
-				job->storage.settle();
-				job->memory.settle();
-				unlinked_ += job->removed;
-				try {
-					std::rethrow_exception(job->error);
-				} catch (const space_error& e) {
-					if (!space) { space = e.what(); }
-					continue;
-				} catch (const task::cancelled&) {
-					continue;
-				} catch (const corrupt_segment& e) {
-					if (mark_damaged(*job)) { continue; }
-					fence(std::string("strata: a merge's output is corrupt: ") + e.what());
-				} catch (const std::system_error& e) {
-					fence(std::string("strata: durability failure: ") + e.what());
-				} catch (const std::exception& e) {
-					fence(std::string("strata: merge failure: ") + e.what());
-				}
-			}
-			install_merge(*job);
-		}
-		// Published before retain() when publishable, so the view it retires can be freed first.
-		publish_point();
-		// What the installs obsoleted is owed; retain() queues it, so a file a pending merge, a
-		// kept manifest, or a view names is never queued, and this call pays up to the cap.
-		if (obsoleted_) {
-			debt_ += std::exchange(obsoleted_, 0);
-			retain();
-		}
-		if (debt_) { reclaim_files(std::min(debt_, opts_.reclaim_cap)); }
-		collect_deletes();
-		settle_storage();
-		if (space && space_throws) { throw space_error(std::make_error_code(std::errc::no_space_on_device), *space); }
-	}
+	void publish_merges(bool wait, bool space_throws);
 
-	[[noreturn]] void fence(const std::string& why) {
-		fenced_ = true;
-		throw index_fenced(why);
-	}
+	[[noreturn]] void fence(const std::string& why);
 
 	// Marks the merge's sources that fail check_segment (checksums, then consistency); false when none does.
-	bool mark_damaged(const merge_job& job) {
-		bool any = false;
-		for (const auto& src : job.sources) {
-			if (std::find(segs_.begin(), segs_.end(), src) == segs_.end()) { continue; }
-			try {
-				basic_check_report<Layout> r;
-				check_segment(src->mapped(), &src->deleted, r);
-			} catch (const corrupt_segment&) {
-				src->damaged = true;
-				any = true;
-			}
-		}
-		return any;
-	}
+	bool mark_damaged(const merge_job& job);
 
 	// Publishes a finished merge, on the writer's thread. When its sources are all still
 	// here, the output replaces them, and each delete made since the merge read them carries
 	// over through its ordinal map, once (D11); otherwise the output's file is reclaimed. A
 	// delete that maps to no output document breaks the invariant and fences, changing
 	// nothing.
-	void install_merge(merge_job& job) {
-		std::vector<std::size_t> at;
-		for (const auto& src : job.sources) {
-			const auto it = std::find(segs_.begin(), segs_.end(), src);
-			if (it == segs_.end()) { break; }
-			at.push_back(std::size_t(it - segs_.begin()));
-		}
-		const std::string name = index_detail::segment_name(job.id);
-		auto reclaim_output = [&] {
-			if (!job.output) { return; }
-			track(name, job.output->ref.size);
-			obsoleted_ += job.output->ref.size;
-			job.output.reset();
-			reclaim_.push_back(name);
-			queued_.insert(name);
-		};
-		std::vector<ordinal_t> carried;
-		if (at.size() == job.sources.size() && job.output) {
-			for (std::size_t k = 0; k < at.size(); ++k) {
-				const auto& now = segs_[at[k]]->deleted;
-				const auto& then = job.deleted[k];
-				const auto& to = job.plan.ordinals[k];
-				for (std::size_t w = 0; w < now.size(); ++w) {
-					for (std::uint64_t fresh = now[w] & ~then[w]; fresh; fresh &= fresh - 1) {
-						const ordinal_t o = to[w * 64 + std::size_t(std::countr_zero(fresh))];
-						if (o == no_more_docs) {
-							reclaim_output();
-							settle_storage();
-							job.storage.settle();
-							job.memory.settle();
-							fence("strata: merge publication: a delete names a document the merge dropped");
-						}
-						carried.push_back(o);
-					}
-				}
-			}
-		}
-		if (at.size() != job.sources.size()) {
-			reclaim_output();
-		} else {
-			if (job.output) {
-				auto& out = *job.output;
-				for (ordinal_t o : carried) { out.deleted.set(o); }
-				out.dead = carried.size();
-				out.deletes_dirty = !carried.empty();
-			}
-			carry_pending(job);
-			changed();
-			std::sort(at.begin(), at.end());
-			for (std::size_t k = at.size(); k-- > 0;) {
-				obsoleted_ += segs_[at[k]]->ref.size;
-				segs_.erase(segs_.begin() + std::ptrdiff_t(at[k]));
-			}
-			if (job.output) {
-				// Its id was taken at scheduling, below any flushed since: it goes in id order,
-				// which the manifest requires.
-				track(name, job.output->ref.size);
-				const auto at_id = std::lower_bound(segs_.begin(), segs_.end(), job.id, [](const auto& s, std::uint64_t id) { return s->ref.id < id; });
-				segs_.emplace(at_id, std::move(job.output));
-			}
-		}
-		settle_storage();
-		job.storage.settle();
-		job.memory.settle();  // published: the segment's bytes are the index's now (D17)
-	}
+	void install_merge(merge_job& job);
 
 	// A merge's install carries the pending deletes naming its sources to its output (D6, WB-2):
 	// each (source, ordinal) through the plan's ordinal map. One the output dropped fences.
-	void carry_pending(const merge_job& job) {
-		if (!wb_ || wb_->pending.empty()) { return; }
-		bool moved = false;
-		for (auto& [id, ord] : wb_->pending) {
-			for (std::size_t k = 0; k < job.sources.size(); ++k) {
-				if (job.sources[k]->ref.id != id) { continue; }
-				const ordinal_t o = job.output ? job.plan.ordinals[k][ord] : no_more_docs;
-				if (o == no_more_docs) { fence("strata: merge publication: a pending delete names a document the merge dropped"); }
-				id = job.id;
-				ord = o;
-				moved = true;
-				break;
-			}
-		}
-		if (!moved) { return; }
-		wb_->pending_keys.clear();
-		for (const auto& [id, ord] : wb_->pending) { wb_->pending_keys.insert(pending_key(id, ord)); }
-	}
+	void carry_pending(const merge_job& job);
 
 	// The owner lets go of a job's segments itself: the executor may hold the job after `done`,
 	// and the last reference to a source a merge replaced must not drop on its thread (SR-D5).
@@ -4165,34 +2395,11 @@ private:
 	};
 
 	// Ends the merges' group, then lets go of every job's segments on this thread.
-	void end_merges() noexcept {
-		runs_group_.reset();
-		group_.reset();
-		end_deletes();
-		for (const auto& job : pending_) { const job_drop drop{*job}; }
-		pending_.clear();
-	}
+	void end_merges() noexcept;
 
 	// Ends every background merge unpublished: queued ones are dropped, running ones
 	// stopped, and finished outputs' files reclaimed.
-	void abandon_merges() {
-		if (!group_) { return; }
-		group_->cancel();
-		for (const auto& job : pending_) {
-			const job_drop drop{*job};
-			if (job->done.load(std::memory_order_acquire) && job->output) {
-				const std::string name = index_detail::segment_name(job->id);
-				track(name, job->output->ref.size);
-				job->output.reset();
-				reclaim_.push_back(name);
-				queued_.insert(name);
-			}
-			job->storage.settle();
-			job->memory.settle();
-		}
-		pending_.clear();
-		settle_storage();
-	}
+	void abandon_merges();
 
 	// What a posted delete reports back, for the owner to collect: the files it removed, and
 	// the ones it could not, with the size left on disk.
@@ -4218,172 +2425,27 @@ private:
 
 	// A delete's body, on an executor thread: it touches no index state, only the IO and the
 	// channel. A file already gone counts as removed; any other failure reports the size left.
-	static void run_delete(kronuz::journal::IO& io, delete_chan& ch, const std::string& name, std::uint64_t size, std::uint64_t step, const task::cancel_token& stop) {
-		std::uint64_t left = size;
-		try {
-			if (stop.requested()) { throw std::system_error(ECANCELED, std::generic_category(), "strata: delete stopped"); }
-			if (left > step) {
-				auto f = io.open_existing(name);
-				try {
-					while (left > step) {
-						if (stop.requested()) { throw std::system_error(ECANCELED, std::generic_category(), "strata: delete stopped"); }
-						f->truncate(left - step);
-						left -= step;
-					}
-					f->sync();
-				} catch (...) {
-					try {
-						left = f->size();
-					} catch (const std::system_error&) {
-					}
-					throw;
-				}
-			}
-			io.remove(name);
-			ch.report(name, std::nullopt);
-		} catch (const std::system_error& e) {
-			ch.report(name, e.code().value() == ENOENT ? std::nullopt : std::optional<std::uint64_t>(left));
-		} catch (...) {
-			ch.report(name, left);
-		}
-	}
+	static void run_delete(kronuz::journal::IO& io, delete_chan& ch, const std::string& name, std::uint64_t size, std::uint64_t step, const task::cancel_token& stop);
 
 	// Takes the posted deletes' outcomes: a removed file's bytes wait in `unlinked_` for a
 	// directory sync; a failed one returns to the files on record at the size left, and to
 	// the queue's front, its bytes owed again.
-	void collect_deletes() {
-		if (!del_chan_ || !del_chan_->ready.load(std::memory_order_acquire)) { return; }
-		std::vector<std::string> done;
-		std::vector<failed_delete> failed;
-		{
-			const std::lock_guard lock(del_chan_->mu);
-			done.swap(del_chan_->done);
-			failed.swap(del_chan_->failed);
-			del_chan_->ready.store(0, std::memory_order_relaxed);
-		}
-		for (const auto& name : done) {
-			if (auto it = posted_.find(name); it != posted_.end()) {
-				inflight_ -= it->second;
-				unlinked_ += it->second;
-				posted_.erase(it);
-			}
-		}
-		for (auto it = failed.rbegin(); it != failed.rend(); ++it) { requeue_delete(it->name, it->left); }
-	}
-	void requeue_delete(const std::string& name, std::uint64_t left) {
-		const auto it = posted_.find(name);
-		if (it == posted_.end()) { return; }
-		inflight_ -= it->second;
-		posted_.erase(it);
-		track(name, left);
-		reclaim_.push_front(name);
-		queued_.insert(name);
-		debt_ += left;
-	}
+	void collect_deletes();
+	void requeue_delete(const std::string& name, std::uint64_t left);
 	// Waits for the posted deletes (it never cancels them) and collects. A delete the executor
 	// dropped without running reported nothing: its file is requeued as it was.
-	void finish_deletes() {
-		if (!del_group_) { return; }
-		del_group_->wait();
-		collect_deletes();
-		const std::vector<std::pair<std::string, std::uint64_t>> dropped(posted_.begin(), posted_.end());
-		for (const auto& [name, size] : dropped) { requeue_delete(name, size); }
-	}
+	void finish_deletes();
 	// close() and the destructor: the deletes in flight finish; a crash's orphans are the next
 	// open's.
-	void end_deletes() noexcept {
-		if (del_group_) {
-			try {
-				del_group_->wait();
-			} catch (...) {
-			}
-		}
-		del_group_.reset();
-	}
+	void end_deletes() noexcept;
 
 	// reclaim_files() with an executor: pops the queue up to `bytes`, does the accounting at
 	// once (the file leaves the files on record; its bytes stay in the permit until the
 	// removal is synced), and posts the delete.
-	std::uint64_t reclaim_posted(std::uint64_t bytes) {
-		collect_deletes();
-		std::uint64_t freed = 0;
-		while (!reclaim_.empty() && freed < bytes) {
-			const std::string name = std::move(reclaim_.front());
-			reclaim_.pop_front();
-			queued_.erase(name);
-			std::uint64_t size = 0;
-			if (auto it = files_.find(name); it != files_.end()) {
-				size = it->second;
-				on_disk_ -= size;
-				files_.erase(it);
-			}
-			inflight_ += size;
-			posted_[name] = size;
-			freed += size;
-			try {
-				del_group_->post([chan = del_chan_, io = io_, name, size, step = opts_.reclaim_step](const task::cancel_token& stop) { run_delete(*io, *chan, name, size, step, stop); });
-			} catch (const std::exception&) {
-				requeue_delete(name, size);  // not posted: the file stays queued for a later round
-				freed -= size;
-				break;
-			}
-		}
-		debt_ -= std::min(debt_, freed);
-		if (reclaim_.empty()) { debt_ = 0; }
-		settle_storage();
-		return freed;
-	}
+	std::uint64_t reclaim_posted(std::uint64_t bytes);
 
 	// reclaim()'s file half: the queue, about `bytes` of it.
-	std::uint64_t reclaim_files(std::uint64_t bytes) {
-		if (del_group_) { return reclaim_posted(bytes); }
-		std::uint64_t freed = 0;
-		while (!reclaim_.empty() && freed < bytes) {
-			const std::string name = reclaim_.front();
-			auto it = files_.find(name);
-			std::uint64_t size = it == files_.end() ? 0 : it->second;
-			std::unique_ptr<kronuz::journal::File> f;
-			std::uint64_t cut = 0;
-			try {
-				if (size > opts_.reclaim_step) {
-					// Truncated bytes count as free once the file's sync makes the truncation durable.
-					f = io_->open_existing(name);
-					while (size > opts_.reclaim_step && freed + cut < bytes) {
-						size -= opts_.reclaim_step;
-						f->truncate(size);
-						track(name, size);
-						truncated_ += opts_.reclaim_step;
-						cut += opts_.reclaim_step;
-					}
-					f->sync();
-					truncated_ -= cut;
-					freed += cut;
-					if (size > opts_.reclaim_step) { break; }
-				}
-				remove_file(name);
-			} catch (const std::system_error& e) {
-				// A failed round releases what it counted as truncated; the file's size is
-				// whatever the truncations left.
-				if (cut) {
-					truncated_ -= cut;
-					try {
-						track(name, f->size());
-					} catch (const std::system_error&) {
-					}
-				}
-				// The commits stand; the file stays queued for a later round, unless it is gone.
-				if (e.code().value() != ENOENT) { break; }
-				forget_file(name);
-			}
-			freed += size;
-			queued_.erase(name);
-			reclaim_.pop_front();
-		}
-		debt_ -= std::min(debt_, freed);
-		if (reclaim_.empty()) { debt_ = 0; }
-		settle_storage();
-		return freed;
-	}
+	std::uint64_t reclaim_files(std::uint64_t bytes);
 
 	// --- storage accounting (T5) -------------------------------------------------------------
 
@@ -4402,48 +2464,19 @@ private:
 		}
 	};
 
-	void track(const std::string& name, std::uint64_t size) {
-		auto& at = files_[name];
-		on_disk_ += size - at;
-		at = size;
-	}
-	void remove_file(const std::string& name) {
-		io_->remove(name);
-		forget_file(name);
-	}
+	void track(const std::string& name, std::uint64_t size);
+	void remove_file(const std::string& name);
 	// A removed file's bytes stay counted until a directory sync makes its removal durable:
 	// filesystems release the blocks then, not at the unlink.
-	void forget_file(const std::string& name) {
-		if (auto it = files_.find(name); it != files_.end()) {
-			on_disk_ -= it->second;
-			unlinked_ += it->second;
-			files_.erase(it);
-		}
-	}
+	void forget_file(const std::string& name);
 	// While the open's head is owed its sync, every directory sync is that sync, so no
 	// writeback error is taken outside it (sync-at-first-commit D4).
-	void sync_dir() {
-		if (inherited_owed_) { return sync_inherited(); }
-		io_->sync_directory();
-		unlinked_ = 0;
-	}
+	void sync_dir();
 	// The open's head made durable: the log and the directory under one device flush. A failure
 	// fences: after a failed fsync a retry proves nothing.
-	void sync_inherited() {
-		durable([&] {
-			std::unique_ptr<kronuz::journal::File> opened;  // a demotion closed the log
-			kronuz::journal::File* f = log_.get();
-			if (!f) { f = (opened = io_->open_existing(index_detail::manifest_name(log_g_))).get(); }
-			io_->sync_files_and_directory({&f, 1});
-		});
-		unlinked_ = 0;
-		inherited_owed_ = false;
-	}
+	void sync_inherited();
 	// A file an earlier process's generation may name: a log, or a segment on disk at open.
-	bool inherited(const std::string& name) const {
-		const auto p = index_detail::parse_name(name);
-		return p && (p->type == index_detail::parsed_name::manifest || (p->type == index_detail::parsed_name::segment && p->a < inherited_below_));
-	}
+	bool inherited(const std::string& name) const;
 	// A bound on a segment's fixed bytes, apart from its documents and terms: the header,
 	// footer, and table of contents, each section's alignment and region checksums, and the
 	// term index's and key filter's least sizes. (A one-document segment takes 1,088.)
@@ -4454,168 +2487,49 @@ private:
 	// ordinals, the keys it touched, the new declarations, framed), and a snapshot of the state
 	// only while a rollover is owed: D7's bounds give way under ENOSPC, so S is not held against
 	// every commit. Each index holds it standing, so a commit that frees space can always be written.
-	std::uint64_t commit_allowance() const {
-		std::uint64_t n = 256 + 64 * files::log_scalar::count + 10 * deleted_since_.size();
-		for (const auto& s : segs_) {
-			if (!m_.segments.count(s->ref.id)) { n += 96 + (s->ref.doc_count + 7) / 8; }
-		}
-		for (const auto& k : meta_since_) {
-			const auto it = meta_.find(k);
-			n += 20 + k.size() + (it != meta_.end() ? it->second.size() : 0);
-		}
-		if (fields_.size() > m_.fields.size()) { n += 32 + 8 * (fields_.size() - m_.fields.size()) + fields_.name_bytes() - m_.fields.name_bytes(); }
-		n += (n / 426 + 2) * 512;  // framing: a block header and a fragment per 426 bytes, padding
-		if (rollover_owed_) { n += files::snapshot_bytes(m_) + n; }  // a demoted log's descriptor reopens to append
-		return n;
-	}
+	std::uint64_t commit_allowance() const;
 
 	// Whether drain() has files to reclaim, delete results to wait for or removals to sync.
-	bool drain_pending() {
-		collect_deletes();
-		return retain_owed_ || !reclaim_.empty() || unlinked_ || inflight_;  // an open's retention runs in the drain
-	}
+	bool drain_pending();
 
 	// Reclaims every queued file for admission that is short of space; false if none was.
-	bool drain() {
-		collect_deletes();
-		if (retain_owed_) { retain(); }
-		if (reclaim_.empty() && !unlinked_ && !inflight_) { return false; }
-		reclaim();
-		finish_deletes();
-		if (unlinked_) {
-			try {
-				sync_dir();
-			} catch (const std::system_error&) {
-				return false;  // the removals stay counted; a later sync frees them
-			}
-			settle_storage();
-		}
-		return true;
-	}
+	bool drain();
 
 	// Brings the storage permit to the files' bytes, what admission reserved, and the
 	// commit allowance.
-	void settle_storage() {
-		if (!storage_permit_) { return; }
-		allowance_ = commit_allowance();
-		const std::uint64_t want = on_disk_ + unlinked_ + inflight_ + truncated_ + reserved_ + allowance_ + held_;
-		if (want > storage_permit_.bytes()) {
-			storage_permit_.grow(want - storage_permit_.bytes());
-		} else {
-			storage_permit_.shrink(storage_permit_.bytes() - want);
-		}
-	}
+	void settle_storage();
 	// A transaction's bytes on disk, overestimated: stored records, each term with its
 	// posting and positions, a per-document overhead, and deletes' entries in the edit.
-	static std::uint64_t estimate_bytes(const transaction& t) {
-		std::uint64_t n = 64;
-		for (const auto& o : t.ops) {
-			n += 16 + o.key.size() + o.meta_key.size() + o.meta_value.size();
-			n += 64 + o.doc.disk_estimate();  // a per-document overhead, and the parts
-		}
-		return n;
-	}
+	static std::uint64_t estimate_bytes(const transaction& t);
 
 	// --- lookups ----------------------------------------------------------------------------
 
-	static wbuf::ref_t find_key_in(const buffer& b, std::string_view key) {
-		return b.keys.find(index_detail::key_hash(key), [&](wbuf::ref_t r) { return std::string_view(b.lane.at(r).key()) == key; });
-	}
+	static wbuf::ref_t find_key_in(const buffer& b, std::string_view key);
 	// The const probe (WB-23): any thread; no table means no docid-only supersession.
-	static wbuf::ref_t probe_docid(const buffer& b, std::uint64_t docid) {
-		return b.docids.find(index_detail::docid_hash(docid), [&](wbuf::ref_t r) { return b.lane.at(r).docid == docid; });
-	}
+	static wbuf::ref_t probe_docid(const buffer& b, std::uint64_t docid);
 	// The lease holder's: builds the map first (D8's exception for a frozen buffer).
-	wbuf::ref_t find_docid_in(const buffer& b, std::uint64_t docid) const {
-		build_docids(b);
-		return probe_docid(b, docid);
-	}
+	wbuf::ref_t find_docid_in(const buffer& b, std::uint64_t docid) const;
 	// The docid map, from the position index, the first time stage 1 or a flush needs it (D3,
 	// WB-23): the table is published, then filled; every record takes its docid's slot in
 	// order, so the newest names each docid. It runs inline under the lease at any size: apply()
 	// is synchronous, so a post to the pool would only block the caller (the async seam is step 3).
-	void build_docids(const buffer& b) const {
-		if (b.docids.built()) { return; }
-		b.docids.reserve(b.order.size());
-		for (std::size_t i = 0; i < b.order.size(); ++i) { store_docid(b, b.order[i].ref); }
-	}
-	wbuf::version_map::place store_docid(const buffer& b, wbuf::ref_t r) const {
-		const std::uint64_t d = b.lane.at(r).docid;
-		const std::uint32_t h = index_detail::docid_hash(d);
-		const auto p = b.docids.locate(h, [&](wbuf::ref_t q) { return b.lane.at(q).docid == d; });
-		b.docids.store(p, h, r);
-		return p;
-	}
+	void build_docids(const buffer& b) const;
+	wbuf::version_map::place store_docid(const buffer& b, wbuf::ref_t r) const;
 	// Whether a buffer's record is its key's (else its docid's) newest and not a tombstone: what
 	// its flush writes. A frozen buffer keeps no live bits; newer records shadow its copies (WB-16).
-	bool newest(const buffer& b, wbuf::ref_t r) const {
-		const record& x = b.lane.at(r);
-		if (x.tombstone()) { return false; }
-		return x.key().empty() ? find_docid_in(b, x.docid) == r : find_key_in(b, x.key()) == r;
-	}
-	copy buffered_copy(const buffer& b, typename copy::where_t w, std::size_t at, wbuf::ref_t r) const {
-		const record& x = b.lane.at(r);
-		if (x.tombstone()) { return {}; }
-		return {w, at, r, 0, x.docid, x.version};
-	}
+	bool newest(const buffer& b, wbuf::ref_t r) const;
+	copy buffered_copy(const buffer& b, typename copy::where_t w, std::size_t at, wbuf::ref_t r) const;
 
 	// A docid's live copy: the buffers newest first, through their docid maps, then the segments
 	// newest first with their live bits and the pending deletes.
 	// Stage 1 builds a buffer's map on its first docid lookup (D8's exception); `build` false
 	// walks a buffer without one instead.
-	copy locate_docid(std::uint64_t docid, bool build = true) const {
-		const auto find = [&](const buffer& b) {
-			if (build || b.docids.built()) { return find_docid_in(b, docid); }
-			for (std::size_t i = b.order.size(); i-- > 0;) {
-				if (b.lane.at(b.order[i].ref).docid == docid) { return b.order[i].ref; }
-			}
-			return wbuf::no_ref;
-		};
-		if (wb_) {
-			if (const auto r = find(*wb_); r != wbuf::no_ref) { return buffered_copy(*wb_, copy::active, 0, r); }
-		}
-		for (std::size_t i = frozen_.size(); i-- > 0;) {
-			if (const auto r = find(*frozen_[i]); r != wbuf::no_ref) { return buffered_copy(*frozen_[i], copy::frozen, i, r); }
-		}
-		const pending_set* pending = pending_index();
-		for (std::size_t i = segs_.size(); i-- > 0;) {
-			const auto& s = *segs_[i];
-			const segment& sg = s.seg();  // a map point under the lease (cold-tier D9)
-			if (auto ord = sg.core().ordinal_of(docid); ord && !((s.deleted[*ord >> 6] >> (*ord & 63)) & 1)) {
-				if (pending_has(pending, s.ref.id, *ord)) { return {}; }
-				return {copy::segment, i, wbuf::no_ref, *ord, docid, sg.template get<keys_plugin>().version(*ord)};
-			}
-		}
-		return {};
-	}
+	copy locate_docid(std::uint64_t docid, bool build = true) const;
 
 	// A key's live copy: the buffers' key maps newest first, then segments newest first.
-	copy lookup_key(std::string_view key) const {
-		if (wb_) {
-			if (const auto r = find_key_in(*wb_, key); r != wbuf::no_ref) { return buffered_copy(*wb_, copy::active, 0, r); }
-		}
-		for (std::size_t i = frozen_.size(); i-- > 0;) {
-			if (const auto r = find_key_in(*frozen_[i], key); r != wbuf::no_ref) { return buffered_copy(*frozen_[i], copy::frozen, i, r); }
-		}
-		const pending_set* pending = pending_index();
-		const std::uint64_t hash = xxh64::hash(key);  // one hash, one filter probe per segment (CR7)
-		for (std::size_t i = segs_.size(); i-- > 0;) {
-			const auto& s = *segs_[i];
-			const segment& sg = s.seg();  // a map point under the lease (cold-tier D9)
-			const auto& keys = sg.template get<keys_plugin>();
-			if (const auto ord = keys.find(key, live_bits{s.deleted.data()}, hash)) {
-				if (pending_has(pending, s.ref.id, *ord)) { return {}; }
-				return {copy::segment, i, wbuf::no_ref, *ord, sg.core().docid(*ord), keys.version(*ord)};
-			}
-		}
-		return {};
-	}
+	copy lookup_key(std::string_view key) const;
 	// A copy's key, when the buffer holds it; a segment's is not recoverable from its ordinal.
-	std::string_view key_of_copy(const copy& c) const {
-		if (c.where == copy::active) { return wb_->lane.at(c.ref).key(); }
-		if (c.where == copy::frozen) { return frozen_[c.at]->lane.at(c.ref).key(); }
-		return {};
-	}
+	std::string_view key_of_copy(const copy& c) const;
 
 	// --- transactions -----------------------------------------------------------------------
 
@@ -4636,142 +2550,22 @@ private:
 		wbuf::lane<record>::mark lane;
 	};
 
-	void rollback() {
-		buffer* b = wb_.get();
-		for (auto it = undo_.rbegin(); it != undo_.rend(); ++it) {
-			switch (it->type) {
-			case undo_step::key_slot: b->keys.restore(it->place); break;
-			case undo_step::docid_slot: b->docids.restore(it->place); break;
-			case undo_step::pending:
-				b->pending_keys.erase(pending_key(b->pending.back().first, b->pending.back().second));
-				b->pending.pop_back();
-				break;
-			case undo_step::segment_dirty: segs_[it->a]->deletes_dirty = it->prev_dirty; break;
-			case undo_step::last_docid: cur_.last_docid = it->prev_value; break;
-			case undo_step::first_docid_only: b->first_docid_only.store(it->prev_value, std::memory_order_release); break;
-			case undo_step::fields: fields_.truncate(it->a); break;
-			case undo_step::meta:
-				if (it->prev_meta) {
-					meta_[it->key] = *it->prev_meta;
-				} else {
-					meta_.erase(it->key);
-				}
-				if (!it->prev_dirty) { meta_since_.erase(it->key); }
-				break;
-			}
-		}
-		if (b) {
-			// With readers, a rejected record may be under a reader that loaded its slot before the
-			// restore: it stays in the lane, unreferenced, and its bytes stay counted, so the flush
-			// threshold bounds them and the freeze reclaims them (D4, CR1).
-			const bool keep = pub_ && live_reads();
-			if (!keep) {
-				b->lane.truncate(mark_.lane);  // the rejected records and their document copies
-				b->bytes = mark_.bytes;
-			}
-			b->order.rewind(mark_.records);
-			b->docs = mark_.docs;
-		}
-	}
+	void rollback();
 
 	// Removes a live copy a newer record or tombstone supersedes. In a buffer nothing changes: the
 	// newer record shadows it (D6). In a segment it is a pending delete, applied at the freeze.
-	void remove_copy(const copy& c) {
-		if (c.where != copy::segment) { return; }
-		auto& s = *segs_[c.at];
-		buffer& b = *wb_;
-		assert(s.ref.id < (std::uint64_t(1) << 32));
-		reserve_undo(2);  // each step is logged before the change it undoes can fail
-		b.pending.push_back({s.ref.id, c.ord});
-		undo_.push_back({undo_step::pending});
-		b.pending_keys.insert(pending_key(s.ref.id, c.ord));
-		undo_.push_back({undo_step::segment_dirty, {}, c.at, {}, 0, {}, s.deletes_dirty});
-		s.deletes_dirty = true;  // its deleted set changes at the next freeze
-	}
+	void remove_copy(const copy& c);
 
 	// Appends a record and points its key's slot, and its docid's when that map exists, at it:
 	// the record is complete before either store (WB-9). A tombstone carries only its key.
-	wbuf::ref_t push_record(buffer& b, std::uint64_t docid, std::uint64_t version, const document* doc, std::string_view key, bool tomb, bool by_docid = false) {
-		const std::uint32_t kh = key.empty() ? 0 : index_detail::key_hash(key);
-		wbuf::version_map::place kp;
-		if (!key.empty()) { kp = b.keys.locate(kh, [&](wbuf::ref_t q) { return std::string_view(b.lane.at(q).key()) == key; }); }
-		wbuf::ref_t prev = wbuf::no_ref;
-		if (!key.empty()) {
-			prev = wbuf::version_map::ref_of(kp);
-		} else if (b.docids.built()) {
-			prev = probe_docid(b, docid);
-		}
-		// A replace_docid reserves the docid prev field; it names the docid's record when that is
-		// not prev (D3, WB-21). Its map exists: writable_buffer built it.
-		wbuf::ref_t dprev = wbuf::no_ref;
-		std::uint8_t flags = tomb ? record::tombstone_flag : 0;
-		if (by_docid) {
-			flags |= record::docid_prev_flag;
-			if (const wbuf::ref_t d = probe_docid(b, docid); d != prev) { dprev = d; }
-		}
-		std::uint32_t ordinal = 0;
-		if (inverting() && !tomb) {
-			flags |= record::ordinal_flag;
-			ordinal = std::uint32_t((b.inv ? b.inv->buf.doc_count() : 0) + pending_docs_.size());
-		}
-		// The record keeps the key and the stored bytes in itself; a document with a part the segment
-		// writer reads beyond them, or one past a chunk, is held whole (the record's fallback).
-		const std::uint32_t pos = b.transactions + 1;
-		const wbuf::ref_t r = [&] {
-			if (tomb || inverting()) {
-				return record::emplace(b.lane, docid, version, pos, prev, flags, dprev, ordinal, true, key, {}, [&] {
-					document d;
-					d.key.assign(key);
-					return d;
-				});
-			}
-			std::optional<document> buffered;  // the document as the buffer keeps it, when a hook rewrites a part
-			if (has_buffer_hooks()) {
-				buffered = *doc;
-				for_each_entry<Layout>([&]<class E>(std::type_identity<E>) {
-					if constexpr (requires(typename E::part& p) { E::buffered(p); }) { E::buffered(static_cast<typename E::part&>(*buffered)); }
-					// A part's references become ids: the buffer stores what the transaction resolved.
-					if constexpr (requires(typename E::part& p, const field_resolution& r) { E::resolve(p, r); }) {
-						if (fields_res_) { E::resolve(static_cast<typename E::part&>(*buffered), *fields_res_); }
-					}
-				});
-			}
-			const document& src = buffered ? *buffered : *doc;
-			return record::emplace(b.lane, docid, version, pos, prev, flags, dprev, ordinal, inline_parts(src), src.key, stored_bytes(src), [&] { return buffered ? std::move(*buffered) : document(*doc); });
-		}();
-		reserve_undo(2);  // so logging the slots below cannot throw after a store
-		if (!key.empty()) {
-			b.keys.store(kp, kh, r);
-			undo_.push_back({undo_step::key_slot, kp});
-		}
-		if (b.docids.built()) { undo_.push_back({undo_step::docid_slot, store_docid(b, r)}); }
-		b.order.push_back(wbuf::make_entry(b.lane.at(r).key(), r));
-		if (!tomb) { ++b.docs; }
-		const record& x = b.lane.at(r);
-		if (x.is_whole()) {  // what a whole record holds beyond the lane
-			assert(doc_bytes(x.whole_document()) >= x.stride());
-			b.bytes += doc_bytes(x.whole_document()) - x.stride();
-		}
-		return r;
-	}
+	wbuf::ref_t push_record(buffer& b, std::uint64_t docid, std::uint64_t version, const document* doc, std::string_view key, bool tomb, bool by_docid = false);
 
 	// Room for `n` more undo steps, grown geometrically: a push after it cannot throw.
-	void reserve_undo(std::size_t n) {
-		if (undo_.capacity() - undo_.size() < n) { undo_.reserve(std::max(undo_.capacity() * 2, undo_.size() + n)); }
-	}
+	void reserve_undo(std::size_t n);
 
-	void note_docid_only(buffer& b) {
-		const std::uint64_t at = b.base + b.transactions + 1, was = b.first_docid_only.load(std::memory_order_relaxed);
-		if (was <= at) { return; }
-		undo_.push_back({undo_step::first_docid_only, {}, 0, {}, was});
-		b.first_docid_only.store(at, std::memory_order_release);
-	}
+	void note_docid_only(buffer& b);
 
-	void bump_last_docid(std::uint64_t docid) {
-		if (docid <= cur_.last_docid) { return; }
-		undo_.push_back({undo_step::last_docid, {}, 0, {}, cur_.last_docid});
-		cur_.last_docid = docid;
-	}
+	void bump_last_docid(std::uint64_t docid);
 
 	// The core's stage-1 context: whether the index is keyed, and the transaction's field resolution.
 	validate_context context() const { return {bool(cur_.configured & format::bit::keys), fields_res_}; }
@@ -4783,177 +2577,9 @@ private:
 	// The active buffer, ready for the transaction: created at the first write, its maps sized so
 	// no growth moves a slot the undo log names, its docid map built when the transaction
 	// addresses a docid or writes a keyless document.
-	buffer& writable_buffer(const transaction& t) {
-		if (!wb_) { wb_ = std::make_shared<buffer>(visible_, opts_.lane_chunks_cap); }
-		buffer& b = *wb_;
-		mark_ = {b.order.size(), b.docs, b.bytes, b.lane.tell()};  // before anything that can throw: a rollback restores it
-		bool docids = false;
-		for (const auto& o : t.ops) {
-			const bool writes = o.type == operation::add || o.type == operation::replace_key || o.type == operation::replace_docid;
-			docids = docids || o.type == operation::replace_docid || o.type == operation::delete_docid || (writes && o.doc.key.empty());
-		}
-		b.keys.reserve(2 * t.ops.size());
-		if (docids) { build_docids(b); }
-		if (b.docids.built()) { b.docids.reserve(2 * t.ops.size()); }
-		return b;
-	}
+	buffer& writable_buffer(const transaction& t);
 
-	verdict evaluate(const transaction& t) {
-		verdict v;
-		buffer& b = writable_buffer(t);
-		if (t.expected_schema && *t.expected_schema != cur_.schema_version) {
-			v.result = verdict::schema_conflict;
-			v.current_version = cur_.schema_version;
-			return v;
-		}
-		// The fields (D2): the host's mark first, then each declaration by name, then the resolution
-		// the parts' references are checked against.
-		if (t.expected_fields) {
-			const auto chain = fields_.chain_at(t.expected_fields->size);
-			if (!chain || *chain != t.expected_fields->chain) {
-				v.result = verdict::fields_conflict;
-				v.current_fields = fields_.mark();
-				return v;
-			}
-		}
-		std::vector<std::uint32_t> declared_ids;
-		declared_ids.reserve(t.fields.size());
-		bool logged = false;
-		for (std::size_t i = 0; i < t.fields.size(); ++i) {
-			const field_declaration& d = t.fields[i];
-			auto refuse = [&] {
-				v.result = verdict::invalid;
-				v.field = i;
-				return v;
-			};
-			if (field_problem(d)) { return refuse(); }
-			if (const auto id = fields_.find(d.name)) {
-				if (fields_[*id] != d) { return refuse(); }  // a different declaration of a known name
-				declared_ids.push_back(*id);
-				continue;
-			}
-			// One key field, in a keyed index (D7).
-			if (d.role == field_role::key && (!(cur_.configured & format::bit::keys) || fields_.key_field())) { return refuse(); }
-			if (!logged) {
-				undo_.push_back({undo_step::fields, {}, fields_.size()});  // logged before the table changes
-				logged = true;
-			}
-			declared_ids.push_back(fields_.append(d));
-		}
-		const field_resolution resolution{declared_ids, t.expected_fields ? t.expected_fields->size : 0, fields_.key_field()};
-		pending_declared_ = declared_ids;
-		pending_known_ = resolution.known;
-		pending_key_field_ = resolution.key;
-		struct resolution_scope {
-			const field_resolution*& slot;
-			~resolution_scope() { slot = nullptr; }
-		} resolution_guard{fields_res_};
-		fields_res_ = &resolution;
-		for (std::size_t i = 0; i < t.ops.size(); ++i) {
-			const operation& o = t.ops[i];
-			v.op = i;
-			auto reject = [&](verdict::outcome why, std::uint64_t current = 0) {
-				v.result = why;
-				v.current_version = current;
-				return v;
-			};
-			switch (o.type) {
-			case operation::set_meta:
-			case operation::delete_meta: {
-				if (o.meta_key.starts_with(files::reserved_meta_prefix)) { return reject(verdict::invalid); }  // the engine's (F20)
-				undo_step u{undo_step::meta};
-				u.key = o.meta_key;
-				u.prev_dirty = meta_since_.count(o.meta_key) != 0;
-				if (auto it = meta_.find(o.meta_key); it != meta_.end()) { u.prev_meta = it->second; }
-				undo_.push_back(std::move(u));
-				if (o.type == operation::set_meta) {
-					meta_[o.meta_key] = o.meta_value;
-				} else {
-					meta_.erase(o.meta_key);
-				}
-				meta_since_.insert(o.meta_key);  // the change list's key (D3)
-				continue;
-			}
-			default:
-				break;
-			}
-			const bool writes = o.type == operation::add || o.type == operation::replace_key || o.type == operation::replace_docid;
-			bool key_valid = true;
-			std::optional<std::string_view> doc_key;  // into the operation, which outlives stage 2
-			if (writes) {
-				if (!valid(o.doc)) { return reject(verdict::invalid); }
-				doc_key = key_of(o.doc, key_valid);
-				if (!key_valid) { return reject(verdict::invalid); }
-			}
-			// The key the operation addresses and its live copy.
-			std::optional<std::string_view> key;
-			if (o.type == operation::replace_key || o.type == operation::delete_key) {
-				if (!(cur_.configured & format::bit::keys) || o.key.empty()) { return reject(verdict::invalid); }
-				key = o.key;
-				if (writes && doc_key != key) { return reject(verdict::invalid); }
-			} else if (writes) {
-				key = doc_key;
-			}
-			copy by_key;
-			if (key) { by_key = lookup_key(*key); }
-			copy by_docid;
-			if (o.type == operation::replace_docid || o.type == operation::delete_docid) {
-				if (o.docid == 0) { return reject(verdict::invalid); }
-				by_docid = locate_docid(o.docid);
-				// A key and a docid naming different live documents reject.
-				if (by_key && by_docid && by_key.docid != o.docid) { return reject(verdict::invalid); }
-				if (by_key && !by_docid) { return reject(verdict::invalid); }
-			}
-			// The current version of the addressed document.
-			const copy& target = by_key ? by_key : by_docid;
-			const std::uint64_t current = target.version;
-			const bool exists = bool(target);
-			if (o.type == operation::add && exists) { return reject(verdict::version_conflict, current); }
-			if (o.expected_version) {
-				// A version belongs to a key: a conditional operation without one is invalid.
-				if (!key) { return reject(verdict::invalid); }
-				if (*o.expected_version == 0 ? exists : (!exists || *o.expected_version != current)) { return reject(verdict::version_conflict, current); }
-			}
-			// The superseded copy's key, when known: a tombstone for it shadows the copy (D6).
-			const std::string_view old_key = by_key ? *key : key_of_copy(target);
-			// A segment copy found by docid alone: readers at or above this position check docids (WB-22).
-			if (exists && target.where == copy::segment && !by_key) { note_docid_only(b); }
-			if (o.type == operation::delete_key || o.type == operation::delete_docid) {
-				if (exists) {
-					remove_copy(target);
-					push_record(b, target.docid, target.version, nullptr, old_key, true);
-					v.docids.push_back(target.docid);
-				} else {
-					v.docids.push_back(0);
-				}
-				v.versions.push_back(0);
-				continue;
-			}
-			// add or replace: the docid kept, given, or assigned.
-			std::uint64_t docid;
-			if (o.type == operation::replace_docid) {
-				docid = o.docid;
-			} else if (by_key) {
-				docid = by_key.docid;
-			} else {
-				docid = cur_.last_docid + 1;
-			}
-			if (exists) {
-				remove_copy(target);
-				if (!old_key.empty() && (!key || old_key != *key)) { push_record(b, target.docid, target.version, nullptr, old_key, true); }
-			}
-			// A version belongs to a key: a document without one has version 0 (F9).
-			const std::uint64_t version = !key ? 0 : exists ? current + 1 : 1;
-			bump_last_docid(docid);
-			const std::string_view new_key = key ? std::string_view(o.doc.key) : std::string_view();
-			push_record(b, docid, version, &o.doc, new_key, false, o.type == operation::replace_docid);
-			if (inverting()) { pending_docs_.push_back({docid, version, new_key, &o.doc}); }
-			v.docids.push_back(docid);
-			v.versions.push_back(version);
-		}
-		v.op = 0;
-		return v;
-	}
+	verdict evaluate(const transaction& t);
 
 	void set_schema(std::uint64_t version) { cur_.schema_version = version; }
 
@@ -4963,362 +2589,65 @@ private:
 	// at open plus a count, through splitmix64's bijective finalizer, so ids never repeat
 	// within an open and collide across producers only by chance (Lucene's randomId: a random
 	// base, incremented per id).
-	std::array<std::uint8_t, 16> new_identity() {
-		std::uint64_t z = identity_base_ + identities_++;
-		z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
-		z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
-		z ^= z >> 31;
-		std::array<std::uint8_t, 16> id{};
-		std::memcpy(id.data(), &producer_term_, 8);
-		std::memcpy(id.data() + 8, &z, 8);
-		return id;
-	}
+	std::array<std::uint8_t, 16> new_identity();
 	// A seed gives each open its own range, the seed plus 2^32 per generation committed before it,
 	// so a seeded index's reopen never repeats an identity its log holds (I13).
-	void seed_identities() {
-		if (opts_.identity_seed) {
-			identity_base_ = *opts_.identity_seed + ((next_generation_ - 1) << 32);
-		} else {
-			std::random_device rd;
-			identity_base_ = std::uint64_t(rd()) << 32 ^ rd();
-		}
-		identities_ = 0;
-	}
+	void seed_identities();
 
 	// --- the buffer -------------------------------------------------------------------------
 
 	bool inverting() const noexcept { return !std::is_same_v<inverter, detail::no_inverter> && opts_.flush_threads <= 1; }
 	// Buffered documents (tombstones not counted), and every buffered record.
-	std::size_t buffer_size() const noexcept {
-		std::size_t n = 0;
-		for_each_buffer([&](const buffer& b) { n += b.docs; });
-		return n;
-	}
+	std::size_t buffer_size() const noexcept;
 	// Warm's predicate (D10), under the lease: no buffered record, no pending merge, no unsynced
 	// segment, no map_owed turn outstanding.
-	bool warm_quiescent() const noexcept {
-		if (buffered_records() != 0 || !pending_.empty() || map_asked_) { return false; }
-		return std::none_of(segs_.begin(), segs_.end(), [](const auto& s) { return bool(s->unsynced); });
-	}
-	std::size_t buffered_records() const noexcept {
-		std::size_t n = 0;
-		for_each_buffer([&](const buffer& b) { n += b.order.size(); });
-		return n;
-	}
+	bool warm_quiescent() const noexcept;
+	std::size_t buffered_records() const noexcept;
 	std::string_view buffered_stored(const buffer& b, const record& x) const
-		requires(segment::template contains<stored_plugin>())
-	{
-		if (!inverting()) { return x.stored(); }
-		const std::size_t n = b.inv ? b.inv->buf.doc_count() : 0;
-		return x.ordinal() < n ? b.inv->buf.stored(x.ordinal()) : std::string_view(static_cast<const typename stored_plugin::part&>(*pending_docs_[x.ordinal() - n].doc).stored);
-	}
+		requires(segment::template contains<stored_plugin>());
 
 	// Stage 2 for an accepted transaction: its documents into the active writer. Validation
 	// ran in stage 1 (D10), so only memory can fail here, and that fences.
-	void invert_pending() {
-		if (pending_docs_.empty()) { return; }
-		try {
-			auto& inv = wb_->inv;
-			if (!inv) {
-				inv = std::make_unique<active_buffer>();
-				inv->buf.max_run_bytes = max_run_bytes_;
-			}
-			auto& a = *inv;
-			for (const pending_doc& p : pending_docs_) {
-				// An inverter that reads field references takes the transaction's resolution.
-				const field_resolution res{pending_declared_, pending_known_, pending_key_field_};
-				ordinal_t ord;
-				if constexpr (requires { a.buf.add(p.docid, p.version, p.key, *p.doc, res); }) {
-					ord = a.buf.add(p.docid, p.version, p.key, *p.doc, res);
-				} else {
-					ord = a.buf.add(p.docid, p.version, p.key, *p.doc);
-				}
-				if (ord && p.docid <= a.prev_docid) { a.ordered = false; }
-				a.prev_docid = p.docid;
-			}
-		} catch (...) {
-			pending_docs_.clear();
-			fenced_ = true;
-			throw;
-		}
-		pending_docs_.clear();
-	}
+	void invert_pending();
 
 	// Whether the transaction's records fit the active buffer's lane, or an empty one: at most
 	// two per operation (a tombstone and the record), each at the widest stride any of them can take (CR9).
-	bool lane_fits(const transaction& t) const noexcept {
-		std::size_t widest = record::whole_stride(record::widest_flags);
-		for (const auto& o : t.ops) {
-			const std::size_t k = std::max(o.key.size(), o.doc.key.size()), s = stored_bytes(o.doc).size();
-			const std::size_t n = record::inline_stride(record::widest_flags, k, s);
-			// record::emplace holds a record past a chunk whole; one near the edge may be either.
-			widest = std::max(widest, n <= wbuf::min_chunk ? n : record::inline_stride(0, k, s) <= wbuf::min_chunk ? wbuf::min_chunk : 0);
-		}
-		const std::size_t records = 2 * t.ops.size();
-		return wb_ ? wb_->lane.room_for(records, widest) : wbuf::lane<record>(opts_.lane_chunks_cap).room_for(records, widest);
-	}
+	bool lane_fits(const transaction& t) const noexcept;
 	// Whether the transaction's documents fit the active buffer's 32-bit structures.
-	bool fits(const transaction& t) const noexcept {
-		if (!lane_fits(t)) { return false; }  // a full chunk directory freezes (D3)
-		if (!wb_ || !wb_->inv) { return true; }
-		return wb_->inv->buf.fits(t);
-	}
+	bool fits(const transaction& t) const noexcept;
 
 	// Nothing may change a buffer a flush borrows from (core/borrow.hh).
-	void require_buffers_unpinned() const {
-		for_each_buffer([](const buffer& b) { b.lane.require_unpinned(); });
-	}
-	void clear_buffer() {
-		require_buffers_unpinned();
-		wb_.reset();
-		frozen_.clear();
-		pending_docs_.clear();
-	}
+	void require_buffers_unpinned() const;
+	void clear_buffer();
 
 	// --- freeze and flush (D8) --------------------------------------------------------------
 
 	// Seals the active buffer at a transaction boundary: it becomes the newest frozen buffer, and
 	// its pending deletes go to the segments' live bits, copied on write (D6). O(1) in records.
-	void freeze() {
-		if (holds_rejected()) { wb_.reset(); }  // views that hold it keep it alive
-		if (!wb_ || wb_->order.size() == 0) { return; }
-		assert(pending_docs_.empty());
-		apply_pending();
-		frozen_.push_back(std::move(wb_));
-	}
+	void freeze();
 	// The active buffer's pending deletes set in their segments' bits (D6, D8).
-	void apply_pending() {
-		if (!wb_) { return; }
-		if (!wb_->pending.empty()) { await_log(); }
-		buffer& b = *wb_;
-		for (const auto& [id, ord] : b.pending) {
-			const auto it = std::lower_bound(segs_.begin(), segs_.end(), id, [](const auto& s, std::uint64_t x) { return s->ref.id < x; });
-			if (it == segs_.end() || (*it)->ref.id != id) { fence("strata: freeze: a pending delete names no segment"); }
-			auto& s = **it;
-			if (!s.deleted.test(ord)) {
-				deleted_since_.emplace_back(id, ord);  // the change list's one site (manifest-log D3)
-				s.deleted.set(ord);  // a clone when a view shares them (shared-reader D3)
-				++s.dead;
-			}
-			s.deletes_dirty = true;
-		}
-		b.pending.clear();
-		b.pending_keys.clear();
-	}
+	void apply_pending();
 
 	// Writes the buffers as new segments: a freeze, then each frozen buffer oldest first, each
 	// installed as it is written. Each run's memory is charged to the budget on its own permit,
 	// settled when its segment is published (D17); the sort's on another, settled when the flush
 	// ends. A failure keeps the frozen buffers unwritten for the next flush.
-	void flush() {
-		await_log();
-		freeze();
-		while (!frozen_.empty()) {
-			const std::size_t first = segs_.size();
-			if (inverting()) {
-				flush_active(*frozen_.front());
-			} else {
-				flush_documents(*frozen_.front());
-			}
-			install_flushed(first);
-		}
-		if (permit_) { permit_.settle(); }
-		reserved_ = 0;  // the buffer's bytes are on disk now
-		settle_storage();
-	}
+	void flush();
 
 	// A flush's install (D6, WB-16): the oldest frozen buffer leaves, and the new segments (from
 	// segs_[first] on) lose every copy a newer buffer supersedes, by key through its key map, and
 	// a keyless document by docid through its docid map.
-	void install_flushed(std::size_t first) {
-		require_buffers_unpinned();
-		frozen_.erase(frozen_.begin());
-		if (!frozen_.empty() || (wb_ && wb_->order.size())) {
-			for (std::size_t i = first; i < segs_.size(); ++i) {
-				auto& s = *segs_[i];
-				const auto& core = s.mapped().core();  // the flush's own segment: its body is here
-				const auto& keys = s.mapped().template get<keys_plugin>();
-				const auto drop = [&](ordinal_t o) {
-					if (s.deleted.test(o)) { return; }
-					s.deleted.set(o);
-					++s.dead;
-					s.deletes_dirty = true;
-				};
-				for (auto r = keys.range({}); r.valid(); r.next()) {
-					bool gone = false;
-					for_each_buffer([&](const buffer& b) { gone = gone || find_key_in(b, r.key()) != wbuf::no_ref; });
-					if (gone) { drop(r.ordinal()); }
-				}
-				// A newer record with the docid replaced or deleted the document, keyless or not.
-				for (ordinal_t o = 0; o < core.doc_count(); ++o) {
-					bool gone = false;
-					for_each_buffer([&](const buffer& b) { gone = gone || (b.docids.built() && find_docid_in(b, core.docid(o)) != wbuf::no_ref); });
-					if (gone) { drop(o); }
-				}
-			}
-		}
-		changed();
-	}
+	void install_flushed(std::size_t first);
 
 	// One segment from an inverting buffer: its postings as they are when its docids increase
 	// and every document is its docid's newest, else rebuilt in docid order without the others.
-	void flush_active(const buffer& b) {
-		if (!b.inv || !b.inv->buf.doc_count()) { return; }
-		auto& a = *b.inv;
-		flush_charge run(opts_.budget);  // the flush's sort, scratch, and output, until published
-		std::vector<ordinal_t> order;
-		for (std::size_t i = 0; i < b.order.size(); ++i) {
-			if (newest(b, b.order[i].ref)) { order.push_back(b.lane.at(b.order[i].ref).ordinal()); }
-		}
-		const bool as_is = order.size() == a.buf.doc_count() && a.ordered;
-		if (as_is) {
-			order.clear();
-		} else {
-			std::sort(order.begin(), order.end(), [&](ordinal_t x, ordinal_t y) { return a.buf.docid(x) < a.buf.docid(y); });
-			run.grow(order.capacity() * sizeof(ordinal_t));
-			if (order.empty()) { return; }
-		}
-		const std::uint64_t id = cur_.next_segment++;  // never reused, even after a failure
-		const std::array<std::uint8_t, 16> header = new_identity();
-		// The segment goes to its file as it is written. ENOSPC removes the partial file and
-		// keeps the buffer, as write_unsynced does.
-		const std::string name = index_detail::segment_name(id);
-		auto file = io_->create_exclusive(name);
-		index_detail::file_sink sink(*file);
-		try {
-			index_detail::io_spill positions(*io_, index_detail::spill_name(id), &run);
-			a.buf.flush(header, order, builder_settings{&run, nullptr, configured_structures(), segment_policy<Layout>::stored_block, segment_policy<Layout>::stored_codec}, sink, positions);
-			sink.finish();
-		} catch (const std::system_error& e) {
-			if (e.code().value() != ENOSPC) { throw; }
-			file.reset();
-			io_->remove(name);
-			sync_dir();
-			throw space_error(e.code(), e.what());
-		}
-		track(name, sink.size());
-		files::segment_ref ref;
-		ref.id = id;
-		ref.identity = header;
-		ref.size = sink.size();
-		ref.doc_count = as_is ? a.buf.doc_count() : order.size();
-		segs_.emplace_back(streamed_segment(std::move(file), ref));
-	}
+	void flush_active(const buffer& b);
 
 	// More than one flush thread, or a layout without an inverter: a frozen buffer's newest
 	// records in contiguous runs, one segment each, inverted and encoded in parallel (D18). Runs
 	// are of docids, or of keys when the segments are key-ordered (format-14-kv D1a): keyed
 	// documents by key, then keyless ones by docid.
-	void flush_documents(buffer& b) {
-		// The owner's lease from before `docs` points into the buffer to the end of the flush.
-		const auto owner = b.lane.pin();
-		flush_charge sorting(opts_.budget);
-		std::vector<const record*> docs;
-		for (std::size_t i = 0; i < b.order.size(); ++i) {
-			if (newest(b, b.order[i].ref)) { docs.push_back(&b.lane.at(b.order[i].ref)); }
-		}
-		sorting.grow(docs.capacity() * sizeof(docs[0]));
-		if (!docs.empty()) {
-			if (configured_structures() & format::bit::index_sort) {
-				std::sort(docs.begin(), docs.end(), [](const record* a, const record* c) {
-					const std::string_view x = a->key(), y = c->key();
-					if (x.empty() != y.empty()) { return y.empty(); }
-					return x.empty() ? a->docid < c->docid : x < y;
-				});
-			} else {
-				std::sort(docs.begin(), docs.end(), [](const record* a, const record* c) { return a->docid < c->docid; });
-			}
-			// Contiguous runs, one segment each, inverted and encoded in parallel (D18).
-			const std::size_t runs = std::max<std::size_t>(1, std::min(opts_.flush_threads, docs.size() / std::max<std::size_t>(1, opts_.flush_min_docs)));
-			std::vector<std::uint64_t> ids(runs);
-			std::vector<std::array<std::uint8_t, 16>> identities(runs);
-			for (std::size_t k = 0; k < runs; ++k) {
-				ids[k] = cur_.next_segment++;  // never reused, even after a failure
-				identities[k] = new_identity();
-			}
-			// Each run streams to a file of its own, created here and written by the run's thread.
-			std::vector<std::string> names(runs);
-			std::vector<std::unique_ptr<kronuz::journal::File>> files(runs);
-			std::vector<std::uint64_t> sizes(runs);
-			std::vector<std::exception_ptr> errors(runs);
-			std::vector<flush_charge> charges(runs);  // each run's, held until its segment is published
-			auto stream = [&](std::size_t k) {
-				try {
-					const std::size_t begin = docs.size() * k / runs, end = docs.size() * (k + 1) / runs;
-					flush_charge charge(opts_.budget);  // on the run's own thread
-					{
-						// The writer's views into the buffer (stored records, keys) live as long as it does,
-						// and the lease, declared before it, outlives it: the buffer cannot change under them.
-						auto lease = b.lane.pin();
-						basic_segment_writer<Layout> w;
-						if (opts_.budget) { w.memory = &charge; }
-						w.structures = configured_structures();
-						w.borrow_stored(lease);
-						w.reserve(end - begin, 0);  // the stored bytes stay in the buffer
-						for (std::size_t i = begin; i < end; ++i) {
-							const record* x = docs[i];
-							if constexpr (inline_layout()) {
-								if (!x->is_whole()) {
-									w.add_stored_view({x->docid, x->version, x->key()}, x->stored());
-									continue;
-								}
-							}
-							w.add({x->docid, x->version, x->key()}, x->whole_document(), true);
-						}
-						index_detail::file_sink sink(*files[k]);
-						index_detail::io_spill positions(*io_, index_detail::spill_name(ids[k]), &charge);
-						w.flush(identities[k], sink, positions);
-						sink.finish();
-						sizes[k] = sink.size();
-					}
-					charge.shrink(charge.held());  // the writer's buffers are gone
-					charges[k] = std::move(charge);
-				} catch (...) { errors[k] = std::current_exception(); }
-			};
-			// Every run's file is written before any segment is published: a write that fails
-			// (ENOSPC) publishes none and removes the files written, so the retry has their
-			// space and the buffer it keeps holds no published document.
-			std::exception_ptr failure;
-			try {
-				for (std::size_t k = 0; k < runs; ++k) {
-					names[k] = index_detail::segment_name(ids[k]);
-					files[k] = io_->create_exclusive(names[k]);
-				}
-				std::vector<std::thread> threads;
-				for (std::size_t k = 1; k < runs; ++k) { threads.emplace_back(stream, k); }
-				stream(0);
-				for (auto& t : threads) { t.join(); }
-				for (auto& e : errors) { if (e) { std::rethrow_exception(e); } }
-			} catch (...) {
-				failure = std::current_exception();
-			}
-			if (failure) {
-				bool removed = false;
-				for (std::size_t k = 0; k < runs; ++k) {
-					if (!files[k]) { continue; }
-					files[k].reset();
-					try { remove_file(names[k]); removed = true; } catch (...) {}  // best effort: the failure is the news
-				}
-				if (removed) { try { sync_dir(); } catch (...) {} }
-				try {
-					std::rethrow_exception(failure);
-				} catch (const std::system_error& e) {
-					if (e.code().value() != ENOSPC) { throw; }
-					throw space_error(e.code(), e.what());
-				}
-			}
-			for (std::size_t k = 0; k < runs; ++k) { track(names[k], sizes[k]); }
-			for (std::size_t k = 0; k < runs; ++k) {
-				files::segment_ref ref;
-				ref.id = ids[k];
-				ref.identity = identities[k];
-				ref.size = sizes[k];
-				ref.doc_count = docs.size() * (k + 1) / runs - docs.size() * k / runs;
-				segs_.emplace_back(streamed_segment(std::move(files[k]), ref, &charges[k]));
-				charges[k].settle();
-			}
-		}
-	}
+	void flush_documents(buffer& b);
 
 	// --- commit -----------------------------------------------------------------------------
 
@@ -5327,16 +2656,7 @@ private:
 	// first map failed its checks (corrupt_segment, until heal()), leaves the index as refresh()
 	// leaves it: flushed segments and installed merges in segs_, nothing durable, nothing fenced.
 	// The facts and bodies installed so far are true and stay.
-	void prepare_commit() {
-		for (const auto& s : segs_) {
-			if (s->dead == s->ref.doc_count) { continue; }  // commit_files drops it
-			if (!s->facts_known) {
-				s->learn_facts();
-			} else if (s->deletes_dirty || s->failed()) {
-				(void)s->seg();
-			}
-		}
-	}
+	void prepare_commit();
 
 	// A segment's live figures at the commit's target, and the ordinals the change list newly
 	// deleted in it when the head holds it (D3).
@@ -5347,136 +2667,18 @@ private:
 	// The head's figures less the change list's ordinals for a segment the head holds (costing
 	// those ordinals), else the record's own for a segment born since the head, whose entry
 	// carries its whole deleted set.
-	std::vector<live_figures> figures_now() {
-		std::sort(deleted_since_.begin(), deleted_since_.end());
-		std::vector<live_figures> out(segs_.size());
-		std::size_t j = 0;
-		for (std::size_t i = 0; i < segs_.size(); ++i) {
-			const open_segment& s = *segs_[i];
-			const std::uint64_t id = s.ref.id;
-			while (j < deleted_since_.size() && deleted_since_[j].first < id) { ++j; }
-			live_figures& f = out[i];
-			const auto head = m_.segments.find(id);
-			if (head == m_.segments.end()) {
-				// An installed record keeps its deletes and live length and has no body (D9).
-				f.count = s.ref.doc_count - s.dead;
-				f.length = !s.dead ? s.total_length : s.deletes_dirty ? live_length(s) : s.ref.live_length;
-				continue;
-			}
-			f.count = head->second.live_count;
-			f.length = head->second.live_length;
-			for (; j < deleted_since_.size() && deleted_since_[j].first == id; ++j) { f.fresh.push_back(deleted_since_[j].second); }
-			if (!f.fresh.empty()) {
-				const segment& sg = s.mapped();  // prepare_commit mapped it (D9)
-				for (std::uint64_t o : f.fresh) { f.length -= std::min<std::uint64_t>(f.length, sg.length(o)); }
-				f.count -= std::min<std::uint64_t>(f.count, f.fresh.size());
-			}
-			if (f.count != s.ref.doc_count - s.dead) { fence("strata: commit: a segment's deletes are not in the change list"); }
-		}
-		return out;
-	}
+	std::vector<live_figures> figures_now();
 	// The scalars the commit makes durable.
-	files::log_detail::scalar_values target_scalars(const std::vector<live_figures>& fig) const {
-		namespace sc = files::log_scalar;
-		files::log_detail::scalar_values v{};
-		v[sc::revision] = m_.revision + (applied_since_commit_ ? 1 : 0);
-		v[sc::last_docid] = cur_.last_docid;
-		v[sc::next_segment] = cur_.next_segment;
-		v[sc::applied_index] = cur_.applied.index;
-		v[sc::applied_count] = cur_.applied.applied;
-		v[sc::schema_version] = cur_.schema_version;
-		v[sc::configured] = cur_.configured;
-		v[sc::mask] = cur_.configured;
-		for (std::size_t i = 0; i < segs_.size(); ++i) {
-			const open_segment& s = *segs_[i];
-			v[sc::mask] |= s.structures;
-			v[sc::min_version] = v[sc::min_version] ? std::min<std::uint64_t>(v[sc::min_version], s.version) : s.version;
-			v[sc::max_version] = std::max<std::uint64_t>(v[sc::max_version], s.version);
-			v[sc::doc_count] += s.ref.doc_count;
-			v[sc::total_length] += s.total_length;
-			v[sc::live_count] += fig[i].count;
-			v[sc::live_length] += fig[i].length;
-		}
-		return v;
-	}
-	std::vector<std::uint64_t> target_pins() const {
-		std::vector<std::uint64_t> pins = drop_pins_ ? std::vector<std::uint64_t>{} : m_.pins;
-		if (pending_pin_ && !std::binary_search(pins.begin(), pins.end(), *pending_pin_)) { pins.insert(std::upper_bound(pins.begin(), pins.end(), *pending_pin_), *pending_pin_); }
-		if (pending_unpin_) { std::erase(pins, *pending_unpin_); }
-		return pins;
-	}
+	files::log_detail::scalar_values target_scalars(const std::vector<live_figures>& fig) const;
+	std::vector<std::uint64_t> target_pins() const;
 	// A segment's entry: its record's facts, the figures, and its deleted set from its bits (D42).
-	static files::log_segment entry_of(const open_segment& s, const live_figures& f) {
-		files::log_segment e;
-		e.id = s.ref.id;
-		e.identity = s.ref.identity;
-		e.size = s.ref.size;
-		e.footer_crc = s.ref.footer_crc;
-		e.doc_count = s.ref.doc_count;
-		e.live_count = f.count;
-		e.live_length = f.length;
-		e.deleted = files::log_deleted::of_words(s.deleted.data(), s.deleted.size(), s.ref.doc_count);
-		e.values_generation = s.ref.values_generation;
-		e.attributes = s.ref.attributes;
-		return e;
-	}
+	static files::log_segment entry_of(const open_segment& s, const live_figures& f);
 	// The edit from the head to the current state (D3): scalars that differ, pins, segments removed
 	// and added, the change list's deletes in segments the head holds, the keys it touched whose
 	// value differs from the head's, and the declarations past the head's table.
-	files::log_edit edit_now(const files::log_detail::scalar_values& target, const std::vector<std::uint64_t>& pins, const std::vector<live_figures>& fig) const {
-		files::log_edit e;
-		e.generation = m_.generation + 1;
-		if (attributes_owed_ && *attributes_owed_ != m_.attributes) { e.attributes = *attributes_owed_; }
-		const auto head = files::log_detail::scalars_of(m_);
-		for (unsigned i = 0; i < files::log_scalar::count; ++i) {
-			if (target[i] != head[i]) {
-				e.scalars |= 1u << i;
-				e.values[i] = target[i];
-			}
-		}
-		std::set_difference(pins.begin(), pins.end(), m_.pins.begin(), m_.pins.end(), std::back_inserter(e.pins_added));
-		std::set_difference(m_.pins.begin(), m_.pins.end(), pins.begin(), pins.end(), std::back_inserter(e.pins_removed));
-		for (const auto& [id, seg] : m_.segments) {
-			const auto it = std::lower_bound(segs_.begin(), segs_.end(), id, [](const auto& s, std::uint64_t x) { return s->ref.id < x; });
-			if (it == segs_.end() || (*it)->ref.id != id) { e.segments_removed.push_back(id); }
-		}
-		for (std::size_t i = 0; i < segs_.size(); ++i) {
-			const open_segment& s = *segs_[i];
-			if (!m_.segments.count(s.ref.id)) {
-				e.segments_added.push_back(entry_of(s, fig[i]));
-			} else if (!fig[i].fresh.empty()) {
-				e.deletes.push_back({s.ref.id, fig[i].fresh, fig[i].count, fig[i].length});
-			}
-		}
-		for (const auto& k : meta_since_) {
-			const auto c = meta_.find(k);
-			const auto d = m_.metadata.find(k);
-			if (c != meta_.end()) {
-				if (d == m_.metadata.end() || d->second != c->second) { e.metadata_set.emplace_back(k, c->second); }
-			} else if (d != m_.metadata.end()) {
-				e.metadata_removed.push_back(k);
-			}
-		}
-		if (fields_.size() > m_.fields.size()) {
-			e.fields_from = m_.fields.size();
-			for (std::size_t i = m_.fields.size(); i < fields_.size(); ++i) { e.fields.push_back(fields_[i]); }
-		}
-		return e;
-	}
+	files::log_edit edit_now(const files::log_detail::scalar_values& target, const std::vector<std::uint64_t>& pins, const std::vector<live_figures>& fig) const;
 	// The current state whole, as a rollover's snapshot at generation `g`.
-	files::log_state state_now(std::uint64_t g, const files::log_detail::scalar_values& target, std::vector<std::uint64_t> pins, const std::vector<live_figures>& fig) const {
-		files::log_state c;
-		c.uuid = cur_.uuid;
-		c.generation = g;
-		for (unsigned i = 0; i < files::log_scalar::count; ++i) { c.*files::log_scalars[i] = target[i]; }
-		c.pins = std::move(pins);
-		for (std::size_t i = 0; i < segs_.size(); ++i) { c.segments.emplace_hint(c.segments.end(), segs_[i]->ref.id, entry_of(*segs_[i], fig[i])); }
-		c.metadata = meta_;
-		c.fields = fields_;
-		c.attributes = attributes_owed_ ? *attributes_owed_ : m_.attributes;
-		files::recount(c);
-		return c;
-	}
+	files::log_state state_now(std::uint64_t g, const files::log_detail::scalar_values& target, std::vector<std::uint64_t> pins, const std::vector<live_figures>& fig) const;
 
 	// Makes the current state durable as the next generation (manifest-log D4, D5, D7). The new
 	// segment files and the directory are ordered first, only when the commit wrote one; then the
@@ -5485,168 +2687,31 @@ private:
 	// state is written as a fresh log. An unforced rollover whose temporary meets ENOSPC appends
 	// instead and owes the rollover to the next commit (D8), and never past the reader's 2x bound.
 	// ENOSPC leaves the index as it was; any other failure fences.
-	void commit_files() {
-		// A segment whose documents are all deleted leaves without a merge; retention frees
-		// its files.
-		if (std::erase_if(segs_, [](const auto& s) { return s->dead == s->ref.doc_count; })) { changed(); }
-		for (const auto& s : segs_) {
-			if (!s->facts_known) { fence("strata: commit: a segment's facts are unknown"); }
-		}
-		// The log lists segments by increasing id, and its reader refuses any other order: a
-		// regression fences before anything is written, whichever caller commits.
-		for (std::size_t i = 1; i < segs_.size(); ++i) {
-			if (segs_[i]->ref.id <= segs_[i - 1]->ref.id) { fence("strata: commit: segments out of id order"); }
-		}
-		std::vector<kronuz::journal::File*> files;
-		for (auto& s : segs_) {
-			if (s->unsynced) { files.push_back(s->unsynced.get()); }
-		}
-		const std::vector<live_figures> fig = figures_now();
-		const auto target = target_scalars(fig);
-		std::vector<std::uint64_t> pins = target_pins();
-		reopen_log();
-		const bool forced = rollover_owed_ || !appender_;
-		std::optional<files::log_edit> edit;
-		std::string record;
-		bool roll = forced;
-		files::log_checked checked;
-		if (!forced) {
-			edit = edit_now(target, pins, fig);
-			try {
-				checked = files::check_edit(m_, *edit);  // the writer's edit is held to the reader's checks
-			} catch (const corrupt_index& e) {
-				fence(std::string("strata: commit: an edit the log refuses: ") + e.what());
-			}
-			record = files::encode_edit(*edit);
-			roll = !files::log_within(checked.after, appender_->end_after(record.size()), log_edits_ + 1);
-		}
-		if (!roll || !roll_over(files, state_now(std::max(next_generation_, m_.generation + 1), target, pins, fig), forced)) {
-			// The writer holds the reader's bound: past it, ENOSPC is the caller's, not an edit.
-			if (roll && !files::log_within(checked.after, appender_->end_after(record.size()), log_edits_ + 1, 2)) {
-				throw space_error(std::make_error_code(std::errc::no_space_on_device), "strata: commit: no space for the manifest log's rollover");
-			}
-			append_edit(files, *edit, record);
-		}
-		// Durable: the index's state follows the head, or the writer fences (SR4).
-		durable([&] {
-			for (std::size_t i = 0; i < segs_.size(); ++i) {
-				segs_[i]->unsynced.reset();
-				segs_[i]->ref.live_count = fig[i].count;  // only the fields a commit changes: a merge reads the others
-				segs_[i]->ref.live_length = fig[i].length;
-				segs_[i]->deletes_dirty = false;
-			}
-			deleted_since_.clear();
-			meta_since_.clear();
-			applied_since_commit_ = 0;
-			pending_pin_.reset();
-			pending_unpin_.reset();
-			drop_pins_ = false;
-			attributes_owed_.reset();
-			kept_files_[m_.generation] = names_of(m_, log_g_);
-		});
-	}
+	void commit_files();
 
 	// A step past which the log's durable state is unknown or ahead of memory: any exception fences,
 	// not only a system error (an allocation failing in a barrier, a rename or the head's replay).
 	template <class F>
-	void durable(F&& f) {
-		try {
-			f();
-		} catch (const index_fenced&) {
-			throw;
-		} catch (const std::exception& e) {
-			fenced_ = true;  // first: the message's allocation may fail too
-			fence(std::string("strata: durability failure: ") + e.what());
-		}
-	}
+	void durable(F&& f);
 
 	// D5: the state as a snapshot under manifest-<g>.tmp, synced at the commit's ordering point with
 	// its new segments, renamed, and the directory synced; the old log stays for retention (D8).
 	// False when an unforced rollover's temporary meets ENOSPC: the next commit owes it.
-	bool roll_over(std::vector<kronuz::journal::File*> files, files::log_state c, bool forced) {
-		const std::uint64_t g = c.generation;
-		next_generation_ = g + 1;  // a failed attempt's name is never reused
-		const std::string name = index_detail::manifest_name(g), tmp = name + ".tmp";
-		const std::string bytes = files::frame_snapshot(c);
-		std::unique_ptr<kronuz::journal::File> log;
-		try {
-			log = write_unsynced(tmp, bytes);
-		} catch (const space_error&) {
-			if (forced) { throw; }
-			rollover_owed_ = true;  // the allowance holds S from now on (D8)
-			return false;
-		}
-		files.push_back(log.get());
-		durable([&] {
-			io_->order_files_and_directory(files);
-			io_->replace(tmp, name);
-			files_.erase(tmp);
-			files_[name] = bytes.size();
-			sync_dir();
-		});
-		// Durable: the new log is the head's.
-		appender_.reset();
-		log_ = std::move(log);
-		appender_.emplace(*log_, c.uuid, g, bytes.size());
-		m_ = std::move(c);
-		log_g_ = g;
-		log_end_ = bytes.size();
-		log_edits_ = 0;
-		rollover_owed_ = false;
-		return true;
-	}
+	bool roll_over(std::vector<kronuz::journal::File*> files, files::log_state c, bool forced);
 
 	// D4: the edit appended at the log's end in one write and synced, after the commit's new
 	// segment files and the directory are ordered. A failed write is truncated back first, so
 	// ENOSPC leaves the index as it was; a failed truncate-back or sync fences, whatever it threw.
 	// The head then replays the edit: any failure there, now that the edit is durable, fences
 	// (SR4's writer half).
-	void append_edit(std::vector<kronuz::journal::File*>& files, const files::log_edit& e, const std::string& record) {
-		// The inherited tail and names go ahead of the edit: one record in flight (D3).
-		if (inherited_owed_) { files.push_back(log_.get()); }
-		if (!files.empty()) { io_->order_files_and_directory(files); }
-		try {
-			appender_->write(record);
-		} catch (const std::system_error& x) {
-			if (x.code().value() == ENOSPC && !appender_->broken()) { throw space_error(x.code(), x.what()); }
-			throw;
-		} catch (const std::exception& x) {
-			if (appender_->broken()) {
-				fenced_ = true;  // first: the message's allocation may fail too
-				fence(std::string("strata: durability failure: ") + x.what());
-			}
-			throw;  // truncated back: the index is as it was
-		}
-		durable([&] { appender_->sync(); });
-		inherited_owed_ = false;  // ordered ahead of the edit, durable with it
-		try {
-			log_end_ = appender_->end();
-			track(index_detail::manifest_name(log_g_), log_end_);
-			files::apply(m_, e);
-		} catch (...) {
-			fenced_ = true;
-			fence("strata: commit: the head cannot follow its durable edit");
-		}
-		++log_edits_;
-	}
+	void append_edit(std::vector<kronuz::journal::File*>& files, const files::log_edit& e, const std::string& record);
 
 	// The log's descriptor, open again after a demotion closed it (cold-tier D10).
-	void reopen_log() {
-		if (appender_ || !log_g_ || rollover_owed_) { return; }
-		log_ = io_->open_existing(index_detail::manifest_name(log_g_));
-		appender_.emplace(*log_, m_.uuid, log_g_, log_end_);
-	}
+	void reopen_log();
 
 	void write_new(const std::string& name, std::string_view bytes) { write_unsynced(name, bytes)->sync(); }
 
-	std::uint64_t live_length(const open_segment& s) const {
-		std::uint64_t n = 0;
-		const segment& sg = s.mapped();  // prepare_commit mapped it (D9)
-		for (ordinal_t o = 0; o < s.ref.doc_count; ++o) {
-			if (!((s.deleted[o >> 6] >> (o & 63)) & 1)) { n += sg.length(o); }
-		}
-		return n;
-	}
+	std::uint64_t live_length(const open_segment& s) const;
 
 	// --- retention --------------------------------------------------------------------------
 
@@ -5656,144 +2721,32 @@ private:
 	// data files and no directory sync: nothing promises an obsolete log's generations open. A kept
 	// generation whose files cannot be read blocks the round, which then queues nothing. With
 	// `data_only` (reclaim()'s pass, D6) it is the same pass.
-	void retain(bool = false) {
-		retain_owed_ = false;
-		retention_blocked_.reset();
-		if (!m_.generation) { return; }  // nothing committed yet
-		std::map<std::uint64_t, bool> keep;  // generation, pinned
-		for (std::uint64_t k = 1; k <= opts_.retained_predecessors && k < m_.generation; ++k) { keep[m_.generation - k] = false; }
-		for (std::uint64_t p : m_.pins) { keep[p] = true; }
-		keep[m_.generation] = true;
-		std::erase_if(kept_files_, [&](const auto& e) { return !keep.count(e.first); });
-		std::set<std::string> referenced;
-		for (const auto& [g, pinned] : keep) {
-			bool blocked = false;
-			const auto* names = kept_files(g, pinned, blocked);
-			if (blocked) {  // a kept generation it cannot read: remove nothing this round
-				retention_blocked_ = g;
-				return;
-			}
-			if (names) { referenced.insert(names->begin(), names->end()); }
-		}
-		// Flushed segments awaiting a commit are on disk but not yet named by a log.
-		for (const auto& s : segs_) { referenced.insert(index_detail::segment_name(s->ref.id)); }
-		// A pending merge's sources stay mapped until it publishes: none is truncated before then.
-		for (const auto& job : pending_) {
-			for (const auto& src : job->sources) { referenced.insert(index_detail::segment_name(src->ref.id)); }
-		}
-		// So do a view's until it is freed (D7): a file a reader maps is never truncated.
-		for_each_view([&](const view& v) {
-			for (const auto& sv : v.views_) { referenced.insert(index_detail::segment_name(sv.id)); }
-		});
-		std::vector<std::string> out;
-		for (const auto& [n, size] : files_) {
-			if (!referenced.count(n) && !queued_.count(n)) { out.push_back(n); }
-		}
-		// A file the open's head dropped leaves only once that head is durable (D4).
-		if (inherited_owed_ && std::any_of(out.begin(), out.end(), [&](const std::string& n) { return inherited(n); })) { sync_inherited(); }
-		for (auto& n : out) {
-			queued_.insert(n);
-			reclaim_.push_back(std::move(n));
-		}
-	}
+	void retain(bool = false);
 	// The files generation `g` names, the log holding it included: cached for a generation this
 	// process made durable, else read from the log on record with the greatest snapshot at or below
 	// `g`, replayed to `g` (D6.8, L3), and cached. Null when no log on record holds it, or when its
 	// log ends before a predecessor (a generation a torn tail skipped); any other failure, or a pin
 	// its log does not reach, sets `blocked`.
-	const std::vector<std::string>* kept_files(std::uint64_t g, bool pinned, bool& blocked) {
-		if (auto it = kept_files_.find(g); it != kept_files_.end()) { return &it->second; }
-		std::optional<std::uint64_t> holder;
-		for (const auto& [n, size] : files_) {
-			if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest && p->a <= g && (!holder || p->a > *holder)) { holder = p->a; }
-		}
-		if (!holder) { return nullptr; }
-		try {
-			auto f = io_->open_existing(index_detail::manifest_name(*holder));
-			const files::log_read lr = files::read_log(index_detail::read_all(*f), *holder, readable(), g);
-			return &(kept_files_[g] = names_of(lr.state, *holder));
-		} catch (const files::generation_not_retained&) {
-			blocked = pinned;
-		} catch (const std::exception&) {
-			blocked = true;
-		}
-		return nullptr;
-	}
-	static std::vector<std::string> names_of(const files::log_state& s, std::uint64_t log) {
-		std::vector<std::string> names{index_detail::manifest_name(log)};
-		for (const auto& [id, seg] : s.segments) { names.push_back(index_detail::segment_name(id)); }
-		return names;
-	}
+	const std::vector<std::string>* kept_files(std::uint64_t g, bool pinned, bool& blocked);
+	static std::vector<std::string> names_of(const files::log_state& s, std::uint64_t log);
 
 	// --- recovery ---------------------------------------------------------------------------
 
 	// Whether names are only what an interrupted create leaves: the first log's temporary.
-	static bool uncreated(const std::vector<std::string>& names) {
-		for (const auto& n : names) {
-			auto p = index_detail::parse_name(n);
-			if (p && !(p->a == 1 && p->type == index_detail::parsed_name::manifest_tmp)) { return false; }
-		}
-		return true;
-	}
+	static bool uncreated(const std::vector<std::string>& names);
 	// A directory the IO admitted though another user owns it or others can write it warns or
 	// refuses as options::directory_trust says; an IO that does not say is not trusted. Before
 	// the lock, so a refusal writes nothing.
-	void check_directory_trust(const options& opts) {
-		const auto trust = io_->directory_trust();
-		if (trust.trusted()) { return; }
-		if (opts.directory_trust == options::trust_policy::refuse) {
-			throw std::system_error(std::make_error_code(std::errc::permission_denied),
-				!trust.known ? "strata: the directory's ownership and mode are unknown"
-				: trust.foreign_owner ? "strata: the directory is owned by another user" : "strata: the directory is writable by group or others");
-		}
-		trust_warning_ = strata::directory_trust_warning{trust.known, trust.foreign_owner, trust.shared_writable};
-	}
+	void check_directory_trust(const options& opts);
 	// The owner lock is the directory's own (D2), writing nothing. Busy (EWOULDBLOCK) and
 	// other lock errors refuse as they are. A filesystem not known local (an IO that does not
 	// classify is not), or a lock it does not support, warns or refuses as options::nonlocal
 	// says. A failed classification warns as an unknown filesystem, or refuses under refuse.
-	void lock_directory(const options& opts) {
-		check_directory_trust(opts);
-		const bool refuse = opts.nonlocal == options::nonlocal_policy::refuse;
-		kronuz::journal::FilesystemClass fs;
-		try {
-			fs = io_->directory_filesystem();
-		} catch (const std::system_error& e) {
-			if (refuse) { throw std::system_error(e.code(), std::string("strata: the directory's filesystem is unknown: ") + e.what()); }
-			fs = {false, std::string("unknown (") + e.what() + ")"};
-		}
-		const bool fuse = fs.name.starts_with("fuse") || fs.name.starts_with("macfuse") || fs.name.starts_with("osxfuse");
-		if (!fs.local && refuse && !fuse) {
-			throw std::system_error(std::make_error_code(std::errc::not_supported), "strata: " + fs.name + " is not a known-local filesystem");
-		}
-		try {
-			lock_ = io_->acquire_directory_owner();
-		} catch (const std::system_error& e) {
-			if (e.code() != std::errc::not_supported || refuse) { throw; }  // unlocked: refuse's to stop
-			fs_warning_ = strata::filesystem_warning{fs.name, fs.local, false};
-			return;
-		}
-		if (!fs.local) { fs_warning_ = strata::filesystem_warning{fs.name, false, true}; }
-	}
+	void lock_directory(const options& opts);
 
 	// Removes an interrupted create's files, durably, under the owner lock; throws when the
 	// directory holds a committed index or a segment. Syncs only when it removed something.
-	void clear_uncreated() {
-		std::vector<std::string> names;
-		{
-			auto cursor = io_->scan_directory();
-			while (auto n = cursor->next()) { names.push_back(*n); }
-		}
-		if (!uncreated(names)) { throw std::system_error(std::make_error_code(std::errc::file_exists), "strata: the directory holds an index"); }
-		bool removed = false;
-		for (const auto& n : names) {
-			if (index_detail::parse_name(n)) {
-				io_->remove(n);
-				removed = true;
-			}
-		}
-		if (removed) { sync_dir(); }
-	}
+	void clear_uncreated();
 
 	// Opens the highest log, or the one holding `to` (manifest-log D6): replays it and finds every
 	// segment it names with its size. It syncs nothing: what a crashed writer left unsynced is owed
@@ -5802,143 +2755,21 @@ private:
 	// to the first commit or reclaim(). A dirty tail owes a rollover, and its generation is skipped
 	// (D6.7). An open at a `to` below the newest generation commits that state again as the newest
 	// generation, by rollover, and says so in fallback() (D6.8).
-	void recover(std::optional<std::uint64_t> to) {
-		std::vector<std::string> names;
-		{
-			auto cursor = io_->scan_directory();
-			while (auto n = cursor->next()) { names.push_back(*n); }
-		}
-		std::uint64_t top = 0, max_segment = 0;
-		std::vector<std::uint64_t> logs;
-		for (const auto& n : names) {
-			auto p = index_detail::parse_name(n);
-			if (!p) { continue; }
-			track(n, read_checked([&] { return io_->open_existing(n)->size(); }, &load_->retries));  // an EIO twice is damage
-			switch (p->type) {
-			case index_detail::parsed_name::manifest:
-				logs.push_back(p->a);
-				top = std::max(top, p->a);
-				break;
-			case index_detail::parsed_name::manifest_tmp: top = std::max(top, p->a); break;
-			case index_detail::parsed_name::segment:
-			case index_detail::parsed_name::spill:
-			case index_detail::parsed_name::scratch: max_segment = std::max(max_segment, p->a); break;
-			}
-		}
-		if (logs.empty()) {
-			if (uncreated(names)) { throw index_not_created("strata: no index was committed here"); }
-			throw corrupt_index("no manifest log");
-		}
-		std::sort(logs.begin(), logs.end());
-		std::uint64_t chosen = logs.back();
-		if (to) {
-			const auto it = std::upper_bound(logs.begin(), logs.end(), *to);
-			if (it == logs.begin()) { throw files::generation_not_retained(*to); }
-			chosen = *std::prev(it);
-		}
-		auto read = [&](std::uint64_t g, std::optional<std::uint64_t> upto) {
-			return read_checked([&] { return files::read_log(index_detail::read_all(*io_->open_existing(index_detail::manifest_name(g))), g, readable(), upto); }, &load_->retries);
-		};
-		files::log_read lr = read(chosen, to);
-		m_ = std::move(lr.state);
-		check_readable(m_.configured);
-		// Lazy: the names and sizes the scan recorded stand for the segment files (cold-tier D11).
-		segs_ = load_files(*io_, m_, false, load_, opts_.eager_segments ? nullptr : &files_);
-		meta_ = m_.metadata;
-		fields_ = m_.fields;
-		cur_ = {m_.uuid, m_.last_docid, std::max(m_.next_segment, max_segment + 1), m_.schema_version, m_.configured, {m_.applied_index, m_.applied_count}};
-		if (opts_.keyed && !(cur_.configured & format::bit::keys)) { throw std::invalid_argument("strata: the index is keyless"); }
-		log_g_ = chosen;
-		log_end_ = lr.end;
-		log_edits_ = lr.edits;
-		// A log that does not end at its last whole record replayed (a torn tail, or records past
-		// `to`) is never appended to: the next commit rolls over (D6.4, D7), skipping the torn
-		// record's generation (D6.7). Counters start above every name on disk (D3).
-		rollover_owed_ = lr.dirty || lr.end != files_[index_detail::manifest_name(chosen)];
-		next_generation_ = std::max(m_.generation + 1 + (rollover_owed_ ? 1 : 0), top + 1);
-		std::optional<std::uint64_t> newest;
-		if (to) {
-			// The newest generation the logs hold whole, read again when `to` is below it.
-			try {
-				newest = chosen == logs.back() && lr.end == files_[index_detail::manifest_name(chosen)] ? m_.generation : read(logs.back(), std::nullopt).state.generation;
-			} catch (const files::log_damage& e) {
-				newest = e.generation;  // the damaged edit was a commit, now lost (Q2: "damage at generation x")
-			} catch (const std::exception&) {
-				newest = top;
-			}
-		}
-		if (newest && *newest > m_.generation) {
-			fallback_ = fallback_report{*to, *newest, *newest - *to};
-			rollover_owed_ = true;
-			next_generation_ = std::max(next_generation_, *newest + 1);  // above every generation the logs hold
-			prepare_commit();  // an open's failure to map fails the open
-			commit_files();
-		} else {
-			// A crash's unsynced edit or rollover rename stays owed until the first commit or
-			// directory sync (sync-at-first-commit D3, D4).
-			log_ = io_->open_existing(index_detail::manifest_name(chosen));
-			inherited_owed_ = true;
-			inherited_below_ = cur_.next_segment;
-			appender_.emplace(*log_, m_.uuid, log_g_, log_end_);
-		}
-		kept_files_[m_.generation] = names_of(m_, log_g_);
-		retain_owed_ = true;
-		// Orphans leave only after a successful open, under the owner lock; their removal is durable
-		// at the next directory sync (D8).
-		for (const auto& n : names) {
-			if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest_tmp) { remove_file(n); }
-		}
-		settle_storage();  // the permit holds the files on record and the commit allowance
-	}
+	void recover(std::optional<std::uint64_t> to);
 
 	// Runs a read and its checks, and once more if either fails: an unreliable read (a
 	// transient media fault) passes the second time; damage on the medium fails both, and
 	// an EIO then reports as corrupt_index, while other errors stay what they are.
 	template <class F>
-	static auto read_checked(F&& f, std::atomic<std::uint64_t>* retries) -> decltype(f()) {
-		try {
-			return f();
-		} catch (const corrupt_index&) {
-			if (retries) { retries->fetch_add(1, std::memory_order_relaxed); }
-		} catch (const corrupt_segment&) {
-			if (retries) { retries->fetch_add(1, std::memory_order_relaxed); }
-		} catch (const std::system_error& e) {
-			if (retries && e.code().value() == EIO) { retries->fetch_add(1, std::memory_order_relaxed); }  // the host's errors are not the medium's
-		}
-		try {
-			return f();
-		} catch (const std::system_error& e) {
-			// Only a read error is the medium's; a lack of descriptors, memory, or permission is
-			// the host's, and a healthy shard must not read as damaged.
-			if (e.code().value() != EIO) { throw; }
-			throw corrupt_index(std::string("unreadable: ") + e.what());
-		}
-	}
+	static auto read_checked(F&& f, std::atomic<std::uint64_t>* retries) -> decltype(f());
 	// What this binary reads, against which the log's reader classifies a snapshot or edit before
 	// any segment opens (F20, F13-R42).
 	static files::readable_by readable() { return {segment::readable, format::min_read_version, format::version}; }
 	// Refuses configured bits no flush could write, as damage (CR5): each bit's owner set
 	// (F4), and the keys bit set exactly when the index is keyed (F8).
-	static void check_readable(std::uint64_t configured) {
-		for (format::structure_bits b = configured; b; b &= b - 1) {
-			const format::structure_bits owner = format::requires_of(b & -b);
-			if (owner && !(configured & owner)) { throw corrupt_index("configured structure bit " + std::to_string(std::countr_zero(b)) + " without its owner"); }
-		}
-	}
+	static void check_readable(std::uint64_t configured);
 	static vouch vouch_of(const files::log_state& m) noexcept { return {m.mask, std::uint32_t(m.min_version), std::uint32_t(m.max_version)}; }
-	static files::segment_ref ref_of(const files::log_segment& s) {
-		files::segment_ref r;
-		r.id = s.id;
-		r.identity = s.identity;
-		r.size = s.size;
-		r.footer_crc = s.footer_crc;
-		r.doc_count = s.doc_count;
-		r.live_count = s.live_count;
-		r.live_length = s.live_length;
-		r.values_generation = s.values_generation;
-		r.attributes = s.attributes;
-		return r;
-	}
+	static files::segment_ref ref_of(const files::log_segment& s);
 	// The segments a state names, checked against its entries: each segment's size, footer
 	// checksum, and document count (and every byte, when `whole`), its deleted set converted to the
 	// record's bits after its size check (D42). recover and install share it, so a checkpoint is
@@ -5946,87 +2777,19 @@ private:
 	// file's existence and size checked against the names and sizes the directory scan recorded
 	// (cold-tier D11). Throws corrupt_index (or corrupt_segment) at the first that disagrees.
 	static std::vector<std::shared_ptr<open_segment>> load_files(kronuz::journal::IO& io, const files::log_state& m, bool whole,
-		const std::shared_ptr<load_context>& load, const std::map<std::string, std::uint64_t>* sizes = nullptr) {
-		std::vector<std::shared_ptr<open_segment>> out;
-		out.reserve(m.segments.size());
-		for (const auto& [id, seg] : m.segments) {
-			const files::segment_ref r = ref_of(seg);
-			std::shared_ptr<open_segment> s;
-			if (sizes) {
-				s = read_checked([&] { return load_record(r, vouch_of(m), *sizes, load); }, &load->retries);
-			} else {
-				s = read_checked([&] { return load_segment(io, vouch_of(m), r, whole, load); }, &load->retries);
-			}
-			fill_deleted(seg.deleted, *s);
-			out.push_back(std::move(s));
-		}
-		return out;
-	}
-	static void fill_deleted(const files::log_deleted& d, open_segment& s) {
-		if (d.empty()) { return; }
-		std::uint64_t* bits = s.deleted.mutable_words();
-		if (d.dense()) {
-			std::memcpy(bits, d.words().data(), d.words().size() * sizeof(std::uint64_t));  // words_for(doc_count) of them, as the record's
-		} else {
-			d.for_each([&](std::uint64_t o) { bits[o >> 6] |= std::uint64_t(1) << (o & 63); });
-		}
-		s.dead = d.size();
-	}
+		const std::shared_ptr<load_context>& load, const std::map<std::string, std::uint64_t>* sizes = nullptr);
+	static void fill_deleted(const files::log_deleted& d, open_segment& s);
 	// The log's mask and version range passed the reader's readability checks, so a segment it
 	// names that this binary cannot read disagrees with its log: damage (F2, F20).
-	static std::unique_ptr<open_segment> load_segment(kronuz::journal::IO& io, const vouch& v, const files::segment_ref& r, bool whole, const std::shared_ptr<load_context>& load) {
-		auto s = std::make_unique<open_segment>(r, load, v);
-		s->adopt(open_body(io, r, s->claim, whole));
-		return s;
-	}
+	static std::unique_ptr<open_segment> load_segment(kronuz::journal::IO& io, const vouch& v, const files::segment_ref& r, bool whole, const std::shared_ptr<load_context>& load);
 	// A record whose segment file is named and sized as the log says (cold-tier D11).
 	static std::unique_ptr<open_segment> load_record(const files::segment_ref& r, const vouch& v, const std::map<std::string, std::uint64_t>& sizes,
-		const std::shared_ptr<load_context>& load) {
-		const std::string name = index_detail::segment_name(r.id);
-		const auto it = sizes.find(name);
-		if (it == sizes.end()) { throw corrupt_index("missing file: " + name); }
-		if (it->second != r.size) { throw corrupt_index("file size differs from the manifest: " + name); }
-		return std::make_unique<open_segment>(r, load, v);
-	}
-	static std::unique_ptr<segment_body> open_body(kronuz::journal::IO& io, const files::segment_ref& r, const vouch& v, bool whole) {
-		try {
-			return open_body_of(io, r, v, whole);
-		} catch (const unsupported_segment& e) {
-			throw corrupt_segment(e.what());
-		}
-	}
+		const std::shared_ptr<load_context>& load);
+	static std::unique_ptr<segment_body> open_body(kronuz::journal::IO& io, const files::segment_ref& r, const vouch& v, bool whole);
 	// Opens, maps and checks a segment file against its manifest entry: size, footer, identity,
 	// document count, and structures and versions against `v`; every byte when `whole`. A map that
 	// fails for a reason of the host throws unchanged; the caller tells it from damage.
-	static std::unique_ptr<segment_body> open_body_of(kronuz::journal::IO& io, const files::segment_ref& r, const vouch& v, bool whole) {
-		const std::string name = index_detail::segment_name(r.id);
-		std::unique_ptr<kronuz::journal::File> f;
-		try {
-			f = io.open_existing(name);
-		} catch (const std::system_error& e) {
-			if (e.code().value() != ENOENT) { throw; }
-			throw corrupt_index("missing file: " + name);
-		}
-		auto mapped = f->map();
-		std::string bytes;
-		if (!mapped) { bytes = index_detail::read_all(*f); }
-		const std::string_view view = mapped ? mapped->bytes() : std::string_view(bytes);
-		if (view.size() != r.size) { throw corrupt_index("file size differs from the manifest: " + name); }
-		(void)format::read_version(view);
-		if (format::decode_footer(view).toc_crc != r.footer_crc) { throw corrupt_index("segment differs from its manifest entry"); }
-		// The header's identity is the entry's (I13, F13-R41): a file of another producer under
-		// this name is never taken for the one the manifest names.
-		if (std::memcmp(view.data() + format::identity_offset, r.identity.data(), 16) != 0) { throw corrupt_index("segment identity differs from its manifest entry"); }
-		auto b = mapped ? std::make_unique<segment_body>(std::move(mapped)) : std::make_unique<segment_body>(std::move(bytes));
-		if (b->seg.core().doc_count() != r.doc_count) { throw corrupt_index("segment document count"); }
-		// The manifest vouches for its segments: one outside its mask or version range is damage.
-		const std::uint32_t ver = b->seg.core().version();
-		if ((b->seg.core().structures() & ~v.mask) || ver < v.min_version || ver > v.max_version) {
-			throw corrupt_segment("segment outside its manifest's structures or versions");
-		}
-		if (whole) { b->seg.verify_all(); }
-		return b;
-	}
+	static std::unique_ptr<segment_body> open_body_of(kronuz::journal::IO& io, const files::segment_ref& r, const vouch& v, bool whole);
 
 	// Shared with every record: the IO and the counters their maps write.
 	std::shared_ptr<load_context> load_;
@@ -6137,3 +2900,16 @@ template <class Layout>
 using basic_reader = typename basic_index<Layout>::reader_handle;
 
 }  // namespace strata
+
+// The member definitions, one header per mechanism (docs/mechanisms/index-layout.md).
+#include "strata/core/index_open.hh"
+#include "strata/core/index_apply.hh"
+#include "strata/core/index_buffer.hh"
+#include "strata/core/index_flush.hh"
+#include "strata/core/index_turns.hh"
+#include "strata/core/index_commit.hh"
+#include "strata/core/index_checkpoint.hh"
+#include "strata/core/index_storage.hh"
+#include "strata/core/index_merge.hh"
+#include "strata/core/index_read.hh"
+#include "strata/core/index_publish.hh"
