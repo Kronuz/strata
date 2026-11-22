@@ -820,6 +820,7 @@ void bound() {
 	check(p.cat->begin_demote(idx), "the idle slot demotes");
 	if (!p.wait_for("the slot is owed", [&] { return cat_t::state_of(p.cat->word_of(idx)) == strata::slot_state::owed; })) { return; }
 	check(p.cat->index_of(idx)->promote_owed(), "the demoted index owes its promote");
+	std::printf("bound: demoted with %llu maps, probe in %llu ms\n", (unsigned long long)p.cat->count_of(idx, strata::resource::maps), (unsigned long long)(p.cat->probe_at_of(idx) > p.exec->now() ? (p.cat->probe_at_of(idx) - p.exec->now()) / ms : 0));
 	p.fail_segments.store(EMFILE);
 	const bool reached = p.wait_for("the wakes fail to the bound", [&] {
 		if (auto r = p.cat->try_pin(k); r.status == cat_t::try_status::pinned) { return !check(false, "a wake promoted with its segments failing"); }
@@ -827,7 +828,11 @@ void bound() {
 	});
 	p.fail_segments.store(0);
 	if (!reached) { return; }
-	if (!p.wait_for("the bound close begins", [&] { return p.cat->begin_bound_close(idx); })) { return; }
+	if (!p.wait_for("the bound close begins", [&] { return p.cat->begin_bound_close(idx); })) {
+		const std::uint64_t w = p.cat->word_of(idx), at = p.exec->now(), probe = p.cat->probe_at_of(idx);
+		check(false, "the slot at the bound: state " + std::to_string(unsigned(cat_t::state_of(w))) + ", pins " + std::to_string(cat_t::pins_of(w)) + ", failures " + std::to_string(p.cat->wake_failures_of(idx)) + ", probe in " + std::to_string(probe > at ? (probe - at) / ms : 0) + " ms, maps " + std::to_string(p.cat->count_of(idx, strata::resource::maps)));
+		return;
+	}
 	if (!p.wait_for("the bound close ends", [&] { return p.payload_calls.load() >= 1 && p.cat->table_size() == 0; })) { return; }
 	{
 		std::lock_guard l(p.record_mu);
@@ -876,11 +881,13 @@ void replace() {
 void bare_commit_crash(std::uint64_t seed) {
 	disks d;
 	const std::string k = key_of(51), at = "seed " + std::to_string(seed) + ": ";
+	std::uint64_t applied = 0;
 	{
 		process p(d);
 		auto pin = p.pin(strata::open_intent::create, k);
 		if (!pin) { return; }
 		write_range(p, *pin.payload().g, 1, 5);
+		applied = pin.payload().g->applied();  // the five writes and the leader's entry
 		check(pin.index().uncommitted() && p.bare_commit(pin), at + "the bare commit over unsynced file effects");
 		d.of(k).power_off_after(0);
 		pin.release();
@@ -895,7 +902,7 @@ void bare_commit_crash(std::uint64_t seed) {
 		o.keyed = true;
 		o.storage = &d.storage;
 		auto ix = group_type::open_index(io, o, uuid);
-		check(ix.applied().index == 5, at + "the bare commit's P_H is durable: " + std::to_string(ix.applied().index));
+		check(ix.applied().index == applied, at + "the bare commit's P_H is durable: " + std::to_string(ix.applied().index) + " of " + std::to_string(applied));
 		ix.close();
 	}
 	process p(d);
@@ -907,6 +914,8 @@ void bare_commit_crash(std::uint64_t seed) {
 	check(got == expected(5), at + "every acknowledged value after the crash: " + show(got));
 	pin.release();
 	(void)p.shut();
+	std::lock_guard l(p.record_mu);
+	check(p.payload_closes.load() == 1 && p.cat->stats().payload_close_failures == 0, at + "the recovered group closes through close_payload: " + p.payload_error);
 }
 
 void bare_commit_crashes() {
