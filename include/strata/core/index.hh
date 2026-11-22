@@ -3499,9 +3499,10 @@ private:
 	// {s, i}, skipped at or below the head's. A chunk run (rocksdb-parity A3) applies whole at its
 	// last chunk; one that a later record or the log's end interrupts was never acknowledged, and
 	// is dropped, moving the applied position past it so a checkpoint can cover it. A middle or
-	// last chunk with no run before it is log_lost. An owed verdict runs its chore and applies
-	// again; no_space fails the open; any other verdict throws replay_diverged, naming the
-	// position. No flush is a checkpoint until the group is released.
+	// last chunk with no run before it is log_lost above the head and skipped at or below it,
+	// where the head holds its run (a bound may fall inside one). An owed verdict runs its chore
+	// and applies again; no_space fails the open; any other verdict throws replay_diverged, naming
+	// the position. No flush is a checkpoint until the group is released.
 	void replay_log(const std::vector<kronuz::journal::TurnRecord>& records)
 		requires(command::loggable<Layout>)
 	{
@@ -3532,6 +3533,7 @@ private:
 				if (c.place == command::chunk_place::first) {
 					drop_run();
 				} else if (!run) {
+					if (at <= cur_.applied) { continue; }
 					throw log_lost("strata: a turn-log chunk with no run before it");
 				}
 				run = at;
