@@ -4,6 +4,7 @@
 // lost, and D, whose checkpoint record the block holds below its head, opens too. With the block's manifest damaged
 // too, no bound is known and every index on the log fails log_lost. Usage: test_reopen_damaged.
 #include "kv_test.hh"
+#include "faultlab/faultfs.h"
 #include "strata/core/turn_seal.hh"
 
 #include "journal/host.h"
