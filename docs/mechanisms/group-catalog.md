@@ -71,9 +71,10 @@ borrows the one in its catalog slot, and the catalog keeps the index's whole lif
   `ack::none` applies and Driver-started checkpoints call the borrowed index while no request pins
   the slot. The slot stays the group's because H holds it open until `close_payload`, which every
   close runs before `index.close()`, and each call takes the write lease, which the catalog's
-  demotion, wake and close chores need, so none runs mid-call. The host runs H's chore inside
-  `strata::payload_work`, which the catalog's debug check that a call holds a pin (CT-R15) passes
-  as it passes a pin; a pinless call from any other thread is still reported. A demoted slot's
+  demotion, wake and close chores need, so none runs mid-call. The group runs each chore item
+  inside `strata::payload_work`, which the catalog's debug check that a call holds a pin (CT-R15)
+  passes as it passes a pin; the host wraps nothing, and a pinless call outside a group's item is
+  still reported. A demoted slot's
   apply promotes the index itself (`map_owed`), outside the catalog's wake accounting.
 
 ## The lanes

@@ -83,10 +83,11 @@ inline int& payload_depth() noexcept {
 }
 }  // namespace catalog_detail
 
-// Marks the calling thread as running a slot payload's own work while it lives (D169): the host
-// wraps H's chore in it. H holds its slot's index from open_payload to close_payload, which every
-// close runs before index.close(), and its calls take the write lease the catalog's chores need,
-// so the debug check that a call holds a pin (CT-R15) passes them as it passes a pin.
+// Marks the calling thread as running a slot payload's own work while it lives (D169): a
+// replication group holds it around each item its chore runs. H holds its slot's index from
+// open_payload to close_payload, which every close runs before index.close(), and its calls take
+// the write lease the catalog's chores need, so the debug check that a call holds a pin (CT-R15)
+// passes them as it passes a pin.
 class payload_work {
 public:
 	payload_work() noexcept { ++catalog_detail::payload_depth(); }

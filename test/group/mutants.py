@@ -161,11 +161,11 @@ MUTANTS = {
     "replace-skips-payload": [(CATALOG,
         "\t\tclose_payload(s, false);\n",
         "")],
-    # The pin check ignores payload_work: the group's own pinless applies are reported (N4; a
+    # The group's chore runs its items unmarked: its own pinless applies are reported (N4; a
     # Debug build, --target=group_catalog_test pin-check, replace or bare-commit-crash).
-    "payload-unmarked": [(CATALOG,
-        "return word::pins(w) != 0 || catalog_detail::payload_depth() != 0;",
-        "return word::pins(w) != 0;")],
+    "payload-unmarked": [(GROUP,
+        "\t\t\t\tconst payload_work mark;  // the slot payload's own call (D169; catalog CT-R15)\n",
+        "")],
     # The footprint's schedulers start cold: the chore queue's first deque blocks land in the
     # groups' window and read as a destroyed group's (A6; --target=group_footprint_test).
     "cold-schedulers": [(FOOTPRINT,

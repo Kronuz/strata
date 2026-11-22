@@ -121,13 +121,8 @@ struct driven {
 	task::blocking_scheduler s;
 	std::atomic<bool> quit{false};
 	std::thread t;
-	// The groups' chore: their work is the payloads', marked for the catalog's pin check (CT-R15).
-	void begin(bool payload = false) {
-		t = std::thread([this, payload] {
-			std::optional<strata::payload_work> mark;
-			if (payload) { mark.emplace(); }
-			s.drive([this] { return quit.load(); }, [] { return true; });
-		});
+	void begin() {
+		t = std::thread([this] { s.drive([this] { return quit.load(); }, [] { return true; }); });
 	}
 	void wake() { s.post_call([](void*) {}, nullptr); }
 	void end() {
@@ -414,7 +409,7 @@ struct process {
 		task::spawn(loop_t.ref(), host->driver(0).run(j::completion_ref::of(inline_io), stop.token()), [this](std::exception_ptr) { turns_done.store(true); });
 		task::spawn(loop_t.ref(), lp->run(stop.token()), [this](std::exception_ptr) { driver_done.store(true); });
 		loop_t.begin();
-		chore_t.begin(true);
+		chore_t.begin();
 		lane_t.begin();
 		request_t.begin();
 		exec = std::make_unique<lane_executor>(lane_t.s);

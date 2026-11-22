@@ -6,6 +6,7 @@
 // the group's chore, off the loop; the loop only enqueues.
 #pragma once
 
+#include "strata/core/catalog.hh"
 #include "strata/core/index.hh"
 #include "strata/group/answer.hh"
 #include "strata/group/bundle.hh"
@@ -661,6 +662,7 @@ private:
 			}
 			step r;
 			try {
+				const payload_work mark;  // the slot payload's own call (D169; catalog CT-R15)
 				r = w->run();
 			} catch (...) {
 				fence(error_text(std::current_exception()));
