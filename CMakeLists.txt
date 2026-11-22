@@ -34,7 +34,7 @@ FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.gi
 # Background work's threaded executor: one WorkPool per node, a WorkGroup per index.
 FetchContent_Declare(workpool GIT_REPOSITORY https://github.com/Kronuz/workpool.git GIT_TAG 640c66bfebccae811377670a265b62f4878ede8a)
 # strata::group's replication: consensus's Driver (docs/DRIVER.md, contract consensus:driver).
-FetchContent_Declare(consensus GIT_REPOSITORY https://github.com/Kronuz/consensus.git GIT_TAG b8de3b81064405e4fa9a384cf3670a679f484b48)
+FetchContent_Declare(consensus GIT_REPOSITORY https://github.com/Kronuz/consensus.git GIT_TAG 8780e44dd2b3322fd72a53495f386a0680f116af)
 # fst is termdict's; strata pins it so the dictionary's bytes do not drift.
 FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict compressors fusefilter completion workpool journal consensus)
 
@@ -116,6 +116,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(group_voters_test PRIVATE strata::group)
   add_test(NAME group_voters COMMAND group_voters_test)
   set_tests_properties(group_voters PROPERTIES TIMEOUT 1500)
+  # A learner installs a pinned pack and file set through the Driver's install surface (group-heal A1).
+  add_executable(group_install_test test/group/install_test.cc)
+  target_link_libraries(group_install_test PRIVATE strata::group)
+  add_test(NAME group_install COMMAND group_install_test)
   # What an idle open group holds, on real directories (A6); frames counted, the frame pool off
   # so a freed frame leaves the heap count (the pool's cache is per thread, not per group).
   add_executable(group_footprint_test test/group/footprint_test.cc)

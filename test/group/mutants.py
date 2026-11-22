@@ -38,8 +38,8 @@ MUTANTS = {
     # The bundle publishes before the files it names are synced (D16 steps 2 and 4).
     "publish-before-sync": [
         (GROUP, "\t\tfiles_.sync(b.files);\n\t\tix_->commit();\n", "\t\tix_->commit();\n"),
-        (GROUP, "co_await on_chore([&] { files_.unlink_retired(b.position); });",
-                "co_await on_chore([&] { files_.sync(b.files); files_.unlink_retired(b.position); });")],
+        (GROUP, "\t\t\tfiles_.unlink_retired(unlink_through(b.position));\n",
+                "\t\t\tfiles_.sync(b.files);\n\t\t\tfiles_.unlink_retired(unlink_through(b.position));\n")],
     # The capture runs inside an entry's apply, between its file effects and its strata write.
     "capture-mid-entry": [
         (GROUP, "\t\t\tphase_ = phase::strata;\n\t\t}\n", "\t\t\tphase_ = phase::strata;\n\t\t\treturn step::more;\n\t\t}\n"),
@@ -60,8 +60,8 @@ MUTANTS = {
     # strata commits after the bundle publishes, so a crash between leaves P_b > P_H (D16 step 3).
     "commit-after-publish": [
         (GROUP, "\t\tfiles_.sync(b.files);\n\t\tix_->commit();\n", "\t\tfiles_.sync(b.files);\n"),
-        (GROUP, "co_await on_chore([&] { files_.unlink_retired(b.position); });",
-                "co_await on_chore([&] { ix_->commit(); files_.unlink_retired(b.position); });")],
+        (GROUP, "\t\t\tfiles_.unlink_retired(unlink_through(b.position));\n",
+                "\t\t\tix_->commit();\n\t\t\tfiles_.unlink_retired(unlink_through(b.position));\n")],
     # A file effect appends at the file's size: a retry after a partial push writes past it (D3).
     "append-on-retry": [(FILES,
         "\t\tfor (std::size_t done = 0; done < bytes.size();) { done += f->write_at(offset + done, bytes.substr(done)); }\n",
@@ -103,14 +103,11 @@ MUTANTS = {
     "lift-the-bound": [(ANSWER,
         "return placements < max_placements ? next_step::resubmit : next_step::unavailable;",
         "return next_step::resubmit;")],
-    # The group drops consensus's SnapshotNeeded: a replica left behind goes unnamed (D109).
+    # The group drops consensus's SnapshotNeeded: no pin, so a replica behind the leader's
+    # checkpoint never installs and the ungated schedules do not settle (group-heal A2).
     "install-silent": [(GROUP,
-        "\tif (auto* m = owner->find(id)) { m->install_needed(s.peer); }\n",
+        "\tif (auto* m = owner->find(id)) { m->install_needed(s.peer, s.key); }\n",
         "\t(void)id;\n\t(void)s;\n")],
-    # A2's checkpoints ungated: one compacts past a replica cut off (D109; run with 14 schedules).
-    "checkpoint-ungated": [("test/group/voters_test.cc",
-        "(!gated || w.leaves_none_behind(",
-        "(true || w.leaves_none_behind(")],
     # A deposed proposer answers 503 instead of forwarding to the leader (A3).
     "no-forward": [(SUBMIT,
         "\t\t\t\tif (forwarded) {",
@@ -143,8 +140,8 @@ MUTANTS = {
         "\t\t\tfiles_.close();\n")],
     # A destroyed group stays in its loop's table: what it leaves is ours (A6; footprint).
     "destroy-keeps-member": [(GROUP,
-        "\t~group() override { loop_->detach(id_); }\n",
-        "\t~group() override {}\n")],
+        "\t\tloop_->detach(id_);\n\t}\n",
+        "\t}\n")],
     # The footprint's schedulers start cold: the chore queue's first deque blocks land in the
     # groups' window and read as a destroyed group's (A6; --target=group_footprint_test).
     "cold-schedulers": [(FOOTPRINT,
