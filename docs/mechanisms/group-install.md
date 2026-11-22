@@ -145,12 +145,12 @@ past it installs and its digest equals the replay), the ungated schedules (group
 12, 16, 18, 23, 24, 27 and seeds 101-140 at 3 voters, crashes and power cuts included, settle by
 install), and `grow_and_heal` (at 3 and 5 voters, a joiner added past every checkpoint installs,
 is promoted beside a voter it replaces, and that voter is removed, a leader change between each
-step; the second round replaces the leader). Until CMakeLists.txt pins consensus's install
-surface, `test/group/install_suite.sh` builds them against a consensus checkout (CONSENSUS_DIR).
+step; the second round replaces the leader). `test/group/install_suite.sh BUILD [regex]` builds
+and runs ctest's group tests, against a consensus checkout when CONSENSUS_DIR is set.
 `test/group/mutants.py install-silent` drops `SnapshotNeeded`: the ungated schedules do not
 settle.
 
-`test/group/install_test.cc` (until registered, `test/group/install_build.sh BUILD [case]`):
+`test/group/install_test.cc` (ctest's `group_install`; `group_install_test [case]`):
 `values` (the pin, the serve's bounds, a fresh learner fetching every byte once in
 ceil(length / 64 KiB) chunks, the digest after catch-up equal to the leader's and a replay's),
 `retry` (fetches ending `timed_out` and `io_error` mid-window, then a retry that fetches exactly

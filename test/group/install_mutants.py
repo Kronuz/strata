@@ -4,7 +4,8 @@
 Each mutant breaks one guard; install_test's case beside it must fail with it. Usage:
   test/group/install_mutants.py BUILD_DIR NAME     the named case's status with the mutant
   test/group/install_mutants.py BUILD_DIR --list
-The mutant is applied, the test built and run through install_build.sh, and every file restored.
+BUILD_DIR is a configured build of this checkout. The mutant is applied, group_install_test
+rebuilt and run, and every file restored.
 Exits 0 when the test passes (the mutant survives), the test's nonzero status when it fails, and
 127 when the mutant does not apply or does not build, so a `campaign job submit --fails-without`
 job passes only on a killed mutant.
@@ -15,6 +16,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 INSTALL = "include/strata/group/install.hh"
+TARGET = "group_install_test"
 
 # name: (the case that kills it, [(file, old, new), ...])
 MUTANTS = {
@@ -84,17 +86,17 @@ def main():
                 print(f"mutant {name}: {path} does not hold its text once", file=sys.stderr)
                 return 127
             f.write_text(text.replace(old, new))
-        script = ROOT / "test/group/install_build.sh"
-        built = subprocess.run(["sh", str(script), str(build), "--build-only"], capture_output=True, text=True)
+        built = subprocess.run(["cmake", "--build", str(build), "--target", TARGET, "-j", "4"], capture_output=True, text=True, check=False)
         if built.returncode != 0:
             print(built.stdout[-4000:] + built.stderr[-4000:], file=sys.stderr)
             return 127
-        run = subprocess.run([str(build / "out" / "group_install_test"), case])
+        run = subprocess.run([str(build / TARGET), case], check=False)
         print(f"mutant {name}: {case} {'fails (killed)' if run.returncode else 'passes (survives)'}")
         return run.returncode
     finally:
         for f, text in saved.items():
             f.write_text(text)
+        subprocess.run(["cmake", "--build", str(build), "--target", TARGET, "-j", "4"], capture_output=True, check=False)
 
 
 if __name__ == "__main__":
