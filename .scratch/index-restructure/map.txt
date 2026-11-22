@@ -1,0 +1,40 @@
+# basic_index's members by mechanism: header, then its first-line description, then members.
+index_open.hh: basic_index's lifecycle: create, open and its recovery, heal, warm (demote, promote) and close
+	create create_deferred open operator= ~basic_index close try_finish_close
+	heal needs_heal demote close_ready promote warm_quiescent
+	check_directory_trust lock_directory uncreated clear_uncreated recover read_checked check_readable
+	ref_of load_files fill_deleted load_segment load_record open_body open_body_of
+index_apply.hh: basic_index's transactions: apply, stage 1's evaluation and undo log, and the writer calls' lease, chores and fence
+	apply abandon check_in run_chores guarded live fence
+	rollback remove_copy push_record reserve_undo note_docid_only bump_last_docid writable_buffer evaluate
+index_buffer.hh: basic_index's write buffer: the lookups of its copies, its memory accounting, and whether a transaction fits
+	buffered_count for_each_buffer
+	find_key_in probe_docid find_docid_in build_docids store_docid newest buffered_copy locate_docid lookup_key key_of_copy
+	stored_bytes inline_kind inline_layout inline_parts has_buffer_hooks map_bytes buffered_bytes charge buffer_limit needs_flush
+	buffer_size buffered_records buffered_stored invert_pending lane_fits fits require_buffers_unpinned clear_buffer
+index_flush.hh: basic_index's freeze and flush: the buffer written as segments, their files and identities
+	refresh freeze apply_pending flush install_flushed flush_active flush_documents
+	streamed_segment map_output write_unsynced new_identity seed_identities
+index_turns.hh: basic_index's turn log: attach, join and leave, group commit, replay and durable waits (standalone-turn-log)
+	await_durable attach_log seal_log join leave replay_log flush_point stage_checkpoint detach_log join_log
+	await_log await_log_through
+index_commit.hh: basic_index's commit: the manifest log's edit, its roll-over and the durable writes behind it
+	commit merge_output_unsynced prepare_commit figures_now target_scalars target_pins entry_of edit_now state_now
+	commit_files durable roll_over append_edit reopen_log live_length
+index_checkpoint.hh: basic_index's checkpoints and retention: pins, install from another index, and the files each kept generation keeps
+	checkpoint release install retain kept_files names_of
+index_storage.hh: basic_index's storage accounting and reclamation: the permits, obsolete files' deletes, and drains
+	reclaim reclaim_for_space wait_deletes run_delete collect_deletes requeue_delete finish_deletes end_deletes
+	reclaim_posted reclaim_files track remove_file forget_file sync_dir sync_inherited inherited commit_allowance
+	drain_pending drain settle_storage estimate_bytes
+index_merge.hh: basic_index's background merges: scheduling, the merge job, publication and abandonment
+	merge force_merge force_merge_deletes maybe_merge wait_merges run_merges start_merges merging schedule
+	run_merge publish_merges mark_damaged install_merge carry_pending end_merges abandon_merges
+index_read.hh: basic_index's reads: lookups and scans, reads at a position, the segment reads they share, and the digest and check
+	segments find_key get find_docid has_docid scannable scan scan_keys
+	entry_from maintain_runs finish_job start_runs take_runs
+	key_at docid_at superseded get_at part_at scan_at get_segments scan_segments
+	digest digest_of check
+index_publish.hh: basic_index's shared readers: the views it publishes, retires and frees (shared-reader)
+	reader publish_through views_held changed publish_point build_view publish_cover retire_tables free_tables
+	publish_view retire_current free_views for_each_view
