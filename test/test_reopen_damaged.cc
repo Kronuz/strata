@@ -2,7 +2,9 @@
 // block holds batches of three logged indexes on one host. C's head is past them, U's and W's
 // are not; U wrote after them, W did not. C opens with every record, U and W fail log_lost and stay
 // lost, and D, whose checkpoint record the block holds below its head, opens too. With the block's manifest damaged
-// too, no bound is known and every index on the log fails log_lost. Usage: test_reopen_damaged.
+// too, no bound is known and every index on the log fails log_lost. A C-like index whose damage
+// hits the first or a middle chunk of a run its head covers opens with the run's value.
+// Usage: test_reopen_damaged.
 #include "kv_test.hh"
 #include "strata/core/turn_seal.hh"
 
@@ -203,11 +205,61 @@ void manifest_unknown() {
 	CHECK(throws_as<log_lost>([&] { (void)kv_index::open(w.wio, logged(h.sealer, w_group)); }));
 }
 
+// C's shape with one chunk run: k0, then a ~100 KiB value (about four chunks at command_bytes),
+// durable, then a commit whose checkpoint record is never sealed, so the head covers the run's
+// last chunk and the log holds nothing after it. `third` picks the damaged chunk: the value's
+// first bytes in the log (the first chunk) or a third of the way in (a middle one). The bound
+// falls inside the run, so the group's records after it start with a chunk below the head.
+void chunk_covered(const char* name, std::size_t third) {
+	fl::filesystem hfs, cfs;
+	fl::io hio{hfs}, cio{cfs};
+	const std::string big(100 << 10, 'B');
+	{
+		host h(hio);
+		kv_index c = kv_index::create(cio, logged(h.sealer, c_group), uuid_of("tolerant-run"));
+		CHECK(c.apply(tx({replace("k0", "zero")}), {}).result == verdict::accepted);
+		c.commit();
+		h.turns();
+		CHECK(c.apply(tx({replace("v", big)}), {}).result == verdict::accepted);
+		h.turns();
+		c.commit();
+	}
+	const std::string needle(500, 'B');
+	std::vector<std::pair<std::string, std::uint64_t>> hits;
+	for (const auto& [segment, data] : segments(hio)) {
+		for (auto at = data.find(needle); at != std::string::npos; at = data.find(needle, at + needle.size())) { hits.emplace_back(segment, at); }
+	}
+	CHECK(hits.size() > 100);
+	if (hits.empty()) { return; }
+	const auto& [segment, at] = hits[third * hits.size() / 3];
+	flip(hio, segment, at + 100);
+	host h(hio);
+	CHECK(h.table.status(c_group) == jr::GroupStatus::bounded && h.table.bound(c_group) > 3);
+	std::printf("%s: bound %llu\n", name, static_cast<unsigned long long>(h.table.bound(c_group)));
+	try {
+		kv_index c = kv_index::open(cio, logged(h.sealer, c_group));
+		CHECK(c.get("k0") == "zero" && c.get("v") == big);
+		CHECK(c.apply(tx({replace("c3", "three")}), {}).result == verdict::accepted);
+		c.commit();
+		h.turns();
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "%s: open threw: %s\n", name, e.what());
+		CHECK(!"a covered index opens");
+		return;
+	}
+	host again(hio);
+	CHECK(again.table.status(c_group) == jr::GroupStatus::stored);
+	kv_index c = kv_index::open(cio, logged(again.sealer, c_group));
+	CHECK(c.get("v") == big && c.get("c3") == "three");
+}
+
 }  // namespace
 
 int main() {
 	manifest_named();
 	manifest_unknown();
+	chunk_covered("first chunk damaged", 0);
+	chunk_covered("middle chunk damaged", 1);
 	std::printf("tolerant open: %d failures\n", failures);
 	return failures ? 1 : 0;
 }
