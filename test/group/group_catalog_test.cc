@@ -121,8 +121,13 @@ struct driven {
 	task::blocking_scheduler s;
 	std::atomic<bool> quit{false};
 	std::thread t;
-	void begin() {
-		t = std::thread([this] { s.drive([this] { return quit.load(); }, [] { return true; }); });
+	// The groups' chore: their work is the payloads', marked for the catalog's pin check (CT-R15).
+	void begin(bool payload = false) {
+		t = std::thread([this, payload] {
+			std::optional<strata::payload_work> mark;
+			if (payload) { mark.emplace(); }
+			s.drive([this] { return quit.load(); }, [] { return true; });
+		});
 	}
 	void wake() { s.post_call([](void*) {}, nullptr); }
 	void end() {
@@ -409,7 +414,7 @@ struct process {
 		task::spawn(loop_t.ref(), host->driver(0).run(j::completion_ref::of(inline_io), stop.token()), [this](std::exception_ptr) { turns_done.store(true); });
 		task::spawn(loop_t.ref(), lp->run(stop.token()), [this](std::exception_ptr) { driver_done.store(true); });
 		loop_t.begin();
-		chore_t.begin();
+		chore_t.begin(true);
 		lane_t.begin();
 		request_t.begin();
 		exec = std::make_unique<lane_executor>(lane_t.s);
@@ -926,6 +931,40 @@ void bare_commit_crash(std::uint64_t seed) {
 	check(p.payload_closes.load() == 1 && p.cat->stats().payload_close_failures == 0, at + "the recovered group closes through close_payload: " + p.payload_error);
 }
 
+// The catalog's pin check (CT-R15) passes the payload's own calls and still reports anyone else's: the
+// group's chore applies a write no pin covers (a follower's or ack::none apply, a reopen's replay), while
+// a call from this thread with no pin is reported.
+void pin_check() {
+#ifdef NDEBUG
+	std::printf("pin-check: the check is a debug build's; skipped\n");
+#else
+	struct counting {  // breaks counted, not aborted, for this case
+		bool was = strata::detail::abort_on_owner_break().exchange(false);
+		~counting() { strata::detail::abort_on_owner_break().store(was); }
+	} counted;
+	auto& breaks = strata::detail::off_owner_changes();
+	disks d;
+	process p(d);
+	group_type* g = nullptr;
+	blob::index_type* ix = nullptr;
+	std::uint32_t idx = 0;
+	{
+		auto pin = p.pin(strata::open_intent::create, key_of(61));
+		if (!pin) { return; }
+		g = pin.payload().g.get(), ix = &pin.index(), idx = pin.where().slot;
+		check(write_range(p, *g, 1, 2), "two writes under the pin");
+	}
+	check(cat_t::pins_of(p.cat->word_of(idx)) == 0 && cat_t::state_of(p.cat->word_of(idx)) == strata::slot_state::open, "the slot is open with no pin");
+	const std::uint64_t before = breaks.load();
+	check(write_range(p, *g, 3, 5), "three writes the group applies with no pin");
+	check(breaks.load() == before, "the payload's applies pass the check: " + std::to_string(breaks.load() - before) + " reported");
+	ix->refresh();
+	check(breaks.load() == before + 1, "a call from this thread with no pin is reported: " + std::to_string(breaks.load() - before));
+	(void)p.shut();
+	std::printf("pin-check: the payload's applies passed, a pinless call was reported\n");
+#endif
+}
+
 void bare_commit_crashes() {
 	for (std::uint64_t seed = 1; seed <= 16; ++seed) { bare_commit_crash(seed); }
 	std::printf("bare-commit-crash: 16 seeds recovered every value\n");
@@ -938,7 +977,7 @@ int main(int argc, char** argv) {
 	dog = &w;
 	const std::string only = argc > 1 ? argv[1] : "";
 	const std::pair<const char*, void (*)()> cases[] = {
-		{"borrow", borrow}, {"failed-open", failed_open}, {"attach", attach}, {"sweep", sweep}, {"bound", bound}, {"replace", replace}, {"bare-commit-crash", bare_commit_crashes},
+		{"borrow", borrow}, {"failed-open", failed_open}, {"attach", attach}, {"sweep", sweep}, {"bound", bound}, {"replace", replace}, {"bare-commit-crash", bare_commit_crashes}, {"pin-check", pin_check},
 	};
 	bool ran = false;
 	for (const auto& [name, fn] : cases) {

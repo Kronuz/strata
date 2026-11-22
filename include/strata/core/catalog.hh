@@ -77,6 +77,25 @@ enum class slot_state : unsigned { free = 0, opening, open, owed, waking, demoti
 inline constexpr unsigned slot_states = 8;
 
 namespace catalog_detail {
+inline int& payload_depth() noexcept {
+	thread_local int depth = 0;
+	return depth;
+}
+}  // namespace catalog_detail
+
+// Marks the calling thread as running a slot payload's own work while it lives (D169): the host
+// wraps H's chore in it. H holds its slot's index from open_payload to close_payload, which every
+// close runs before index.close(), and its calls take the write lease the catalog's chores need,
+// so the debug check that a call holds a pin (CT-R15) passes them as it passes a pin.
+class payload_work {
+public:
+	payload_work() noexcept { ++catalog_detail::payload_depth(); }
+	~payload_work() { --catalog_detail::payload_depth(); }
+	payload_work(const payload_work&) = delete;
+	payload_work& operator=(const payload_work&) = delete;
+};
+
+namespace catalog_detail {
 
 // pins:24 | shut:1 | state:3 | freq:2 | gen:34, high to low. `shut`: shutdown met the slot pinned, so the unpin that
 // takes it to `{0, open/owed}` begins its close in the same compare-exchange; sticky until the slot is free.
@@ -1051,11 +1070,12 @@ private:
 		u[6] = char((u[6] & 0x0f) | 0x40), u[8] = char((u[8] & 0x3f) | 0x80);
 		return u;
 	}
-	// The debug check behind Index::guard_calls (CT-R15): a call is made under a pin or inside a transition.
+	// The debug check behind Index::guard_calls (CT-R15): a call is made under a pin, inside a transition, or by
+	// the slot's payload (payload_work).
 	static bool pin_held(std::uint64_t w) noexcept {
 		switch (word::state(w)) {
 		case slot_state::opening: case slot_state::waking: case slot_state::demoting: case slot_state::closing: return true;
-		default: return word::pins(w) != 0;
+		default: return word::pins(w) != 0 || catalog_detail::payload_depth() != 0;
 		}
 	}
 

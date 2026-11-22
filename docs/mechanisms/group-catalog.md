@@ -67,12 +67,14 @@ borrows the one in its catalog slot, and the catalog keeps the index's whole lif
   host that destroys it then breaks the destructor's contract. The catalog calls both on its lane
   outside the lease, where no refusal arises while the loop and the chore run off its lanes
   (below).
-- **The group's chore writes with no pin of its own.** Follower and `ack::none` applies and
-  Driver-started checkpoints call the borrowed index while no request pins the slot; the slot
-  stays the group's because H holds it open until `close_payload`, which every close runs before
-  `index.close()`. The catalog's debug check that a call holds a pin (CT-R15) counts these calls
-  (`owner_break`, aborting only under `abort_on_owner_break`); a demoted slot's apply promotes the
-  index itself (`map_owed`), outside the catalog's wake accounting.
+- **The group's chore writes with no pin of its own.** A reopen's replay above P_b, follower and
+  `ack::none` applies and Driver-started checkpoints call the borrowed index while no request pins
+  the slot. The slot stays the group's because H holds it open until `close_payload`, which every
+  close runs before `index.close()`, and each call takes the write lease, which the catalog's
+  demotion, wake and close chores need, so none runs mid-call. The host runs H's chore inside
+  `strata::payload_work`, which the catalog's debug check that a call holds a pin (CT-R15) passes
+  as it passes a pin; a pinless call from any other thread is still reported. A demoted slot's
+  apply promotes the index itself (`map_owed`), outside the catalog's wake accounting.
 
 ## The lanes
 
@@ -102,6 +104,8 @@ test on four threads, one case per ctest:
   a reopen recovers the bundle (the replace's from the log alone, its checkpoint unable to commit).
 - `bare-commit-crash`: the catalog's bare commit makes P_H durable over unsynced file-set bytes;
   power goes off and, over 16 crash seeds, the reopen at P_b 0 replays every value's bytes.
+- `pin-check` (debug builds): the group applies writes no pin covers and the pin check reports
+  none; a call from the test's thread with no pin is reported.
 
 Every step has a deadline, so a close that waits on itself fails the test instead of hanging it.
 TSan runs every case.
