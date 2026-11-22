@@ -3640,7 +3640,7 @@ private:
 			}
 			changed();
 			count_writing(true);
-			if (opened) { opts_.log->wake(); }
+			opts_.log->joined(opened);
 		}
 	}
 	// A command past the record cap (rocksdb-parity A3), as chunks of at most command_bytes each,
@@ -3658,13 +3658,14 @@ private:
 				if (!j.full) { break; }
 				await_sealed(j.full);
 			}
-			opts_.log->wake();
+			opts_.log->joined(true);
 		}
 	}
 	// Until the loop hands record `s` to a turn: the unsealed records then leave room.
 	void await_sealed(std::uint64_t s)
 		requires(command::loggable<Layout>)
 	{
+		opts_.log->joined(false);  // a full record seals next turn: it need not wait for this writer
 		const auto* st = logged_.get();
 		opts_.log->await_sealed(logged_->group, [st, s] { return st->handed.load(std::memory_order_acquire) >= s; });
 	}

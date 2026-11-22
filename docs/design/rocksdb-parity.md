@@ -329,18 +329,26 @@ two barriers at K=2 and K=4. RocksDB's leader carries more of the cohort; why is
 since its followers block through a 21 ms barrier as strata's writers do (`AwaitState` spins 200
 times and yields for at most 100 µs, `write_thread.cc:76`, `:144-189`). The rows stand (N11).
 
-**D5. The cohort wait (task 1, landed).** After a turn that released writers in n groups, the loop
-waits until n records have opened, or a bound passes, before it seals the next turn. The bound is
+**D5. The cohort wait (task 1, landed).** After a turn that released n writers, the loop waits
+until n of them have joined a record, or a bound passes, before it seals the next turn. The bound is
 1/16 of the last barrier (1.3 ms at 21 ms), measured from submission to completion without the
 wait, so it does not feed back into itself, and a writer that does not come back costs the others
 at most 6% of a barrier. The prototype (`cohort.py`) carried every writer in every barrier: 0.26
 syncs per op at K=4 and 0.13 at K=8, p50 one barrier, 1.23× faster than RocksDB at K=4 (180 against
-146 ops/s, trial means) and 1.87× at K=8 (327 against 175), a tie at K=1 and K=2. The merged code
-counts released groups (`released_groups()`) and records opened (`wake()`; `turn_seal.hh:163`,
-`:334-341`); K writers on one index are one group, so counting writers is the quest's follow-up N3.
-Under D6 both counts span every loop on the log (D6's handoff item 5). Test:
-`test/test_barrier_cohort.cc` counts barriers per writer at K writers on K indexes (job
-261120-082445-11a61b; the mutant without the wait fails, 261120-082448-f562c7). Alternatives that
+146 ops/s, trial means) and 1.87× at K=8 (327 against 175), a tie at K=1 and K=2. Both counts are
+per writer (N3, task `group-commit`): n counts the writers the turn released from `await()` and
+`await_sealed()`, and an arrival is such a writer's next join, whether it opened the record or
+joined one another writer opened (`turn_sealer::joined()`, through a thread-local mark the
+released wait leaves). Counting groups started the turn on the first writer back to a shared
+index, so its other writers rode the barrier after; counting every opened record let a writer
+outside the cohort end the wait. In the test's counts (24 commits per writer over 64 ms barriers),
+two writers per index on one log rode a second barrier on 8 of 168 commits at K=8 and 9 of 84 at
+K=4 with the group count, eight writers on two indexes on 71 of 168 (40 turns for 24 rounds), and
+two writers per index on two logs on 26 of 84 (68 turns); counted per writer, none does, in 26,
+26, 26 and 51 turns. Under D6 both counts span every loop on the log (D6's handoff
+item 5). Test: `test/test_barrier_cohort.cc` counts barriers per writer at K writers on K indexes
+and on K/2 (two writers a group), on one log and on a log per loop, and for writers that arrive
+during a barrier (task `group-commit`'s journal names the jobs). Alternatives that
 lose: a fixed group-commit timer, which delays K=1 by its length, and several turns in flight
 (`RFTW0002`, parked), which a device that flushes one at a time does not reward.
 
