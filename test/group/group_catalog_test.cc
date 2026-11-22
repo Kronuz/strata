@@ -828,9 +828,17 @@ void bound() {
 	});
 	p.fail_segments.store(0);
 	if (!reached) { return; }
+	std::printf("bound: the wakes failed to the bound; passes %llu, bound closes %llu\n", (unsigned long long)p.cat->stats().passes, (unsigned long long)p.cat->stats().bound_closes);
 	if (!p.wait_for("the bound close begins", [&] { return p.cat->begin_bound_close(idx); })) {
 		const std::uint64_t w = p.cat->word_of(idx), at = p.exec->now(), probe = p.cat->probe_at_of(idx);
-		check(false, "the slot at the bound: state " + std::to_string(unsigned(cat_t::state_of(w))) + ", pins " + std::to_string(cat_t::pins_of(w)) + ", failures " + std::to_string(p.cat->wake_failures_of(idx)) + ", probe in " + std::to_string(probe > at ? (probe - at) / ms : 0) + " ms, maps " + std::to_string(p.cat->count_of(idx, strata::resource::maps)));
+		const auto st = p.cat->stats();
+		std::string edges;
+		for (unsigned i = 0; i < strata::slot_states; ++i) {
+			for (unsigned j = 0; j < strata::slot_states; ++j) {
+				if (st.edges[i][j]) { edges += " " + std::to_string(i) + ">" + std::to_string(j) + ":" + std::to_string(st.edges[i][j]); }
+			}
+		}
+		check(false, "the slot at the bound: state " + std::to_string(unsigned(cat_t::state_of(w))) + ", pins " + std::to_string(cat_t::pins_of(w)) + ", failures " + std::to_string(p.cat->wake_failures_of(idx)) + ", probe in " + std::to_string(probe > at ? (probe - at) / ms : 0) + " ms, maps " + std::to_string(p.cat->count_of(idx, strata::resource::maps)) + "; passes " + std::to_string(st.passes) + ", bound closes " + std::to_string(st.bound_closes) + ", replaces " + std::to_string(st.replaces) + ", pass closes " + std::to_string(st.pass_closes) + ", close_payload calls " + std::to_string(p.payload_calls.load()) + ", edges" + edges);
 		return;
 	}
 	if (!p.wait_for("the bound close ends", [&] { return p.payload_calls.load() >= 1 && p.cat->table_size() == 0; })) { return; }
