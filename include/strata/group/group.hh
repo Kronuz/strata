@@ -551,19 +551,34 @@ private:
 		if (loop_->scheduler().runs_here() || chore_.runs_here() || here == loop_->scheduler() || here == chore_ || ix_->lease().held_here()) {
 			throw std::logic_error(std::string("strata::group: a blocking ") + what + " on the loop, the group's chore or under the index's write lease waits on itself");
 		}
+		handoff h;
+		task::spawn(loop_->scheduler(), handed(std::move(work), h), [](std::exception_ptr) {});
+		std::unique_lock lock(h.m);
+		h.cv.wait(lock, [&] { return h.done; });
+		if (h.error) { std::rethrow_exception(h.error); }
+	}
+	struct handoff {
 		std::mutex m;
 		std::condition_variable cv;
 		bool done = false;
 		std::exception_ptr error;
-		task::spawn(loop_->scheduler(), std::move(work), [&](std::exception_ptr e) {
-			std::lock_guard lock(m);
-			error = e;
-			done = true;
-			cv.notify_one();  // under the lock: the waiter's frame outlives it
-		});
-		std::unique_lock lock(m);
-		cv.wait(lock, [&] { return done; });
-		if (error) { std::rethrow_exception(error); }
+	};
+	// The work's frame and every reference to its error end on the loop before the waiter wakes,
+	// so the waiter holds the error's only reference and may destroy the group at once.
+	static task::task<void> handed(task::task<void> work, handoff& h) {
+		std::exception_ptr e;
+		{
+			task::task<void> w = std::move(work);
+			try {
+				co_await std::move(w);
+			} catch (...) {
+				e = std::current_exception();
+			}
+		}
+		std::lock_guard lock(h.m);
+		h.error = std::move(e);
+		h.done = true;
+		h.cv.notify_one();  // under the lock: the waiter's frame outlives it
 	}
 
 	// The awaiter keeps the item alive until it resumes: the queue hands it back, never frees it.

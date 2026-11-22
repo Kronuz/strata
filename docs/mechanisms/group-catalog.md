@@ -59,8 +59,9 @@ borrows the one in its catalog slot, and the catalog keeps the index's whole lif
   longer uses it. A close the index refuses afterwards calls it again, which the group's second
   close answers at once.
 - **`open_blocking()` and `close_blocking()`** bridge the catalog's synchronous hooks to the
-  group's coroutines: they spawn `open()`/`close()` on the loop and block the calling thread. They
-  refuse, before starting anything, to run on the loop or the group's chore (a thread inside it,
+  group's coroutines: they spawn `open()`/`close()` on the loop and block the calling thread
+  until the work's frame has ended and the loop holds no reference to its error, so the caller
+  may destroy the group as soon as the call returns. They refuse, before starting anything, to run on the loop or the group's chore (a thread inside it,
   or one pumping it inline), or under the index's write lease, each of which the call would wait
   on. A refused open leaves a group the host may destroy; a refused close leaves it open, so a
   host that destroys it then breaks the destructor's contract. The catalog calls both on its lane
