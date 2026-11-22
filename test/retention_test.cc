@@ -12,7 +12,7 @@
 //     generation from the older log, which stays with its segments; a damaged older log blocks.
 //   - A background merge's source, all of whose documents are deleted and committed while the
 //     merge is queued, is not truncated under the merge's mapping, at 0, 1 and 2 predecessors
-//     (the mapped run, STRATA_FAULTFS_MAP=1, aborts on a truncation below a live mapping).
+//     (the mapped run, FAULTLAB_MAP=1, aborts on a truncation below a live mapping).
 #include "kv_test.hh"
 
 #include "strata/core/executor.hh"
@@ -27,7 +27,7 @@ struct files_on_disk {
 	std::set<std::string> data;  // every strata file but the logs
 };
 
-static files_on_disk survey(const faultfs::filesystem& fs) {
+static files_on_disk survey(const fl::filesystem& fs) {
 	files_on_disk r;
 	for (const auto& n : fs.list()) {
 		auto p = index_detail::parse_name(n);
@@ -58,7 +58,7 @@ struct history {
 	std::uint64_t head_record = 0;  // where the head's edit starts in it
 };
 
-static history build(kv_index::options o, faultfs::io& io) {
+static history build(kv_index::options o, fl::io& io) {
 	history h;
 	auto ix = kv_index::create(io, o, uuid);
 	ix.apply(tx(batch(0, 30)), {});
@@ -78,14 +78,14 @@ static history build(kv_index::options o, faultfs::io& io) {
 	return h;
 }
 
-static void flip(faultfs::filesystem& fs, const std::string& name) {
+static void flip(fl::filesystem& fs, const std::string& name) {
 	const std::uint64_t size = fs.view(name).size();
-	fs.add_media_fault(name, faultfs::media::bit_flip, size / 2, size / 2 + 1, 0);
+	fs.add_media_fault(name, fl::media::bit_flip, size / 2, size / 2 + 1, 0);
 }
-static void flip_at(faultfs::filesystem& fs, const std::string& name, std::uint64_t at) { fs.add_media_fault(name, faultfs::media::bit_flip, at, at + 1, 0); }
+static void flip_at(fl::filesystem& fs, const std::string& name, std::uint64_t at) { fs.add_media_fault(name, fl::media::bit_flip, at, at + 1, 0); }
 
 // True when the open at the head, with every check, fails or reports damage.
-static bool head_refused(faultfs::io& io, const kv_index::options& o) {
+static bool head_refused(fl::io& io, const kv_index::options& o) {
 	try {
 		auto ix = kv_index::open(io, o);
 		(void)ix.check();
@@ -104,8 +104,8 @@ int main() {
 
 	// The default leaves no predecessor once a merge settles; 1 and 2 keep the merged-away segments.
 	for (std::size_t keep : {std::size_t(0), std::size_t(1), std::size_t(2)}) {
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		kv_index::options o;
 		o.keyed = true;
 		if (keep) { o.retained_predecessors = keep; }
@@ -132,12 +132,12 @@ int main() {
 	}
 
 	// A damaged head, a retained predecessor: the fall back is reported. 0: it is refused.
-	const bool mapped = std::getenv("STRATA_FAULTFS_MAP") != nullptr;  // mapped reads bypass the media faults on segments
+	const bool mapped = std::getenv("FAULTLAB_MAP") != nullptr;  // mapped reads bypass the media faults on segments
 	for (const bool segment_damage : {false, true}) {
 		if (segment_damage && mapped) { continue; }
 		for (std::size_t keep : {std::size_t(0), std::size_t(1)}) {
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			fl::filesystem fs;
+			fl::io io(fs);
 			kv_index::options o;
 			o.keyed = true;
 			o.retained_predecessors = keep;
@@ -165,8 +165,8 @@ int main() {
 
 	// Opening the head by name is not a fallback.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		kv_index::options o;
 		o.keyed = true;
 		o.retained_predecessors = 1;
@@ -176,8 +176,8 @@ int main() {
 	}
 	// A pinned checkpoint under later commits: the gap shows in newest - to, and discarded counts it.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		kv_index::options o;
 		o.keyed = true;
 		o.retained_predecessors = 1;
@@ -205,8 +205,8 @@ int main() {
 	// segments stay and open(..., to) reaches it. An unreadable older log blocks the round and
 	// names the pinned generation.
 	for (const bool damage : {false, true}) {
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		kv_index::options o;
 		o.keyed = true;
 		o.auto_merge = false;
@@ -232,7 +232,7 @@ int main() {
 		CHECK(*index_detail::log_holding(io, pinned) < *index_detail::log_holding(io));  // the pin is in the older log
 		if (damage) {
 			const std::string old = index_detail::manifest_name(*index_detail::log_holding(io, pinned));
-			fs.add_media_fault(old, faultfs::media::bit_flip, 40, 41, 0);  // in its first block, before the pin
+			fs.add_media_fault(old, fl::media::bit_flip, 40, 41, 0);  // in its first block, before the pin
 		}
 		auto ix = kv_index::open(io, o);
 		ix.apply(tx({set_meta("after", "reopen")}), {});
@@ -263,8 +263,8 @@ int main() {
 	// until the merge publishes, whichever the retention (one extra commit per predecessor kept).
 	for (std::size_t keep : {std::size_t(0), std::size_t(1), std::size_t(2)}) {
 		for (int victim = 0; victim < 6; ++victim) {
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			fl::filesystem fs;
+			fl::io io(fs);
 			inline_executor exec;  // queued work runs only on exec.run()
 			kv_index::options o;
 			o.keyed = true;

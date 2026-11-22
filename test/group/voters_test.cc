@@ -16,7 +16,7 @@
 #include "host_io.hh"
 #include "oracle.hh"
 
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -34,7 +34,7 @@ namespace {
 
 namespace cs = kronuz::consensus;
 namespace j = kronuz::journal;
-namespace ff = strata::faultfs;
+namespace fl = kronuz::faultlab;
 namespace sg = strata::group;
 using group_test::digest;
 using group_test::group_type;
@@ -133,7 +133,7 @@ struct node {
 	cs::NodeId id = 0;
 	bool joiner = false;  // created with no voters: a learner once added
 	std::uint64_t installs = 0;  // activated by its processes that stopped
-	ff::filesystem host_disk, dir_disk;  // dir_disk: the group's, strata's names and the file set's under its prefix
+	fl::filesystem host_disk, dir_disk;  // dir_disk: the group's, strata's names and the file set's under its prefix
 	strata::byte_budget storage{std::uint64_t(1) << 30};
 	std::map<std::uint64_t, blob::app::seen_entry> log;
 	blob::app app;
@@ -240,7 +240,7 @@ struct world {
 	// A new group object on the node's loop, opened: at boot, or after a close.
 	void attach(node& x) {
 		auto& p = *x.p;
-		p.g = std::make_unique<group_type>(*p.lp, config(x.id, x.joiner ? 0 : voters, x.storage), std::make_unique<ff::io>(x.dir_disk), x.app, task::scheduler_ref::of(p.chore_s));
+		p.g = std::make_unique<group_type>(*p.lp, config(x.id, x.joiner ? 0 : voters, x.storage), std::make_unique<fl::io>(x.dir_disk), x.app, task::scheduler_ref::of(p.chore_s));
 		p.opening = start(p.loop_ref(), p.g->open());
 		x.run();
 	}
@@ -642,7 +642,7 @@ void default_limits() {
 	// turn-log segment (D132).
 	c.options.limits.log_bytes = cs::Limits{}.log_bytes;
 	c.options.limits.log_entries = cs::Limits{}.log_entries;
-	group_type g(lp, c, std::make_unique<ff::io>(x.dir_disk), x.app, task::scheduler_ref::of(chore_s));
+	group_type g(lp, c, std::make_unique<fl::io>(x.dir_disk), x.app, task::scheduler_ref::of(chore_s));
 	auto run_all = [&] {
 		for (int i = 0; i < 100000; ++i) {
 			if (!loop_s.run() && !chore_s.run()) { return; }

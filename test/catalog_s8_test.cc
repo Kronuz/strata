@@ -98,7 +98,7 @@ task::task<void> request(cat_t& cat, std::string key, bool second_use) {
 
 run_result run_catalog(const s8::trace& tr, const config& cfg) {
 	const auto t0 = std::chrono::steady_clock::now();
-	faultfs::filesystem fs;
+	fl::filesystem fs;
 	resource_options ro;
 	ro.system = test_system(1 << 24, 1 << 24, 1 << 24);
 	ro.descriptor_reserve = 64;
@@ -112,7 +112,7 @@ run_result run_catalog(const s8::trace& tr, const config& cfg) {
 	h.soft_hot = cfg.hot;
 	h.resolve = [&](const cat_t::opening& op) -> std::unique_ptr<kronuz::journal::IO> {
 		last_counts = op.counts;
-		return std::make_unique<faultfs::io>(fs);
+		return std::make_unique<fl::io>(fs);
 	};
 	h.open_index = [](kronuz::journal::IO&, const stub_index::options&, const cat_t::opening&) { return stub_index(last_counts); };
 	cat_t cat(std::move(h));

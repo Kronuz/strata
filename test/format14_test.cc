@@ -62,7 +62,7 @@ static bool corrupt_with(std::string_view bytes, const char* fragment) {
 }
 
 // Each segment file of an index on faultfs, by name.
-static std::map<std::string, std::string> segment_files(const faultfs::filesystem& fs) {
+static std::map<std::string, std::string> segment_files(const fl::filesystem& fs) {
 	std::map<std::string, std::string> out;
 	for (const auto& n : fs.list()) {
 		if (n.starts_with("seg-") && n.ends_with(".sx")) { out[n] = std::string(fs.view(n)); }
@@ -104,8 +104,8 @@ static std::vector<std::uint32_t> raw_sizes_of(std::string_view file) {
 static std::map<std::string, std::string> fixture_segments() {
 	std::map<std::string, std::string> out;
 	for (const bool preset : {false, true}) {
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		kv_index::options o;
 		o.keyed = true;
 		o.identity_seed = 14;
@@ -556,7 +556,7 @@ static void frame_bounds_first() {
 // faultfs's io, recording every file the index creates.
 class recording_io final : public kronuz::journal::IO {
 public:
-	explicit recording_io(faultfs::io& inner) : inner_(&inner) {}
+	explicit recording_io(fl::io& inner) : inner_(&inner) {}
 	std::vector<std::string> created;
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_owner(bool create) override { return inner_->acquire_owner(create); }
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_owner() override { return inner_->acquire_directory_owner(); }
@@ -578,14 +578,14 @@ public:
 	void sync_files(std::span<kronuz::journal::File* const> files) override { inner_->sync_files(files); }
 
 private:
-	faultfs::io* inner_;
+	fl::io* inner_;
 };
 
 // The peak a merge of `n` live keys of `length` bytes charges to its budget, the merge run
 // directly over two flushed segments.
 static std::uint64_t merge_peak(std::size_t n, std::size_t length) {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	kv_index::options o;
 	o.keyed = true;
 	auto ix = kv_index::create(io, o, uuid);
@@ -618,8 +618,8 @@ static void merges() {
 	// documents, then one merge. Its output is key-ordered with every live record once, its
 	// digest its inputs', and it created no scratch file: the ascending path.
 	for (const bool preset : {false, true}) {
-		faultfs::filesystem fs;
-		faultfs::io inner(fs);
+		fl::filesystem fs;
+		fl::io inner(fs);
 		recording_io io(inner);
 		kv_index::options o;
 		o.keyed = true;
@@ -713,8 +713,8 @@ static void merges() {
 	}
 	// A key-ordered merge takes no order from its caller.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		kv_index::options o;
 		o.keyed = true;
 		auto ix = kv_index::create(io, o, uuid);

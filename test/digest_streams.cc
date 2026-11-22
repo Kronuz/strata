@@ -3,13 +3,15 @@
 // one line per stream: the verdicts, a hash of the digest after every commit, the final digest, the
 // digest after a reopen and at each checkpoint still pinned, newest first. test/digest_vs_ref.py
 // builds it against this tree's headers and another commit's and compares the lines.
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 #include "strata/core/index.hh"
 
 #include <cstdio>
 #include <deque>
 #include <random>
 #include <string>
+
+namespace fl = kronuz::faultlab;
 
 using namespace strata;
 using kv_index = basic_index<document_layout>;
@@ -20,8 +22,8 @@ static int failures = 0;
 
 static std::string line(std::uint64_t seed, bool keyed) {
 	std::mt19937_64 r(seed);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	byte_budget mem{32 * 1024};
 	kv_index::options o;
 	o.keyed = keyed;

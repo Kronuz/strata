@@ -2,7 +2,7 @@
 // includes core headers only and links no search code. A seeded random workload of puts,
 // conditional puts, deletes, flushes, merges, commits, and reopens against a std::map, then a
 // checkpoint installed into a second index, the digest, and the sections every segment holds.
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 #include "strata/core/index.hh"
 
 #include <cstdio>
@@ -10,6 +10,8 @@
 #include <map>
 #include <random>
 #include <set>
+
+namespace fl = kronuz::faultlab;
 
 static int failures = 0;
 #define CHECK(cond) \
@@ -100,8 +102,8 @@ static void check_model(const kv_index& ix, const model_t& model) {
 
 int main() {
 	for (std::uint64_t seed = 1; seed <= 6; ++seed) {
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		kv_index::options opts;
 		opts.keyed = true;
 		opts.flush_threads = seed % 3 ? 1 : 2;  // the document layout buffers whole documents either way
@@ -189,8 +191,8 @@ int main() {
 		CHECK(digest != checkpoint_digest);
 		// Another index with content of its own installs the checkpoint, not the source's present.
 		{
-			faultfs::filesystem target_fs;
-			faultfs::io target_io(target_fs);
+			fl::filesystem target_fs;
+			fl::io target_io(target_fs);
 			auto target = kv_index::create(target_io, opts, uuid);
 			CHECK(target.apply(tx({put("Qother", "mine")}), {}).result == verdict::accepted);
 			target.commit();

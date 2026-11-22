@@ -51,7 +51,7 @@ kv_index::options with(reader_registry& reg) {
 	return o;
 }
 
-std::size_t files_named(const faultfs::filesystem& fs, const std::string& name) {
+std::size_t files_named(const fl::filesystem& fs, const std::string& name) {
 	const auto l = fs.list();
 	return std::size_t(std::count(l.begin(), l.end(), name));
 }
@@ -71,8 +71,8 @@ std::uint64_t breaks(F&& f) {
 // at publication, digest included; no registry, no reader.
 void views_basic() {
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		kv_index::options o;
 		o.keyed = true;
 		o.reader_records = 6;
@@ -92,8 +92,8 @@ void views_basic() {
 		CHECK(h.acquire()->get(key_of(1)) == std::optional<std::string>("b"));
 	}
 	reader_registry reg(8);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, with(reg), uuid_of("basic"));
 	model_t model;
 	for (int i = 0; i < 40; ++i) {
@@ -121,14 +121,14 @@ void views_basic() {
 void publication_points() {
 	// The source of the install below: its files back the installed segments' mappings, so it
 	// outlives the index.
-	faultfs::filesystem sfs;
-	faultfs::io sio(sfs);
+	fl::filesystem sfs;
+	fl::io sio(sfs);
 	kv_index::options plain;
 	plain.keyed = true;
 	auto source = kv_index::create(sio, plain, uuid_of("points"));
 	reader_registry reg(8);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, with(reg), uuid_of("points"));
 	for (int i = 0; i < 30; ++i) { CHECK(ix.apply(tx({replace(key_of(std::size_t(i)), "a")}), {}).result == verdict::accepted); }
 	const auto h = ix.reader();
@@ -199,8 +199,8 @@ void publication_points() {
 // next scan; at most H views are kept; H guards out make the next acquire too_many_readers.
 void retire_and_free() {
 	reader_registry reg(2);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, with(reg), uuid_of("retire"));
 	CHECK(ix.apply(tx({replace(key_of(0), "g0")}), {}).result == verdict::accepted);
 	const auto h = ix.reader();
@@ -227,8 +227,8 @@ void retire_and_free() {
 // order frees the view it retires before retain(), so a merge's sources go in the same commit.
 void retention_under_guard() {
 	reader_registry reg(4);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	kv_index::options o = with(reg);
 	o.reclaim_step = 4096;  // every queued file truncated in steps: below a live mapping, faultfs aborts
 	auto ix = kv_index::create(io, o, uuid_of("retain"));
@@ -281,8 +281,8 @@ void retention_under_guard() {
 // deadline try_finish_close() names the record; after the release it finishes and frees the lock.
 void close_with_guards() {
 	reader_registry reg(4);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, with(reg), uuid_of("close"));
 	for (int i = 0; i < 20; ++i) { CHECK(ix.apply(tx({replace(key_of(std::size_t(i)), "c")}), {}).result == verdict::accepted); }
 	ix.commit();
@@ -318,8 +318,8 @@ void close_with_guards() {
 void destroy_and_move() {
 	reader_registry reg(4);
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		std::optional<kv_index::reader_handle> h;
 		const std::uint64_t n = breaks([&] {
 			auto ix = kv_index::create(io, with(reg), uuid_of("destroy"));
@@ -329,8 +329,8 @@ void destroy_and_move() {
 		CHECK(n == 0 && throws([&] { (void)h->acquire(); }));
 	}
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		std::optional<kv_index::reader_handle> h;
 		std::optional<kv_index::view_guard> g;
 		const std::uint64_t n = breaks([&] {
@@ -345,8 +345,8 @@ void destroy_and_move() {
 		g.reset();
 	}
 	{
-		faultfs::filesystem fs, fs2;
-		faultfs::io io(fs), io2(fs2);
+		fl::filesystem fs, fs2;
+		fl::io io(fs), io2(fs2);
 		auto ix = kv_index::create(io, with(reg), uuid_of("moved"));
 		CHECK(ix.apply(tx({replace(key_of(1), "one")}), {}).result == verdict::accepted);
 		const auto h = ix.reader();
@@ -366,8 +366,8 @@ void destroy_and_move() {
 // after the lease is taken, so a second call for the same position flushes nothing.
 void publish_through_coalesces() {
 	reader_registry reg(4);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, with(reg), uuid_of("through"));
 	const auto h = ix.reader();
 	CHECK(ix.apply(tx({replace(key_of(1), "a")}), {1, 1}).result == verdict::accepted);
@@ -397,8 +397,8 @@ void publish_through_coalesces() {
 // none rather than a torn one.
 void publication_order() {
 	reader_registry reg(4);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, with(reg), uuid_of("order"));
 	CHECK(ix.apply(tx({replace(key_of(1), "a")}), {1, 5}).result == verdict::accepted);
 	const auto h = ix.reader();
@@ -432,8 +432,8 @@ void lease_is_primary() {
 		return;
 	}
 	reader_registry reg(4);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, with(reg), uuid_of("lease"));
 	CHECK(ix.apply(tx({replace(key_of(1), "a")}), {}).result == verdict::accepted);
 	ix.refresh();
@@ -471,8 +471,8 @@ void lease_on_any_thread() {
 	WorkPool pool(po);
 	work_pool_executor ex(pool);
 	reader_registry reg(4);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	std::optional<kv_index> ix;
 	const std::uint64_t n = breaks([&] {
 		auto g = ex.open();
@@ -504,9 +504,9 @@ void lease_on_any_thread() {
 void heal_publishes() {
 	kv_index::options keyed;
 	keyed.keyed = true;
-	faultfs::filesystem fs;
+	fl::filesystem fs;
 	fs.map_files(false);  // media faults apply to reads, not to mappings
-	faultfs::io io(fs);
+	fl::io io(fs);
 	{
 		auto ix = kv_index::create(io, keyed, uuid_of("healview"));
 		for (int s = 0; s < 3; ++s) {
@@ -535,7 +535,7 @@ void heal_publishes() {
 		const std::uint64_t stride = std::max<std::uint64_t>(1, size / 16);
 		for (std::uint64_t at = 0; at < size; at += stride) {
 			fs.clear_faults();
-			fs.add_media_fault(name, faultfs::media::bit_flip, at, at + 1, 1);
+			fs.add_media_fault(name, fl::media::bit_flip, at, at + 1, 1);
 			reader_registry reg(4);
 			auto o = keyed;
 			o.readers = &reg;
@@ -572,8 +572,8 @@ void heal_publishes() {
 // stores are weakened; on x86_64 it passes either way, and TSan does not model it.
 void position_under_readers() {
 	reader_registry reg(16);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, with(reg), uuid_of("fastpath"));
 	const auto h = ix.reader();
 	std::atomic<bool> stop{false};
@@ -612,8 +612,8 @@ void views_under_readers(std::uint64_t seed, int readers) {
 	WorkPool pool(po);
 	work_pool_executor ex(pool);
 	reader_registry reg(64);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	kv_index::options o = with(reg);
 	o.background = &ex;
 	o.auto_merge = true;

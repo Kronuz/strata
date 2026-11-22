@@ -1,10 +1,12 @@
 // faultfs as a journal host's directory: the host takes its owner lock through lock_owner, which
-// faultfs::io leaves to the base; this forwards everything else to it.
+// faultfs's io leaves to the base; this forwards everything else to it.
 #pragma once
 
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 
 #include <memory>
+
+namespace fl = kronuz::faultlab;
 
 namespace group_test {
 
@@ -12,7 +14,7 @@ namespace j = kronuz::journal;
 
 class host_io final : public j::IO {
 public:
-	explicit host_io(strata::faultfs::filesystem& fs) : io_(fs) {}
+	explicit host_io(fl::filesystem& fs) : io_(fs) {}
 
 	j::FilesystemClass directory_filesystem() const override { return io_.directory_filesystem(); }
 	j::DirectoryTrust directory_trust() const override { return io_.directory_trust(); }
@@ -51,7 +53,7 @@ protected:
 	}
 
 private:
-	strata::faultfs::io io_;
+	fl::io io_;
 };
 
 }  // namespace group_test

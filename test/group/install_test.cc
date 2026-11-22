@@ -21,7 +21,7 @@
 namespace {
 
 namespace sg = strata::group;
-namespace ff = strata::faultfs;
+namespace fl = kronuz::faultlab;
 namespace j = kronuz::journal;
 using group_test::digest;
 
@@ -72,8 +72,8 @@ strata::basic_index_options<strata::document_layout> index_options() {
 // A replica on its own faultfs directory: strata, the file set and the application state, with
 // group's apply, capture and recovery steps written out (group.hh's, without the Driver).
 struct replica {
-	ff::filesystem fs;
-	ff::io io{fs};
+	fl::filesystem fs;
+	fl::io io{fs};
 	std::optional<blob::index_type> ix;
 	std::optional<sg::file_set> files;
 	blob::app app;

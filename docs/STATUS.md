@@ -10,5 +10,5 @@ measured rows.
 ## Owed at the next completion repin
 
 - completion's read-only IO virtuals (the sync-files change) are pure: `CountedIO`
-  (`include/strata/core/counted_io.hh`) and faultfs (`include/strata/core/faultfs.hh`) must
+  (`include/strata/core/counted_io.hh`) and faultfs (faultlab's `include/faultlab/faultfs.h`) must
   forward the four read-only opens in the same commit that moves strata's completion pin.
