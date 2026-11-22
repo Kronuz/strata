@@ -35,7 +35,7 @@ set(COMPLETION_ASIO OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG d8b538c6778f0a1b969e42c8428995d1d29d4731)
 # The manifest log's block framing (manifest-log D2), and the turn log, its driver and host that a
 # logged index writes through (standalone-turn-log D1); strata::group runs on the drivers.
-FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.git GIT_TAG 178030b38f5617337486407e6cc35d70881a0841)
+FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.git GIT_TAG e4b0100350d977171d13a55c3da4d286fa3b75fb)
 # Background work's threaded executor: one WorkPool per node, a WorkGroup per index.
 FetchContent_Declare(workpool GIT_REPOSITORY https://github.com/Kronuz/workpool.git GIT_TAG 640c66bfebccae811377670a265b62f4878ede8a)
 # strata::group's replication: consensus's Driver (docs/DRIVER.md, contract consensus:driver).
@@ -236,9 +236,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_include_directories(test_reopen_loops PRIVATE bench/kv)
   target_link_libraries(test_reopen_loops PRIVATE strata::core)
   add_test(NAME reopen_loops COMMAND test_reopen_loops)
-  add_executable(test_tolerant_open test/test_tolerant_open.cc)
-  target_link_libraries(test_tolerant_open PRIVATE strata::core)
-  add_test(NAME tolerant_open COMMAND test_tolerant_open)
+  # The tolerant open: a damaged block loses only the indexes whose head misses its bound (A2).
+  add_executable(test_reopen_damaged test/test_reopen_damaged.cc)
+  target_link_libraries(test_reopen_damaged PRIVATE strata::core)
+  add_test(NAME reopen_damaged COMMAND test_reopen_damaged)
   # An idle index's checkpoint moves forward while another writes 10 x retain_segments segments;
   # the log keeps at most retain + spare + 1 segment files (rocksdb-parity D2's test).
   add_executable(test_checkpoint_window test/test_checkpoint_window.cc)

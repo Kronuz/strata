@@ -2,7 +2,7 @@
 // block holds batches of three logged indexes on one host. C's head is past them, U's and W's
 // are not; U wrote after them, W did not. C opens with every record, U and W fail log_lost and stay
 // lost, and D, whose checkpoint record the block holds below its head, opens too. With the block's manifest damaged
-// too, no bound is known and every index on the log fails log_lost. Usage: test_tolerant_open.
+// too, no bound is known and every index on the log fails log_lost. Usage: test_reopen_damaged.
 #include "kv_test.hh"
 #include "strata/core/turn_seal.hh"
 
