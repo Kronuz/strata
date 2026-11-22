@@ -459,7 +459,7 @@ The host and its logs run on faultfs unchanged: they take any `kronuz::journal::
 | Check | Job |
 |---|---|
 | The suite: T1 to T12 and M1 | `campaign verify document-gate --for A1` (the build-test check) |
-| A long seed sweep | `campaign job submit --quest document-gate --for A1 --minutes 30 --build "cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j4 --target standalone_turn_log_test" -- build/standalone_turn_log_test --seeds 2000` |
+| A long seed sweep | `campaign job submit --quest document-gate --for A1 --minutes 30 --build "cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j4 --target standalone_turn_log_test" -- build/standalone_turn_log_test --seeds 2000` |
 | Each mutant, M-a to M-l | the same job with `--fails-without --commit <mutant>` |
 | Sealing and the watcher under TSan | the same build with `-fsanitize=thread`, running T1, T12 and the group-commit path, `--for A1` |
 | M2 to M5 | exclusive and strict jobs, recorded in `docs/perf/standalone-turn-log.md`; A3's rows reuse them |

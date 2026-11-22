@@ -60,8 +60,10 @@ in-flight search branches onto prospect.
 
 ## Verify a change
 
+Build with CMake and Ninja only: every configure passes `-G Ninja`; the top-level CMakeLists refuses any other generator.
+
 ```sh
-cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build && ctest --test-dir build
+cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build && ctest --test-dir build
 ```
 
 A core change is not done until prospect's suite passes on it too: configure prospect with

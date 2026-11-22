@@ -137,7 +137,7 @@ Not for:
 ## 🛠️ Building and testing
 
 ```sh
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build
 ```

@@ -41,12 +41,12 @@ build)
 	main_src=$3 count=${4:-100000} big=${5:-1000000} names=${6:-d1s1,d100s1,d1000s1,d100s10,d1000s10}
 	rm -rf "${out:?}/branch-build" "${out:?}/main-build"  # a job's checkout differs from the last one's
 	mkdir -p "$out/branch" "$out/main"
-	cmake -S "$here/bench/catalog_tiers" -B "$out/branch-build" -DCMAKE_BUILD_TYPE=Release >/dev/null
+	cmake -G Ninja -S "$here/bench/catalog_tiers" -B "$out/branch-build" -DCMAKE_BUILD_TYPE=Release >/dev/null
 	cmake --build "$out/branch-build" -j4 --target catalog_tiers catalog_tiers_count tiers_idle_index >/dev/null
 	cp "$out/branch-build/catalog_tiers" "$out/branch-build/catalog_tiers_count" "$out/branch/"
 	cp "$out/branch-build/tiers_idle_index" "$out/branch/idle_index"
 	git -C "$here" rev-parse HEAD >"$out/branch/commit"
-	cmake -S "$main_src" -B "$out/main-build" -DCMAKE_BUILD_TYPE=Release >/dev/null
+	cmake -G Ninja -S "$main_src" -B "$out/main-build" -DCMAKE_BUILD_TYPE=Release >/dev/null
 	cmake --build "$out/main-build" -j4 --target idle_index idle_index_count >/dev/null
 	cp "$out/main-build/idle_index" "$out/main-build/idle_index_count" "$out/main/"
 	git -C "$main_src" rev-parse HEAD >"$out/main/commit"
@@ -148,7 +148,7 @@ buildoff)
 	src=$3  # another tree's catalog_tiers, as `off`, for an A/B against this tree's
 	rm -rf "${out:?}/off-build"
 	mkdir -p "$out/off"
-	cmake -S "$src/bench/catalog_tiers" -B "$out/off-build" -DCMAKE_BUILD_TYPE=Release >/dev/null
+	cmake -G Ninja -S "$src/bench/catalog_tiers" -B "$out/off-build" -DCMAKE_BUILD_TYPE=Release >/dev/null
 	cmake --build "$out/off-build" -j4 --target catalog_tiers >/dev/null
 	cp "$out/off-build/catalog_tiers" "$out/off/"
 	git -C "$src" rev-parse HEAD >"$out/off/commit"
@@ -157,7 +157,7 @@ buildab)
 	rev=$3
 	rm -rf "${out:?}/branch-build" "${out:?}/off-src"
 	mkdir -p "$out/branch" "$out/off-src"
-	cmake -S "$here/bench/catalog_tiers" -B "$out/branch-build" -DCMAKE_BUILD_TYPE=Release >/dev/null
+	cmake -G Ninja -S "$here/bench/catalog_tiers" -B "$out/branch-build" -DCMAKE_BUILD_TYPE=Release >/dev/null
 	cmake --build "$out/branch-build" -j4 --target catalog_tiers >/dev/null
 	cp "$out/branch-build/catalog_tiers" "$out/branch/"
 	git -C "$here" rev-parse HEAD >"$out/branch/commit"
@@ -165,7 +165,7 @@ buildab)
 	git -C "$here" show "$rev:include/strata/core/catalog.hh" >"$out/off-src/include/strata/core/catalog.hh"
 	rm -rf "${out:?}/off-build"
 	mkdir -p "$out/off"
-	cmake -S "$out/off-src/bench/catalog_tiers" -B "$out/off-build" -DCMAKE_BUILD_TYPE=Release >/dev/null
+	cmake -G Ninja -S "$out/off-src/bench/catalog_tiers" -B "$out/off-build" -DCMAKE_BUILD_TYPE=Release >/dev/null
 	cmake --build "$out/off-build" -j4 --target catalog_tiers >/dev/null
 	cp "$out/off-build/catalog_tiers" "$out/off/"
 	echo "$(git -C "$here" rev-parse HEAD) with catalog.hh from $(git -C "$here" rev-parse "$rev")" >"$out/off/commit"
