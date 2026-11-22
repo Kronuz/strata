@@ -23,6 +23,7 @@ SUBMIT = "include/strata/group/submit.hh"
 BUNDLE = "include/strata/group/bundle.hh"
 INDEX = "include/strata/core/index.hh"
 FOOTPRINT = "test/group/footprint_test.cc"
+WITNESS = "include/strata/group/witness.hh"
 
 # name: [(file, old, new), ...]
 MUTANTS = {
@@ -108,6 +109,16 @@ MUTANTS = {
     "install-silent": [(GROUP,
         "\tif (auto* m = owner->find(id)) { m->install_needed(s.peer, s.key); }\n",
         "\t(void)id;\n\t(void)s;\n")],
+    # A witness's Sink holds a range below its promotion: the learner it joins as never applies
+    # it, and its promotion never commits (group-heal A4; group_witness_test join).
+    "witness-holds-range": [(WITNESS,
+        "\t\tloop_->driver().applied(id_, cs::Applied{range.entries.back().index});\n",
+        "")],
+    # A witness refuses the image it joins by: it never catches up past the leader's checkpoint
+    # (group-heal A4; group_witness_test join).
+    "witness-refuses-image": [(WITNESS,
+        "\t\tloop_->driver().validated(id_, token);\n",
+        "\t\tloop_->driver().validation_failed(id_, token);\n")],
     # A deposed proposer answers 503 instead of forwarding to the leader (A3).
     "no-forward": [(SUBMIT,
         "\t\t\t\tif (forwarded) {",
