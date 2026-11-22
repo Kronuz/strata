@@ -82,7 +82,9 @@ group_type::config config(cs::NodeId self, unsigned voters, strata::byte_budget&
 	c.options.limits.log_entries = 64;
 	c.options.limits.control_entries = 4;
 	c.options.limits.rpc_entries = 8;
-	c.options.timing = cs::Timing{10, 40, 60, 120, 60000};
+	// A lost transfer frame stalls the install one snapshot_timeout; 30 election timeouts, as at
+	// consensus's defaults, so a settle (20 s) outlasts a few.
+	c.options.timing = cs::Timing{10, 40, 60, 120, 3600};
 	c.options.scheduling = cs::WorkerLimits{16, 128};
 	c.identity = j::Identity{'V', char('0' + self)};
 	c.uuid = {'g', 'r', 'o', 'u', 'p', char('0' + self)};
@@ -328,12 +330,21 @@ struct world {
 		return nullptr;
 	}
 
+	// Transfer frames ride the pair's Bulk connection, in order (consensus drops a transfer whose
+	// frames arrive out of sequence): a frame picked goes after the pair's earlier ones.
+	std::size_t in_order(std::size_t at) const {
+		if (!net[at].frame) { return at; }
+		for (std::size_t i = 0; i < at; ++i) {
+			if (net[i].frame && net[i].from == net[at].from && net[i].to == net[at].to) { return i; }
+		}
+		return at;
+	}
 	// One step: deliver a message, complete an IO, run a chore item, or let time pass.
 	void step() {
 		const auto k = pick(10);
 		if (k < 4 && (!net.empty() || !fetches.empty())) {
 			if (fetches.empty() || (!net.empty() && pick(2))) {
-				const auto at = pick(std::min<std::size_t>(net.size(), 4));  // reordered among the first few
+				const auto at = in_order(pick(std::min<std::size_t>(net.size(), 4)));  // reordered among the first few
 				auto e = std::move(net[at]);
 				net.erase(net.begin() + std::ptrdiff_t(at));
 				deliver(std::move(e));

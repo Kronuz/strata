@@ -140,7 +140,10 @@ and the set's once, and needs room for both until the sweep.
 ## Proof
 
 `test/group/voters_test.cc` drives the binding on consensus's Driver, transfer frames and
-fetches on its seeded network: `install_gap` (a replica cut off while every other checkpoints
+fetches on its seeded network. Messages reorder; a pair's transfer frames keep their order, as on
+the Bulk connection, and a lost one stalls the flight one `snapshot_timeout` (3.6 s there, 30
+election timeouts as at consensus's defaults), after which the leader starts it over:
+`install_gap` (a replica cut off while every other checkpoints
 past it installs and its digest equals the replay), the ungated schedules (group-core's seeds 8,
 12, 16, 18, 23, 24, 27 and seeds 101-140 at 3 voters, crashes and power cuts included, settle by
 install), and `grow_and_heal` (at 3 and 5 voters, a joiner added past every checkpoint installs,
