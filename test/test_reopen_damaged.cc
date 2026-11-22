@@ -4,7 +4,6 @@
 // lost, and D, whose checkpoint record the block holds below its head, opens too. With the block's manifest damaged
 // too, no bound is known and every index on the log fails log_lost. Usage: test_reopen_damaged.
 #include "kv_test.hh"
-#include "faultlab/faultfs.h"
 #include "strata/core/turn_seal.hh"
 
 #include "journal/host.h"
@@ -47,7 +46,7 @@ jr::TurnLogOptions geometry() {
 // The journal host's directory over its own faultfs directory. Its owner lock is a token.
 class host_view final : public jr::IO {
 public:
-	explicit host_view(faultfs::io& io) : io_(io) {}
+	explicit host_view(fl::io& io) : io_(io) {}
 	jr::FilesystemClass directory_filesystem() const override { return io_.directory_filesystem(); }
 	jr::DirectoryTrust directory_trust() const override { return io_.directory_trust(); }
 	std::unique_ptr<jr::OwnerLock> acquire_owner(bool) override { return std::make_unique<jr::OwnerLock>(); }
@@ -66,13 +65,13 @@ public:
 	std::unique_ptr<jr::DirectoryCursor> scan_directory() override { return io_.scan_directory(); }
 
 private:
-	faultfs::io& io_;
+	fl::io& io_;
 };
 
 struct host {
 	jr::Host table;
 	turn_sealer sealer;
-	explicit host(faultfs::io& io) : table(std::make_shared<host_view>(io), host_identity(), jr::HostOptions{1, geometry()}), sealer(table, 0, host_identity(), geometry(), command_bytes) {}
+	explicit host(fl::io& io) : table(std::make_shared<host_view>(io), host_identity(), jr::HostOptions{1, geometry()}), sealer(table, 0, host_identity(), geometry(), command_bytes) {}
 	void turns() {
 		while (sealer.turn()) {}
 	}
@@ -88,7 +87,7 @@ kv_index::options logged(turn_sealer& s, std::uint64_t group) {
 }
 
 // The host's turn-log segments, by name.
-std::map<std::string, std::string> segments(faultfs::io& io) {
+std::map<std::string, std::string> segments(fl::io& io) {
 	std::map<std::string, std::string> out;
 	for (auto c = io.scan_directory(); auto name = c->next();) {
 		if (name->find("-turns-") == std::string::npos) { continue; }
@@ -100,13 +99,13 @@ std::map<std::string, std::string> segments(faultfs::io& io) {
 	return out;
 }
 // The segment and offset holding `bytes`.
-std::pair<std::string, std::uint64_t> find(faultfs::io& io, const std::string& bytes) {
+std::pair<std::string, std::uint64_t> find(fl::io& io, const std::string& bytes) {
 	for (const auto& [name, data] : segments(io)) {
 		if (auto at = data.find(bytes); at != std::string::npos) { return {name, at}; }
 	}
 	return {};
 }
-void flip(faultfs::io& io, const std::string& name, std::uint64_t offset) {
+void flip(fl::io& io, const std::string& name, std::uint64_t offset) {
 	auto f = io.open_existing(name);
 	char c = 0;
 	f->read_at(offset, std::span(&c, 1));
@@ -118,8 +117,8 @@ void flip(faultfs::io& io, const std::string& name, std::uint64_t offset) {
 std::string run(char letter) { return std::string(600, letter); }
 
 struct world {
-	faultfs::filesystem hfs, cfs, ufs, wfs, dfs;
-	faultfs::io hio{hfs}, cio{cfs}, uio{ufs}, wio{wfs}, dio{dfs};
+	fl::filesystem hfs, cfs, ufs, wfs, dfs;
+	fl::io hio{hfs}, cio{cfs}, uio{ufs}, wio{wfs}, dio{dfs};
 	std::string segment;
 	std::uint64_t at = 0;  // a byte of U's batch in the damaged block
 };
