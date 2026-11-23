@@ -13,6 +13,7 @@
 #include "strata/core/index.hh"
 #include "strata/group/bundle.hh"
 #include "strata/group/file_set.hh"
+#include "strata/group/repair.hh"
 
 #include "task.hh"
 
@@ -126,6 +127,30 @@ inline std::uint32_t crc_of(kronuz::journal::File& f, std::uint64_t length) {
 	kronuz::crc32c::Crc32c crc;
 	if (read_prefix(f, length, crc) != length) { throw install_failed("strata::group: an install file ends before its length"); }
 	return crc.value();
+}
+// The first staged file of `p` whose bytes fail its CRC32C, by its reason: strata's while they are
+// staged, and each set file not yet moved into place.
+inline std::optional<std::string> staged_damage(kronuz::journal::IO& dir, const install_pin& p, bool strata_staged) {
+	auto check = [&](std::string_view prefix, const install_file& f, bool required) -> std::optional<std::string> {
+		const auto name = std::string(prefix) + f.name;
+		auto file = open_if(dir, name);
+		if (!file) {
+			if (required) { return "strata::group: a staged file is missing: " + name; }
+			return std::nullopt;
+		}
+		kronuz::crc32c::Crc32c crc;
+		if (read_prefix(*file, f.length, crc) != f.length || crc.value() != f.crc) { return "strata::group: a staged file fails its CRC32C: " + name; }
+		return std::nullopt;
+	};
+	if (strata_staged) {
+		for (const auto& f : p.strata) {
+			if (auto bad = check(strata_prefix, f, true)) { return bad; }
+		}
+	}
+	for (const auto& f : p.files) {
+		if (auto bad = check(files_prefix, f, false)) { return bad; }
+	}
+	return std::nullopt;
 }
 
 // A directory's names under `prefix`, the prefix taken off: strata reads a staged checkpoint
@@ -532,7 +557,15 @@ inline void sweep(kronuz::journal::IO& dir) {
 template <class Layout>
 void activate(kronuz::journal::IO& dir, const install_pin& p, basic_index<Layout>& ix) {
 	namespace d = install_detail;
-	if (d::open_if(dir, std::string(d::strata_prefix) + p.strata.front().name)) {
+	const bool strata_staged = d::open_if(dir, std::string(d::strata_prefix) + p.strata.front().name) != nullptr;
+	// Staged bytes rested since the stage synced them: each is read back against its CRC32C
+	// first. A file that fails marks the replica damaged, and the stage goes for a new one.
+	if (auto bad = d::staged_damage(dir, p, strata_staged)) {
+		mark_damaged(dir, *bad);
+		sweep(dir);
+		throw replica_damaged(*bad);
+	}
+	if (strata_staged) {
 		// A deferred index commits its old state first: strata's install writes its copies
 		// before its manifest, which a crash must not leave in a directory with no manifest log.
 		if (!index_detail::log_holding(dir)) { ix.commit(); }
@@ -550,6 +583,7 @@ void activate(kronuz::journal::IO& dir, const install_pin& p, basic_index<Layout
 		if (d::open_if(dir, from)) { dir.replace(from, std::string(bundle_detail::prefix) + f.name); }
 	}
 	dir.sync_directory();
+	clear_damaged(dir);  // the replica holds the pin's bytes now (repair.hh)
 	sweep(dir);
 }
 

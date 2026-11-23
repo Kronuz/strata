@@ -12,6 +12,7 @@
 #include "strata/group/bundle.hh"
 #include "strata/group/file_set.hh"
 #include "strata/group/install.hh"
+#include "strata/group/repair.hh"
 
 #include "consensus/driver.h"
 
@@ -190,13 +191,19 @@ public:
 
 	// The index a group recovers on, which its host opens and lends (the catalog's open_index):
 	// the durable one, else a deferred create, written first by the first checkpoint's commit; a
-	// crash before it recreates the index from the log (D112).
+	// crash before it recreates the index from the log (D112). A damaged one marks the replica
+	// damaged first, then its names go and a deferred index takes the reinstall (repair.hh).
 	static index_type open_index(jn::IO& directory, const typename index_type::options& o, const std::array<char, 16>& uuid) {
 		try {
 			return index_type::open(directory, o);
 		} catch (const index_not_created&) {
-			return index_type::create_deferred(directory, o, uuid);
+		} catch (...) {
+			const auto e = std::current_exception();
+			if (!damage(e)) { throw; }
+			mark_damaged(directory, error_text(e));
+			quarantine_strata(directory);
 		}
+		return index_type::create_deferred(directory, o, uuid);
 	}
 
 	// Both borrowed, for the group's life (D169): `index` is opened over `directory`, which the
@@ -265,7 +272,10 @@ public:
 			failed = std::current_exception();
 		}
 		opening_.reset();
-		if (!failed) { co_return; }
+		if (!failed) {
+			if (damaged_.load()) { begin_repair(); }
+			co_return;
+		}
 		closing_.store(true);
 		fence_local(error_text(failed));
 		co_await task::schedule_on{loop_->scheduler()};
@@ -285,6 +295,7 @@ public:
 	// `placed`, if any, hears the placement on the loop first.
 	task::task<answer> propose(std::string command, ack level = ack::quorum, task::cancel_token token = {}, std::function<void(cs::Placement)> placed = {}) {
 		if (closing_.load()) { throw cs::closed{}; }
+		if (damaged_.load()) { throw replica_damaged("strata::group: the replica is damaged and reinstalls"); }
 		if (level == ack::none) {
 			const auto at = co_await place(std::move(command), std::move(token));
 			if (placed) { placed(at); }
@@ -303,13 +314,24 @@ public:
 	template <class F>
 	task::task<std::invoke_result_t<F&, index_type&>> read_applied(F fn, task::cancel_token token = {}) {
 		using R = std::invoke_result_t<F&, index_type&>;
+		if (damaged_.load()) { throw replica_damaged("strata::group: the replica is damaged and reinstalls"); }
 		const auto ready = co_await loop_->driver().read(id_, std::move(token));
 		co_await applied_at(ready.index);
+		// A read that meets damaged bytes answers none of them: the replica reinstalls.
+		auto guarded = [&](auto&& run) {
+			try {
+				run();
+			} catch (...) {
+				const auto e = std::current_exception();
+				if (damage(e) && become_damaged(error_text(e))) { throw replica_damaged(error_text(e)); }
+				throw;
+			}
+		};
 		if constexpr (std::is_void_v<R>) {
-			co_await on_chore([&] { fn(*ix_); });
+			co_await on_chore([&] { guarded([&] { fn(*ix_); }); });
 		} else {
 			std::optional<R> out;
-			co_await on_chore([&] { out.emplace(fn(*ix_)); });
+			co_await on_chore([&] { guarded([&] { out.emplace(fn(*ix_)); }); });
 			co_return std::move(*out);
 		}
 	}
@@ -337,7 +359,7 @@ public:
 		auto serial = co_await checkpoints_.lock();
 		if (torn_down()) { co_return; }
 		std::exception_ptr failed;
-		if (!fenced_.load()) {
+		if (!fenced_.load() && !damaged_.load()) {
 			try {
 				for (;;) {
 					auto published = co_await checkpoint_held();
@@ -357,7 +379,7 @@ public:
 			if (!failed) { failed = std::current_exception(); }
 		}
 		// The row closed, no notice pins again: every pin goes while strata is the group's.
-		if (!fenced_.load()) {
+		if (!fenced_.load() && !damaged_.load()) {
 			try {
 				co_await on_chore([this] { release_pins_held(); });
 			} catch (...) {
@@ -367,6 +389,7 @@ public:
 		co_await leave();
 		if (failed) { std::rethrow_exception(failed); }
 		if (fenced_.load()) { throw group_fenced("strata::group: closed fenced: " + fence_reason()); }
+		if (damaged_.load()) { throw replica_damaged("strata::group: closed damaged: " + damage_reason()); }
 	}
 
 	// open() and close() for a synchronous host (the catalog's open_payload and close_payload):
@@ -395,6 +418,13 @@ public:
 		return stalled_;
 	}
 	bool fenced() const noexcept { return fenced_.load(); }
+	// Damaged bytes found (repair.hh): reads, writes and checkpoints refused, delivered ranges
+	// acknowledged unapplied, until a reinstall's activation replaces them.
+	bool damaged() const noexcept { return damaged_.load(); }
+	std::string damage_reason() const {
+		std::lock_guard lock(mu_);
+		return damage_reason_;
+	}
 	// Peers this leader's log no longer reaches, until their install ends (installed or caught
 	// up): each installs this leader's latest bundle from its pin.
 	std::set<cs::NodeId> installs_needed() const {
@@ -425,7 +455,7 @@ public:
 		std::shared_ptr<const pinned> p;
 		{
 			std::lock_guard lock(mu_);
-			if (closed_ || !sources_) { return std::nullopt; }
+			if (closed_ || !sources_ || damaged_.load()) { return std::nullopt; }
 			if (auto it = sources_->pins.find(position); it != sources_->pins.end()) { p = it->second; }
 		}
 		if (!p) { return std::nullopt; }
@@ -511,8 +541,11 @@ private:
 		virtual step run() = 0;
 		virtual void finish() {}
 		virtual void abort(std::exception_ptr) {}
+		// A delivered range's last index, which a damaged replica acknowledges unapplied; 0 else.
+		virtual cs::Index delivered() const noexcept { return 0; }
 		work* next = nullptr;
 		bool queued_owns = true;
+		bool install = false;  // an install's own call: it runs while the replica is damaged
 	};
 	// The chore's queue, linked through its items: an idle group holds no block for it.
 	struct work_queue {
@@ -560,6 +593,7 @@ private:
 			self->notify_applied(range.entries.back().index);
 			return step::done;
 		}
+		cs::Index delivered() const noexcept override { return range.entries.back().index; }
 		group* self;
 		cs::Committed range;
 		std::size_t next = 0;
@@ -697,17 +731,19 @@ private:
 	}
 
 	// The awaiter keeps the item alive until it resumes: the queue hands it back, never frees it.
-	chore_awaiter on_chore(std::function<void()> fn, bool front = false) {
+	chore_awaiter on_chore(std::function<void()> fn, bool front = false, bool install = false) {
 		auto w = std::make_unique<call_work>();
 		w->fn = [f = std::move(fn)] {
 			f();
 			return step::done;
 		};
+		w->install = install;
 		return chore_awaiter{this, std::move(w), front};
 	}
-	chore_awaiter on_chore_step(std::function<step()> fn, bool front = false) {
+	chore_awaiter on_chore_step(std::function<step()> fn, bool front = false, bool install = false) {
 		auto w = std::make_unique<call_work>();
 		w->fn = std::move(fn);
+		w->install = install;
 		return chore_awaiter{this, std::move(w), front};
 	}
 
@@ -751,6 +787,7 @@ private:
 	task::task<void> drain() {
 		for (;;) {
 			work* w = nullptr;
+			work* refused = nullptr;  // damaged: an item that does not run (refuse_damaged)
 			work_queue left;  // a fence kept the running item, or the close tore down: they go now
 			idle_awaiter* idle = nullptr;
 			bool closed = false;
@@ -763,7 +800,12 @@ private:
 					if (!tasks_) { idle = std::exchange(idle_, nullptr); }
 				} else {
 					w = queue_.front();
+					if (damaged_.load() && !w->install) { refused = queue_.pop_front(); }
 				}
+			}
+			if (refused) {
+				refuse_damaged(refused);
+				continue;
 			}
 			if (!w) {
 				// Neither touches the group: a resumed idle waiter may destroy it.
@@ -779,8 +821,14 @@ private:
 				const payload_work mark;  // the slot payload's own call (D169; catalog CT-R15)
 				r = w->run();
 			} catch (...) {
-				fence(error_text(std::current_exception()));
-				r = step::done;
+				// Damaged bytes: the item stays, and the next look refuses it (a range acknowledged).
+				const auto e = std::current_exception();
+				if (damage(e) && become_damaged(error_text(e))) {
+					r = step::more;
+				} else {
+					fence(error_text(e));
+					r = step::done;
+				}
 			}
 			{
 				std::lock_guard lock(mu_);
@@ -839,8 +887,8 @@ private:
 			throw;
 		} catch (...) {
 			// A stage-1 throw rolled back with the position unmoved: retried after the chore
-			// yields; the third at one entry fences the replica.
-			if (++throws_ >= 3) { throw; }
+			// yields; the third at one entry fences the replica. Damage repairs at once.
+			if (damage(std::current_exception()) || ++throws_ >= 3) { throw; }
 			return step::more;
 		}
 		throws_ = 0;
@@ -1095,15 +1143,25 @@ private:
 	// The replica as bundle `b` names it, strata open: a complete stage for `b` activates first
 	// (install's resume), then strata at P_H >= P_b, the set at the bundle's lengths, the state.
 	// Recovery's, and an install's activation, which so is what a restore after a crash does.
+	// A replica marked damaged, or whose set fails its checks, adopts the bundle's position only,
+	// damaged, and reinstalls (repair.hh); an activation that replaced its bytes ends the damage.
 	void adopt(const bundle& b, bool restored) {
 		recovered_ = b;
-		if (::strata::group::resume(files_.io(), b, *ix_)) {
-			installs_.fetch_add(1);
-			installed_at_.store(b.position);
-		}
+		try {
+			if (::strata::group::resume(files_.io(), b, *ix_)) {
+				installs_.fetch_add(1);
+				installed_at_.store(b.position);
+			}
+		} catch (const replica_damaged&) {}  // a staged file failed its check: marked, stage swept
+		if (marked_damaged(files_.io())) { return adopt_damaged(b); }
 		head_ = ix_->applied();
 		if (b.position > head_.index) { throw group_fenced("strata::group: the bundle is past strata's durable head (P_b > P_H)"); }
-		files_.recover(b.files);
+		try {
+			files_.recover(b.files);
+		} catch (const file_set_damage& e) {
+			mark_damaged(files_.io(), e.what());
+			return adopt_damaged(b);
+		}
 		state_ = restored ? app_->decode(b.state) : state_type{};
 		applied_term_ = b.term;
 		phase_ = phase::effects;
@@ -1111,6 +1169,29 @@ private:
 		readable_at_.store(head_.index, std::memory_order_release);
 		applied_.store(b.position, std::memory_order_release);
 		published_.store(b.position);
+		if (damaged_.load()) {
+			std::lock_guard lock(mu_);
+			damaged_.store(false);
+			if (refused_by_damage_) {
+				refused_ = nullptr;
+				refused_by_damage_ = false;
+			}
+		}
+	}
+	void adopt_damaged(const bundle& b) {
+		state_ = state_type{};
+		applied_term_ = b.term;
+		phase_ = phase::effects;
+		throws_ = 0;
+		applied_.store(b.position, std::memory_order_release);
+		published_.store(b.position);
+		std::string reason = "strata::group: the replica is marked damaged";
+		if (auto f = repair_detail::open_if(files_.io(), repair_detail::marker)) {
+			try {
+				if (auto text = index_detail::read_all(*f); !text.empty()) { reason = std::move(text); }
+			} catch (...) {}
+		}
+		enter_damaged(std::move(reason));
 	}
 
 	// --- install (docs/mechanisms/group-install.md) ---------------------------------------
@@ -1149,7 +1230,7 @@ private:
 	// so a learner's fetch can outrun this pin; its validation fails and the next flight finds
 	// the pin. A key at another boundary (a later bundle published) pins nothing.
 	void pin_for(cs::NodeId peer, cs::SnapshotKey key) {
-		if (key.boundary.index != recovered_.position || !recovered_.position) { return; }
+		if (key.boundary.index != recovered_.position || !recovered_.position || damaged_.load()) { return; }
 		std::shared_ptr<pinned> p;
 		{
 			std::lock_guard lock(mu_);
@@ -1286,10 +1367,12 @@ private:
 		try {
 			fetcher fetch = [l = loop_, id = id_, source](std::string name, fetch_done done) { l->fetch(id, source, std::move(name), std::move(done)); };
 			auto pin = co_await fetch_pin(fetch, std::move(image));
-			co_await on_chore_step([this] {
-				installing_.store(true);
-				return step::done;
-			});
+			co_await on_chore_step(
+				[this] {
+					installing_.store(true);
+					return step::done;
+				},
+				false, true);
 			co_await task::schedule_on{chore_};
 			try {
 				(void)co_await ::strata::group::stage(files_.io(), std::move(pin), fetch, install_window);
@@ -1310,16 +1393,21 @@ private:
 		const task_scope counted{this};
 		std::optional<std::string> failed;
 		try {
-			co_await on_chore([this, &b] {
-				adopt(b, true);
-				release_later();
-			});
+			co_await on_chore(
+				[this, &b] {
+					adopt(b, true);
+					release_later();
+				},
+				false, true);
 		} catch (...) {
 			failed = error_text(std::current_exception());
 		}
 		co_await task::schedule_on{loop_->scheduler()};
 		if (!failed) {
+			// A staged file that failed its check left the replica damaged: consensus holds the
+			// image as its base all the same, and the replica asks for a new one.
 			loop_->driver().activated(id_, token);
+			if (damaged_.load()) { begin_repair(); }
 			co_return;
 		}
 		if (torn_down()) { co_return; }  // a close refused it: the row is closed, the group not damaged
@@ -1360,9 +1448,13 @@ private:
 		while (!dropped.empty()) { drop(dropped.pop_front(), false); }
 	}
 	// Every `quorum` waiter, linked now or later, resumes with the first such error.
-	void fail_waiters(std::exception_ptr error) {
+	// A damage's error gives way to a later fence's or close's, and goes at the repair.
+	void fail_waiters(std::exception_ptr error, bool by_damage = false) {
 		std::lock_guard lock(mu_);
-		if (!refused_) { refused_ = std::move(error); }
+		if (!refused_ || (refused_by_damage_ && !by_damage)) {
+			refused_ = std::move(error);
+			refused_by_damage_ = by_damage;
+		}
 		for (auto& [i, p] : waiters_) {
 			p->linked = false;
 			p->error = refused_;
@@ -1376,13 +1468,101 @@ private:
 		readers_.clear();
 	}
 
+	// --- repair (repair.hh; docs/mechanisms/group-install.md, Repair) ---------------------
+
+	// On the chore: damaged bytes found. The marker first, so a crash reopens damaged; a marker
+	// that cannot be written leaves the caller to fence. Then the local fence, and the request.
+	bool become_damaged(std::string reason) {
+		if (damaged_.load()) { return true; }
+		try {
+			mark_damaged(files_.io(), reason);
+		} catch (...) {
+			return false;
+		}
+		enter_damaged(std::move(reason));
+		task::spawn(loop_->scheduler(), repair_on_loop(loop_, id_));
+		return true;
+	}
+	// Reads, writes and checkpoints refused from here, every waiter answered: nothing the replica
+	// holds is served until a reinstall's activation replaces it.
+	void enter_damaged(std::string reason) {
+		readable_at_.store(~cs::Index(0), std::memory_order_release);
+		{
+			std::lock_guard lock(mu_);
+			damaged_.store(true);
+			stalled_ = false;
+			damage_reason_ = reason;
+		}
+		fail_waiters(std::make_exception_ptr(replica_damaged(reason)), true);
+	}
+	// An item a damaged replica does not run: a delivered range is acknowledged unapplied, so
+	// consensus can ask for the image (it refuses while a range is outstanding) and re-delivers
+	// past the image's boundary from this replica's log; a call answers replica_damaged.
+	void refuse_damaged(work* w) {
+		if (const auto through = w->delivered()) { notify_applied(through); }
+		if (w->queued_owns) {
+			delete w;
+		} else {
+			w->abort(std::make_exception_ptr(replica_damaged("strata::group: the replica is damaged and reinstalls")));
+		}
+	}
+	// Holds the loop and the id, not the group, which a stopped process may destroy first.
+	static task::task<void> repair_on_loop(loop* l, cs::GroupId id) {
+		if (auto* g = dynamic_cast<group*>(l->find(id))) { g->begin_repair(); }
+		co_return;
+	}
+	// On the loop: one reinstall call at a time, and the timer that repeats it while damaged.
+	void begin_repair() {
+		if (!damaged_.load() || fenced_.load() || closing_.load()) { return; }
+		arm_handoff();
+		if (repairing_) { return; }
+		repairing_ = true;
+		started_task();
+		task::spawn(loop_->scheduler(), reinstall_once());
+	}
+	// consensus ships the leader's image through install's path (validate, activate); `Current`,
+	// `NotLeader` and `Busy` wait for the timer; a leader hands off first.
+	task::task<void> reinstall_once() {
+		const task_scope counted{this};
+		try {
+			(void)co_await loop_->driver().reinstall(id_);
+		} catch (const cs::rejected& r) {
+			if (r.reason == cs::RejectReason::LeaderMustTransfer) { hand_leadership_away(); }
+		} catch (...) {}
+		if (task::current() != loop_->scheduler()) { co_await task::schedule_on{loop_->scheduler()}; }
+		repairing_ = false;
+	}
+	// A damaged leader serves nothing: leadership goes to the follower the host names, else to a
+	// voter of the membership.
+	void hand_leadership_away() {
+		std::optional<cs::NodeId> target;
+		if (loop_->applied_past) {
+			try {
+				target = loop_->applied_past(id_, 0);
+			} catch (...) {}
+		}
+		if (const auto s = loop_->driver().state(id_); !target && s) {
+			for (const auto& m : s->membership.members) {
+				if (m.role == cs::MemberRole::Voter && m.incarnation != s->leader) {
+					target = m.incarnation;
+					break;
+				}
+			}
+		}
+		if (target) { task::spawn(loop_->scheduler(), transfer_on_loop(loop_, id_, *target)); }
+	}
+
 	// --- a stalled leader's hand-off (D3) -------------------------------------------------
 
 	struct handoff_timer : wheel::timer_entry {
 		group* self = nullptr;
 	};
+	// One timer for both: a stall's hand-off and a damaged replica's next reinstall call.
 	static void handoff_fired(wheel::timer_entry& e, bool expired) noexcept {
-		if (expired) { static_cast<handoff_timer&>(e).self->hand_off(); }
+		if (!expired) { return; }
+		auto* self = static_cast<handoff_timer&>(e).self;
+		self->hand_off();
+		self->begin_repair();
 	}
 	// Holds the loop and the id, not the group, which a stopped process may destroy first.
 	static task::task<void> stall_on_loop(loop* l, cs::GroupId id) {
@@ -1451,13 +1631,17 @@ private:
 	std::atomic<bool> hold_{false}, fenced_{false}, closing_{false};
 	task::async_mutex checkpoints_;
 	std::string fence_reason_;
-	std::exception_ptr refused_;  // fenced or closed: every waiter's answer
+	std::exception_ptr refused_;  // fenced, closed or damaged: every waiter's answer
+	bool refused_by_damage_ = false;  // refused_ is a damage's, which the repair clears
+	std::string damage_reason_;
 	std::map<cs::Index, pending*> waiters_;
 	std::multimap<cs::Index, applied_waiter*> readers_;
 	std::map<cs::Index, outcome> recent_;
 	std::multiset<cs::Index> outstanding_;  // the `since` of each proposal not yet registered
 	std::unique_ptr<sources> sources_;
 	std::atomic<bool> installing_{false};                // a stage holds the chore
+	std::atomic<bool> damaged_{false};                   // repair.hh: marked damaged, until reinstalled
+	bool repairing_ = false;                             // the loop's: a reinstall call in flight
 	unsigned tasks_ = 0;                                  // install tasks in flight, under mu_
 	mutable std::atomic<unsigned> serving_{0};            // serves reading the directory
 	std::atomic<std::uint64_t> installs_{0};

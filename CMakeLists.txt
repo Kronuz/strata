@@ -127,6 +127,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(group_witness_test test/group/witness_test.cc)
   target_link_libraries(group_witness_test PRIVATE strata::group)
   add_test(NAME group_witness COMMAND group_witness_test)
+  # A damaged segment, manifest or set file fences its replica, which reinstalls (group-heal A3).
+  add_executable(group_repair_test test/group/repair_test.cc)
+  target_link_libraries(group_repair_test PRIVATE strata::group)
+  add_test(NAME group_repair COMMAND group_repair_test)
+  set_tests_properties(group_repair PROPERTIES TIMEOUT 1500)
   # A learner installs a pinned pack and file set through the Driver's install surface (group-heal A1).
   add_executable(group_install_test test/group/install_test.cc)
   target_link_libraries(group_install_test PRIVATE strata::group)
