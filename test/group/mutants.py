@@ -158,6 +158,10 @@ MUTANTS = {
     "bound-skips-payload": [(CATALOG,
         "\t\tclose_payload(s, down);\n",
         "\t\tif (mode != close_mode::bound) { close_payload(s, down); }\n")],
+    # The sweep never closes a slot at the wake bound (D5; --target=group_catalog_test bound).
+    "sweep-skips-bound": [(CATALOG,
+        "\t\t\t\tif (st == slot_state::owed && posts < lim.transitions && begin_bound_close(i)) {\n",
+        "\t\t\t\tif (st == slot_state::owed && posts < lim.transitions && false) {\n")],
     "replace-skips-payload": [(CATALOG,
         "\t\tclose_payload(s, false);\n",
         "")],

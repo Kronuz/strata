@@ -798,12 +798,13 @@ void sweep() {
 	std::printf("sweep: closed at %llu applied, reopened from its bundle\n", (unsigned long long)applied);
 }
 
-// The wake bound's close (D5): a demoted slot whose wakes fail `wake_bound` times is closed through
-// close_payload, whose checkpoint covers everything applied.
+// The wake bound's close (D5): a demoted slot whose wakes fail `wake_bound` times is closed by the
+// sweep's own pass through close_payload, whose checkpoint covers everything applied.
 void bound() {
 	disks d;
 	tuning t;
 	t.defer_io = true;  // a demoted index owes a promote, which the wake runs
+	t.sweep_ns = 20 * ms;  // the pass that closes the slot at the bound comes around on its period
 	process p(d, t);
 	const std::string k = key_of(31);
 	std::uint64_t applied = 0;
@@ -822,14 +823,19 @@ void bound() {
 	check(p.cat->index_of(idx)->promote_owed(), "the demoted index owes its promote");
 	std::printf("bound: demoted with %llu maps, probe in %llu ms\n", (unsigned long long)p.cat->count_of(idx, strata::resource::maps), (unsigned long long)(p.cat->probe_at_of(idx) > p.exec->now() ? (p.cat->probe_at_of(idx) - p.exec->now()) / ms : 0));
 	p.fail_segments.store(EMFILE);
+	// One wake at a time, only while the slot rests at `owed`: once the eighth fails, the sweep may close
+	// it at any pass, and a pin after that would reopen the key under the failing segments.
 	const bool reached = p.wait_for("the wakes fail to the bound", [&] {
+		if (p.cat->stats().bound_closes != 0) { return true; }
+		if (cat_t::state_of(p.cat->word_of(idx)) != strata::slot_state::owed) { return false; }
+		if (p.cat->wake_failures_of(idx) >= 8) { return true; }
 		if (auto r = p.cat->try_pin(k); r.status == cat_t::try_status::pinned) { return !check(false, "a wake promoted with its segments failing"); }
-		return p.cat->wake_failures_of(idx) >= 8;
+		return false;
 	});
 	p.fail_segments.store(0);
 	if (!reached) { return; }
 	std::printf("bound: the wakes failed to the bound; passes %llu, bound closes %llu\n", (unsigned long long)p.cat->stats().passes, (unsigned long long)p.cat->stats().bound_closes);
-	if (!p.wait_for("the bound close begins", [&] { return p.cat->begin_bound_close(idx); })) {
+	if (!p.wait_for("the sweep closes the slot at the bound", [&] { return p.cat->stats().bound_closes >= 1; })) {
 		const std::uint64_t w = p.cat->word_of(idx), at = p.exec->now(), probe = p.cat->probe_at_of(idx);
 		const auto st = p.cat->stats();
 		std::string edges;
