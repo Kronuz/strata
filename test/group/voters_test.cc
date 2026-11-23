@@ -1085,7 +1085,7 @@ bool change(world& w, unsigned voters, const std::function<void(cs::Membership&)
 	return check(false, "the membership step commits");
 }
 // The leader is cut off until another replica leads in a later term, then healed.
-void depose(world& w) {
+void cut_leader(world& w) {
 	auto* l = w.leader();
 	if (!l) { return; }
 	const auto term = l->p->lp->driver().state(gid)->term;
@@ -1097,7 +1097,25 @@ void depose(world& w) {
 	}
 	check(next, "another replica leads once the leader is cut off");
 	w.isolated.clear();
+}
+void depose(world& w) {
+	cut_leader(w);
 	check(w.settle(), "the cluster settles after the leader change");
+}
+bool holds(const cs::Membership& m, cs::NodeId incarnation) {
+	return std::any_of(m.members.begin(), m.members.end(), [&](const cs::Member& x) { return x.incarnation == incarnation; });
+}
+// Once a promotion beside `leaving` commits, the leader in force removes it by itself (consensus
+// D3): true when a leader other than `leaving` holds a membership without it.
+bool removed_by_core(world& w, cs::NodeId leaving) {
+	for (int i = 0; i < 40000; ++i) {
+		if (auto* l = w.leader(); l && l->id != leaving) {
+			const auto m = l->p->lp->driver().state(gid)->membership;
+			if (!m.members.empty() && !m.leaving && !holds(m, leaving)) { return true; }
+		}
+		w.step();
+	}
+	return false;
 }
 // Commands at the leader and a checkpoint at every replica: no log reaches a new member.
 void write_and_compact(world& w, std::mt19937_64& gen, int writes) {
@@ -1121,8 +1139,9 @@ void write_and_compact(world& w, std::mt19937_64& gen, int writes) {
 	check(w.settle(), "the cluster settles after the checkpoints");
 }
 // A joiner added as a learner past every replica's checkpoint installs the leader's bundle,
-// catches up, and is promoted to replace a voter, which is then removed; a leader change
-// falls between each step. The second round replaces the leader itself.
+// catches up, and is promoted to replace a voter, which the core then removes (D3); a leader
+// change falls between each step. The removed voter never learns its removal's commit, so it
+// leaves the world before the cluster settles. The second round replaces the leader itself.
 void grow_and_heal(unsigned voters) {
 	context = std::to_string(voters) + " voters, a learner installs, is promoted and replaces a voter";
 	world w(voters, 77);
@@ -1156,14 +1175,14 @@ void grow_and_heal(unsigned voters) {
 				}
 				m.leaving = leaving;
 			}, j.id), "the learner is promoted beside the voter it replaces")) { return; }
-		if (!check(w.settle(), "the cluster settles after the promotion")) { return; }
-		depose(w);
-		if (!check(change(w, voters, [&](cs::Membership& m) {
-				std::erase_if(m.members, [&](const cs::Member& x) { return x.incarnation == leaving; });
-				m.leaving = 0;
-			}, j.id), "the replaced voter is removed")) { return; }
+		cut_leader(w);
+		if (!check(removed_by_core(w, leaving), "the core removes the replaced voter " + std::to_string(leaving))) { return; }
 		w.retire(leaving);
-		check(w.settle(), "the cluster settles without the removed voter");
+		if (!check(w.settle(), "the cluster settles without the removed voter")) { return; }
+		for (auto& [id, x] : w.nodes) {
+			const auto m = x->p->lp->driver().state(gid)->membership;
+			check(!holds(m, leaving) && holds(m, j.id) && !m.leaving, "node " + std::to_string(id) + " holds the replacement's membership");
+		}
 		same_digests(w);
 	}
 	// The group still writes and settles with both newcomers voting.

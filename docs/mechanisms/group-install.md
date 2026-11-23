@@ -152,8 +152,9 @@ election timeouts as at consensus's defaults), after which the leader starts it 
 past it installs and its digest equals the replay), the ungated schedules (group-core's seeds 8,
 12, 16, 18, 23, 24, 27 and seeds 101-140 at 3 voters, crashes and power cuts included, settle by
 install), and `grow_and_heal` (at 3 and 5 voters, a joiner added past every checkpoint installs,
-is promoted beside a voter it replaces, and that voter is removed, a leader change between each
-step; the second round replaces the leader). `test/group/install_suite.sh BUILD [regex]` builds
+is promoted beside a voter it replaces, and consensus's core removes that voter by itself (D3),
+a leader change between each step; the removed voter never learns its removal's commit, so the
+test retires it before settling; the second round replaces the leader). `test/group/install_suite.sh BUILD [regex]` builds
 and runs ctest's group tests, against a consensus checkout when CONSENSUS_DIR is set.
 `release_short_of_space` fills the leader's disk after a checkpoint supersedes the install's
 pin: the release stalls the leader, unfenced, and it settles once resumed (mutant
