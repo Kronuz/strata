@@ -1,11 +1,6 @@
 cmake_minimum_required(VERSION 3.18)
 project(strata LANGUAGES C CXX)
 
-# Ninja is the only supported generator (the top-level project only).
-if (CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR AND NOT CMAKE_GENERATOR MATCHES "^Ninja")
-	message(FATAL_ERROR "Ninja only: configure with -G Ninja (not ${CMAKE_GENERATOR})")
-endif ()
-
 include(FetchContent)
 
 # Building blocks (Kronuz libraries). Point FETCHCONTENT_SOURCE_DIR_<NAME> at local
@@ -127,6 +122,14 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(group_witness_test test/group/witness_test.cc)
   target_link_libraries(group_witness_test PRIVATE strata::group)
   add_test(NAME group_witness COMMAND group_witness_test)
+  # A damaged segment, manifest or set file fences its replica, which reinstalls (group-heal A3).
+  add_executable(group_repair_test test/group/repair_test.cc)
+  target_link_libraries(group_repair_test PRIVATE strata::group)
+  add_test(NAME group_repair COMMAND group_repair_test)
+  set_tests_properties(group_repair PROPERTIES TIMEOUT 1500)
+  # A damaged segment found at open: eager_segments maps every segment there.
+  add_test(NAME group_repair_eager COMMAND group_repair_test segment)
+  set_tests_properties(group_repair_eager PROPERTIES TIMEOUT 300 ENVIRONMENT STRATA_EAGER_SEGMENTS=1)
   # A learner installs a pinned pack and file set through the Driver's install surface (group-heal A1).
   add_executable(group_install_test test/group/install_test.cc)
   target_link_libraries(group_install_test PRIVATE strata::group)

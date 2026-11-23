@@ -13,6 +13,7 @@
 #include "strata/core/index.hh"
 #include "strata/group/bundle.hh"
 #include "strata/group/file_set.hh"
+#include "strata/group/repair.hh"
 
 #include "task.hh"
 
@@ -126,6 +127,46 @@ inline std::uint32_t crc_of(kronuz::journal::File& f, std::uint64_t length) {
 	kronuz::crc32c::Crc32c crc;
 	if (read_prefix(f, length, crc) != length) { throw install_failed("strata::group: an install file ends before its length"); }
 	return crc.value();
+}
+// A pinned segment's footer against its manifest entry (its checksum, magic and table CRC): a
+// source never ships a segment it has not read and would refuse to map. Throws corrupt_segment.
+inline void check_footer(kronuz::journal::File& f, std::uint64_t size, std::uint32_t toc_crc) {
+	namespace fm = format;
+	char b[fm::footer_size];
+	std::uint64_t got = 0;
+	while (size >= fm::footer_size && got < fm::footer_size) {
+		const auto n = f.read_at(size - fm::footer_size + got, std::span<char>(b + got, fm::footer_size - got));
+		if (!n) { break; }
+		got += n;
+	}
+	if (got != fm::footer_size || std::memcmp(b + 52, fm::footer_magic, 4) != 0 || kronuz::crc32c::crc32c(b, 48) != fm::get<std::uint32_t>(b + 48) ||
+		fm::get<std::uint32_t>(b + 16) != toc_crc) {
+		throw corrupt_segment("a pinned segment's footer fails its check");
+	}
+}
+// The first staged file of `p` whose bytes fail its CRC32C, by its reason: strata's while they are
+// staged, and each set file not yet moved into place.
+inline std::optional<std::string> staged_damage(kronuz::journal::IO& dir, const install_pin& p, bool strata_staged) {
+	auto check = [&](std::string_view prefix, const install_file& f, bool required) -> std::optional<std::string> {
+		const auto name = std::string(prefix) + f.name;
+		auto file = open_if(dir, name);
+		if (!file) {
+			if (required) { return "strata::group: a staged file is missing: " + name; }
+			return std::nullopt;
+		}
+		kronuz::crc32c::Crc32c crc;
+		if (read_prefix(*file, f.length, crc) != f.length || crc.value() != f.crc) { return "strata::group: a staged file fails its CRC32C: " + name; }
+		return std::nullopt;
+	};
+	if (strata_staged) {
+		for (const auto& f : p.strata) {
+			if (auto bad = check(strata_prefix, f, true)) { return bad; }
+		}
+	}
+	for (const auto& f : p.files) {
+		if (auto bad = check(files_prefix, f, false)) { return bad; }
+	}
+	return std::nullopt;
 }
 
 // A directory's names under `prefix`, the prefix taken off: strata reads a staged checkpoint
@@ -277,8 +318,10 @@ install_pin make_pin(basic_index<Layout>& ix, kronuz::journal::IO& dir, const bu
 		if (ix.applied().index < b.position) { throw std::logic_error("strata::group: strata is behind the bundle it would pin (P_H < P_b)"); }
 		const auto holder = index_detail::log_holding(dir, p.generation);
 		if (!holder) { throw files::generation_not_retained(p.generation); }
-		auto add = [&](std::vector<install_file>& out, std::string name, std::string path, std::optional<std::uint64_t> length, std::optional<std::uint32_t> crc) {
+		auto add = [&](std::vector<install_file>& out, std::string name, std::string path, std::optional<std::uint64_t> length, std::optional<std::uint32_t> crc,
+					   std::optional<std::uint32_t> footer = std::nullopt) {
 			auto f = dir.open_existing(path);
+			if (footer) { install_detail::check_footer(*f, *length, *footer); }
 			install_file e{std::move(name), length.value_or(f->size()), 0};
 			e.crc = crc ? *crc : install_detail::crc_of(*f, e.length);
 			out.push_back(std::move(e));
@@ -287,7 +330,7 @@ install_pin make_pin(basic_index<Layout>& ix, kronuz::journal::IO& dir, const bu
 		add(p.strata, log, log, std::nullopt, std::nullopt);
 		for (const auto& [id, s] : basic_index<Layout>::read_generation(dir, p.generation).segments) {
 			const auto name = index_detail::segment_name(id);
-			add(p.strata, name, name, s.size, std::nullopt);
+			add(p.strata, name, name, s.size, std::nullopt, s.footer_crc);
 		}
 		for (const auto& [name, f] : b.files) { add(p.files, name, std::string(bundle_detail::prefix) + name, f.length, f.crc); }
 	} catch (...) {
@@ -532,7 +575,15 @@ inline void sweep(kronuz::journal::IO& dir) {
 template <class Layout>
 void activate(kronuz::journal::IO& dir, const install_pin& p, basic_index<Layout>& ix) {
 	namespace d = install_detail;
-	if (d::open_if(dir, std::string(d::strata_prefix) + p.strata.front().name)) {
+	const bool strata_staged = d::open_if(dir, std::string(d::strata_prefix) + p.strata.front().name) != nullptr;
+	// Staged bytes rested since the stage synced them: each is read back against its CRC32C
+	// first. A file that fails marks the replica damaged, and the stage goes for a new one.
+	if (auto bad = d::staged_damage(dir, p, strata_staged)) {
+		mark_damaged(dir, *bad);
+		sweep(dir);
+		throw replica_damaged(*bad);
+	}
+	if (strata_staged) {
 		// A deferred index commits its old state first: strata's install writes its copies
 		// before its manifest, which a crash must not leave in a directory with no manifest log.
 		if (!index_detail::log_holding(dir)) { ix.commit(); }
@@ -550,6 +601,7 @@ void activate(kronuz::journal::IO& dir, const install_pin& p, basic_index<Layout
 		if (d::open_if(dir, from)) { dir.replace(from, std::string(bundle_detail::prefix) + f.name); }
 	}
 	dir.sync_directory();
+	clear_damaged(dir);  // the replica holds the pin's bytes now (repair.hh)
 	sweep(dir);
 }
 
