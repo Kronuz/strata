@@ -25,8 +25,12 @@ so a lost or refused step (a promotion consensus answers `NotReady`) is planned 
   record, key `S`: a format byte and `replace_after` in LEB128 milliseconds (absent: 300 s); a
   command may put it, never erase it. The setting is read at every pass, so `set_replace_after`
   takes effect at the next one, with no restart.
-- **The keepalive table** (D6): `down_since` per node, volatile at the root leader. A node is
-  *lost* once down for `replace_after`, or when its state is not `active` (a drain).
+- **The keepalive table** (D6): `down_since` per node, volatile at the root leader, and
+  `full_at`, from which every down node is in `down_since`. A new root leader's table starts
+  empty: it sets `full_at` one keepalive timeout (3 × 500 ms) past its start, knows no node up
+  before it, and from it puts a node it has not heard in `down_since`. A node is *down* when in
+  `down_since` or before `full_at`, and *lost* once in `down_since` for `replace_after`, or when
+  its state is not `active` (a drain).
 - **A report per group**: the membership in force at its leader, the leader's incarnation, and
   whether the application holds an open multi-entry command (D12's chunked command). No leader, no
   report: an `rf = 1` group whose node is down waits for it, since no leader can add a learner.
@@ -37,15 +41,18 @@ The shape for `rf` on the usable (not lost) nodes is placement's: `min(rf, usabl
 and never a lasting two-voter group: two take a witness on a third node, else the second is a
 learner. Members on lost nodes are *bad*. In order, the first that applies:
 
-1. **Record.** The record differs from the group: write the group as it is, the preferred leader
-   first. The preferred leader stays while it is a healthy voter, unless another healthy voter has
-   two fewer leaderships; then that one, which spreads leaders without flapping. Within a pass,
-   each record's load changes count before the next shard plans.
+1. **Record.** The record differs from the group: write the group as it is on the nodes the root
+   knows, the preferred leader first. A member on a node removed since it joined (a learner's
+   load is recorded only a pass later, so its node can be drained and removed first) is left out
+   of the record and leaves as a bad learner. The preferred leader stays while it is a healthy
+   voter, unless another healthy voter has two fewer leaderships; then that one, which spreads
+   leaders without flapping. Within a pass, each record's load changes and each new learner's
+   group count before the next shard plans, so one pass spreads a lost node's replicas.
 2. A **leaving** member: consensus removes it next (D3); wait.
 3. A bad **learner** leaves.
 4. Too few **data voters**: promote an up learner beside the first leaving choice consensus
    accepts (a bad data voter, a bad witness, a witness past the shape, none); with no learner, add
-   one on the up node in no member with the fewest groups.
+   one on the node known up and in no member with the fewest groups.
 5. Too few **witnesses**: the same, promoting to witness beside a bad witness or the data voter a
    shrink drops.
 6. Too few learners (a short shape): add one.
@@ -101,7 +108,11 @@ root's records by catching up from the log, or by install once group-heal binds 
   replace_after read from the root's record as it changes, a drain whose transfer precedes the
   change that retires the leader, an `rf = 1` group that waits, a shard with no node to grow on, 2 + witness stepping down
   to `rf 1` past a lost data voter,
-  leader balance deferred while a command is open; and 3,000 seeded clusters of 1 to 8 nodes,
+  leader balance deferred while a command is open, a new member only on a node known up (a free
+  node down but not lost, and a new root leader's empty table), a learner whose node is removed
+  before its record (it leaves, the root accepts every record), one pass over 24 shards with a
+  node lost (each learner on a node with the fewest groups among its candidates, at most 2 per
+  node), and a pending record's learner counted within the pass; and 3,000 seeded clusters of 1 to 8 nodes,
   each changed four times (nodes lost or drained, rf from 1 to 5): every change valid with a
   quorum of up voters, and at rest every shard at its shape with the preferred leader leading,
   or waiting with no free node.

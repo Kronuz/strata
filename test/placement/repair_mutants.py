@@ -43,6 +43,16 @@ MUTANTS = {
     # A shrink removes a data voter before the witness: 1 data voter beside a witness.
     "shrink-order": (PLAN, ["0"], [(REPAIR, "\t\tif (wit.size() > t.witnesses) {\n\t\t\tif (auto next = without(wit.front()->incarnation); valid(next)) { return change(std::move(next)); }\n\t\t}\n",
                                      "")]),
+    # The record names a member on a node the root removed: the root refuses it every pass.
+    "record-unknown": (PLAN, ["0"], [(REPAIR, "if (status(x.node)) { s.members.push_back(", "if (true) { s.members.push_back(")]),
+    # A pass does not count the learners it adds: one node takes them all.
+    "join-uncounted": (PLAN, ["0"], [(REPAIR, "\t\t\tif (const auto j = nodes.find(next.joining); j != nodes.end()) { ++j->second.groups; }\n", "")]),
+    # A pass does not count a record's learner: the next shard ignores it.
+    "record-uncounted": (PLAN, ["0"], [(REPAIR, "\t\t\tif (next.kind == step::record) { count(nodes, s, next.recorded); }\n", "")]),
+    # A node down but not lost takes a new learner.
+    "candidate-down": (PLAN, ["0"], [(REPAIR, "if (s.lost || s.down || on_node(id)) { continue; }", "if (s.lost || on_node(id)) { continue; }")]),
+    # A new root leader's empty table counts every node up.
+    "cold-table-up": (PLAN, ["0"], [(REPAIR, "\t\ts.down = s.down || now < l.full_at;\n", "")]),
 }
 
 

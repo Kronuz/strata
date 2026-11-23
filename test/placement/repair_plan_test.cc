@@ -3,14 +3,19 @@
 // member removed next) and records it as the root would. Values: D7's growth and shrink 1, 2, 3,
 // 2, 1; a replacement past replace_after and not before; the setting read from the root's records
 // at each pass; a drain that moves leadership first; an rf = 1 group that waits; a shard with no
-// node to grow on; leader balance deferred while a multi-entry command is open. A property test
-// over seeded clusters: every change valid, and every shard at its rf wherever a node exists.
+// node to grow on; leader balance deferred while a multi-entry command is open; a new member only
+// on a node known up; a learner whose node is removed before its record; one pass's learners
+// spread by the loads counted within it. A property test over seeded clusters: every change
+// valid, and every shard at its rf wherever a node exists.
 #include "strata/placement/repair.hh"
 
 #include "faultlab/faultfs.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <iostream>
+#include <map>
+#include <optional>
 #include <random>
 #include <set>
 #include <string>
@@ -347,6 +352,238 @@ void balance() {
 	check(x.run().kind == sp::step::none && x.rec.members.front().node == 3, "and stays: 2 is not two above 3's");
 }
 
+// A free node down but not yet lost takes no learner: node 4 holds fewer groups than node 5,
+// but only node 5 is known up.
+void candidate_up() {
+	context = "a new member only on a node known up";
+	auto x = founded(5, {{1, V}, {2, V}, {3, V}}, 3);
+	x.nodes[5].groups = 2;
+	x.nodes[4].down = true;
+	x.nodes[3].down = x.nodes[3].lost = true;
+	auto s = x.run();
+	check(s.kind == sp::step::none, "replaced: " + text(s));
+	trail_is(x, {"1:1:V 2:2:V 3:3:V 4:5:L", "1:1:V 2:2:V 3:3:V 4:5:V leaving 3", "1:1:V 2:2:V 4:5:V"}, "a learner on node 5, not on node 4 (down)");
+}
+
+// A new root leader's keepalive table starts empty, so it knows no node up before full_at: a
+// shard short of a lost member waits, then takes its learner on a free node.
+void new_root_leader() {
+	context = "a new root leader's empty keepalive table";
+	root_index r;
+	for (int i = 0; i < 5; ++i) {
+		sp::node_record n;
+		n.name = "n" + std::to_string(i);
+		check(r.run(sp::add_node(sp::view(r.ix), n)), "a node is added");
+	}
+	sp::liveness l;
+	l.down_since[3] = 0;
+	l.full_at = 301'500;
+	const sp::shard rec{1, 1, {{1, V}, {2, V}, {3, V}}};
+	sp::report rep;
+	for (sp::node_id n = 1; n <= 3; ++n) { rep.membership.members.push_back({n, n, cs::MemberRole::Voter}); }
+	rep.membership.next_incarnation = 4;
+	rep.leader = 1;
+	const auto t = sp::nodes_of(sp::view(r.ix), l, 300'000);
+	check(t.at(4).down && t.at(5).down && !t.at(4).lost && t.at(3).lost, "before full_at a node not in down_since is down, not lost");
+	const auto before = sp::plan(&rec, 3, rep, t);
+	check(before.kind == sp::step::wait, "no node known up: it waits (" + text(before) + ")");
+	const auto after = sp::plan(&rec, 3, rep, sp::nodes_of(sp::view(r.ix), l, 301'500));
+	check(after.kind == sp::step::change && (after.joining == 4 || after.joining == 5), "from full_at the free nodes are up: a learner joins (" + text(after) + ")");
+}
+
+// Shard groups as consensus holds them beside the root's records (incarnation = node when
+// founded): a pass plans from both, and apply runs a step as its group and the root would.
+struct cluster {
+	root_index r;
+	sp::liveness l;
+	std::uint64_t now = 0;
+	std::map<sp::group_id, cs::Membership> groups;
+	std::map<sp::group_id, cs::NodeId> leaders;
+	std::size_t refused = 0, recorded = 0;
+
+	void add_nodes(std::size_t n) {
+		for (std::size_t i = 0; i < n; ++i) {
+			sp::node_record x;
+			x.name = "n" + std::to_string(i);
+			check(r.run(sp::add_node(sp::view(r.ix), x)), "a node is added");
+		}
+	}
+	void found(const sp::shard& s) {
+		cs::Membership m;
+		for (const auto& y : s.members) {
+			const auto kind = y.role == sp::role::witness ? cs::MemberRole::Witness : y.role == sp::role::learner ? cs::MemberRole::Learner : cs::MemberRole::Voter;
+			m.members.push_back({y.node, y.node, kind});
+			m.next_incarnation = std::max(m.next_incarnation, y.node + 1);
+		}
+		std::sort(m.members.begin(), m.members.end(), [](const cs::Member& a, const cs::Member& b) { return a.incarnation < b.incarnation; });
+		groups[s.group] = m;
+		leaders[s.group] = s.members.front().node;
+	}
+	void create(const std::string& path, std::uint32_t rf) {
+		sp::namespace_record ns;
+		check(r.run(sp::create_namespace(sp::view(r.ix), path, 1, rf, 0, &ns)), path + " is created");
+		for (const auto& s : ns.shards) { found(s); }
+	}
+	// A shard recorded on `members` and its group founded on them.
+	sp::group_id record_as(const std::string& path, std::vector<sp::member> members) {
+		auto s = sp::view(r.ix).namespace_at(path)->record.shards.front();
+		s.members = std::move(members);
+		check(r.run(sp::record_shard(sp::view(r.ix), path, s)), path + " is recorded");
+		found(s);
+		return s.group;
+	}
+	bool up(sp::node_id n) const { return !l.down_since.contains(n); }
+	std::optional<sp::report> report(sp::group_id g) {
+		const auto& m = groups.at(g);
+		const auto* lead = cs::find_member(m, leaders[g]);
+		if (!lead || lead->role != cs::MemberRole::Voter || !up(lead->node)) {
+			leaders[g] = 0;
+			for (const auto& x : m.members) {
+				if (x.role == cs::MemberRole::Voter && up(x.node)) {
+					leaders[g] = x.incarnation;
+					break;
+				}
+			}
+		}
+		if (!leaders[g]) { return std::nullopt; }
+		return sp::report{m, leaders[g], false};
+	}
+	std::vector<sp::planned> plan() {
+		return sp::plan_all(sp::view(r.ix), l, now, [this](sp::group_id g) { return report(g); });
+	}
+	bool apply(const sp::planned& p) {
+		auto& m = groups.at(p.group);
+		if (p.next.kind == sp::step::record) {
+			const bool ok = r.run(sp::record_shard(sp::view(r.ix), p.path, p.next.recorded));
+			++(ok ? recorded : refused);
+			return ok;
+		}
+		if (p.next.kind == sp::step::transfer) { leaders[p.group] = p.next.target; }
+		if (p.next.kind != sp::step::change) { return true; }
+		try {
+			cs::validate_change(m, p.next.next, cs::ceilings);
+		} catch (const std::invalid_argument&) {
+			return false;
+		}
+		m = p.next.next;
+		if (m.leaving) {  // D3: consensus removes the leaving member next
+			const auto leaving = m.leaving;
+			std::erase_if(m.members, [&](const cs::Member& x) { return x.incarnation == leaving; });
+			m.leaving = 0;
+		}
+		return true;
+	}
+	// One pass with every step applied; true when it rests (every step none or wait).
+	bool pass() {
+		bool rested = true;
+		for (const auto& p : plan()) {
+			if (p.next.kind == sp::step::none || p.next.kind == sp::step::wait) { continue; }
+			rested = false;
+			check(apply(p), p.path + ": the step applies: " + text(p.next));
+		}
+		return rested;
+	}
+};
+
+// A learner joins on a free node, which is removed (its recorded load is 0) before the next
+// pass records the learner. The record names only nodes the root knows: the learner leaves, a
+// replacement joins on the other free node, and the root accepts every record.
+void orphan_learner() {
+	context = "a learner on a node removed before its record";
+	cluster c;
+	c.add_nodes(5);
+	c.create("x", 3);
+	const auto placed = sp::view(c.r.ix).namespace_at("x")->record.shards.front();
+	const auto g = placed.group;
+	const auto lost = placed.members[1].node;
+	c.l.down_since[lost] = 0;
+	c.now = 300'000;
+	sp::node_id f = 0;
+	for (const auto& p : c.plan()) {
+		if (p.group == g && p.next.kind == sp::step::change && p.next.joining) {
+			f = p.next.joining;
+			check(c.apply(p), "the learner joins");
+		}
+	}
+	if (!check(f != 0, "a learner joins for the lost member")) { return; }
+	check(c.r.run(sp::remove_node(sp::view(c.r.ix), f)), "its node, with no recorded group, is removed");
+	bool rested = false;
+	for (int pass = 0; pass < 20 && !rested; ++pass) { rested = c.pass(); }
+	check(rested, "the shard rests");
+	check(c.refused == 0 && c.recorded >= 2, "the root accepts every record (" + std::to_string(c.refused) + " refused, " + std::to_string(c.recorded) + " accepted)");
+	const auto rec = sp::view(c.r.ix).namespace_at("x")->record.shards.front();
+	std::set<sp::node_id> in_group, in_record;
+	for (const auto& x : c.groups.at(g).members) { in_group.insert(x.node); }
+	for (const auto& y : rec.members) { in_record.insert(y.node); }
+	check(in_group == in_record && in_group.size() == 3 && !in_group.contains(f) && !in_group.contains(lost), "three members off the removed and the lost node, recorded as they are: " + text(c.groups.at(g)));
+}
+
+// One pass over 24 shards at rf 3 on 8 nodes, node 1 lost. Each learner counts before the next
+// shard plans, so each lands on a node with the fewest groups among its shard's candidates, and no
+// node takes more than 2 of the pass's learners.
+void pass_spread() {
+	context = "one pass spreads its learners";
+	cluster c;
+	c.add_nodes(8);
+	for (int i = 0; i < 24; ++i) { c.create("ns" + std::to_string(i), 3); }
+	c.l.down_since[1] = 0;
+	c.now = 3'600'000;
+	auto t = sp::nodes_of(sp::view(c.r.ix), c.l, c.now);
+	const auto affected = t.at(1).groups;
+	std::size_t steps = 0, records = 0, learners = 0;
+	std::map<sp::node_id, std::size_t> joins;
+	for (const auto& p : c.plan()) {
+		steps += p.next.kind != sp::step::none;
+		if (p.next.kind == sp::step::record) {
+			++records;
+			sp::count(t, sp::view(c.r.ix).namespace_at(p.path)->record.shards.front(), p.next.recorded);
+		}
+		if (p.next.kind != sp::step::change || !p.next.joining) { continue; }
+		const auto j = p.next.joining;
+		const auto& m = c.groups.at(p.group);
+		for (const auto& [id, s] : t) {
+			const auto n = id;
+			const bool member = std::any_of(m.members.begin(), m.members.end(), [n](const cs::Member& x) { return x.node == n; });
+			if (s.lost || s.down || member) { continue; }
+			check(t.at(j).groups <= s.groups, p.path + ": node " + std::to_string(j) + " at " + std::to_string(t.at(j).groups) + " groups, node " + std::to_string(id) + " at " + std::to_string(s.groups));
+		}
+		++t.at(j).groups;
+		++joins[j];
+		++learners;
+	}
+	std::string spread;
+	std::size_t most = 0;
+	for (const auto& [id, k] : joins) {
+		spread += " n" + std::to_string(id) + "=" + std::to_string(k);
+		most = std::max(most, k);
+	}
+	check(affected >= 6 && steps == affected && records + learners == affected, "each of node 1's " + std::to_string(affected) + " shards plans a record or a learner");
+	check(learners >= affected / 2 && most <= 2, std::to_string(learners) + " learners, at most 2 per node:" + spread);
+}
+
+// A pending record's learner counts too: shard a records its learner on node 4 in this pass, so
+// shard b, short of its lost node 3, takes node 5 rather than node 4 (both hold no recorded group).
+void pending_record_counts() {
+	context = "a recorded learner counts within the pass";
+	cluster c;
+	c.add_nodes(5);
+	c.create("a", 3);
+	c.create("b", 3);
+	const auto a = c.record_as("a", {{1, V}, {2, V}, {3, V}});
+	c.record_as("b", {{2, V}, {1, V}, {3, V}});
+	auto& m = c.groups.at(a);
+	m.members.push_back({m.next_incarnation, 4, cs::MemberRole::Learner});
+	++m.next_incarnation;
+	c.l.down_since[3] = 0;
+	c.now = 300'000;
+	const auto t = sp::nodes_of(sp::view(c.r.ix), c.l, c.now);
+	check(t.at(4).groups == 0 && t.at(5).groups == 0 && t.at(3).lost, "nodes 4 and 5 hold no recorded group, node 3 is lost");
+	sp::step sa, sb;
+	for (const auto& p : c.plan()) { (p.group == a ? sa : sb) = p.next; }
+	check(sa.kind == sp::step::record, "a records its learner: " + text(sa));
+	check(sb.kind == sp::step::change && sb.joining == 5, "b's learner goes to node 5: " + text(sb));
+}
+
 // Property: seeded clusters and groups placed as the root places them, then nodes lost, drained
 // and rf changed. Every step is one consensus and the root accept; the plan rests; at rest every
 // shard is at its shape with no member on a lost node and the preferred leader leading, unless no
@@ -420,6 +657,11 @@ int main(int argc, char** argv) {
 	no_replacement();
 	shrink_past_lost();
 	balance();
+	candidate_up();
+	new_root_leader();
+	orphan_learner();
+	pass_spread();
+	pending_record_counts();
 	const std::uint64_t seeds = argc > 1 ? std::stoull(argv[1]) : 3000;
 	for (std::uint64_t seed = 1; seed <= seeds; ++seed) { property(seed); }
 	if (failures) {

@@ -80,16 +80,19 @@ inline group::prepared record_shard(const view& v, std::string_view path, const 
 
 // --- what a pass reads --------------------------------------------------------------------
 
-// The keepalive table (D6), volatile at the root leader: a node absent is up.
+// The keepalive table (D6), volatile at the root leader: a node absent from `down_since` is up
+// from `full_at` on. A new root leader's table starts empty, so it sets `full_at` one keepalive
+// timeout (3 x 500 ms) past its start, and until then knows no node up.
 struct liveness {
 	std::map<node_id, std::uint64_t> down_since;  // ms, the root leader's clock
+	std::uint64_t full_at = 0;                    // ms: from here every down node is in down_since
 };
 
 // A node as repair sees it: its record's state and load, and its liveness.
 struct node_status {
 	node_state state = node_state::active;
 	std::uint64_t groups = 0, leaders = 0;
-	bool down = false;  // missing from the keepalive table
+	bool down = false;  // not known up: in down_since, or before the table is full
 	bool lost = false;  // down for replace_after, or not active: its members are replaced
 };
 using node_table = std::map<node_id, node_status>;
@@ -109,6 +112,7 @@ inline node_table nodes_of(const view& v, const liveness& l, std::uint64_t now) 
 			s.down = true;
 			s.lost = now >= d->second && now - d->second >= after;
 		}
+		s.down = s.down || now < l.full_at;
 		s.lost = s.lost || s.state != node_state::active;
 		out.emplace(id, s);
 	});
@@ -201,11 +205,14 @@ struct planner {
 		return 0;
 	}
 
-	// The record of the group as it is: the preferred leader first, the rest by node.
+	// The record of the group as it is, on the nodes the root knows (a member on a removed node
+	// is bad and leaves): the preferred leader first, the rest by node.
 	shard as_recorded(node_id lead) const {
 		shard s = *recorded;
 		s.members.clear();
-		for (const auto& x : m.members) { s.members.push_back({x.node, role_of(x.role)}); }
+		for (const auto& x : m.members) {
+			if (status(x.node)) { s.members.push_back({x.node, role_of(x.role)}); }
+		}
 		std::sort(s.members.begin(), s.members.end(), [&](const member& a, const member& b) {
 			if ((a.node == lead) != (b.node == lead)) { return a.node == lead; }
 			return a.node < b.node;
@@ -313,7 +320,7 @@ struct planner {
 				break;
 			}
 		}
-		// The candidate for a new member: up, active, in no member, fewest groups.
+		// The candidate for a new member: known up, active, in no member, fewest groups.
 		node_id candidate = 0;
 		for (const auto& [id, s] : nodes) {
 			if (s.lost || s.down || on_node(id)) { continue; }
@@ -441,7 +448,8 @@ inline step plan(const shard* recorded, std::uint32_t rf, const std::optional<re
 	return detail::planner{recorded, rf, *r, nodes, r->membership}.run();
 }
 
-// The load changes a record step makes, applied to `nodes` so later plans in a pass see them.
+// The load changes a record step makes, applied to `nodes` so later plans in a pass see them
+// (plan_all counts a joining learner's group the same way).
 inline void count(node_table& nodes, const shard& before, const shard& after) {
 	auto add = [&](const shard& s, std::int64_t sign) {
 		for (std::size_t i = 0; i < s.members.size(); ++i) {
@@ -473,6 +481,7 @@ std::vector<planned> plan_all(const view& v, const liveness& l, std::uint64_t no
 		for (const auto& s : ns.shards) {
 			auto next = plan(&s, ns.rf, reports(s.group), nodes);
 			if (next.kind == step::record) { count(nodes, s, next.recorded); }
+			if (const auto j = nodes.find(next.joining); j != nodes.end()) { ++j->second.groups; }
 			out.push_back({*path, s.group, std::move(next)});
 		}
 	});
