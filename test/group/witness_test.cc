@@ -183,11 +183,8 @@ void join(std::uint64_t seed) {
 			}
 			m.leaving = leaving;
 		}, heir), "the learner is promoted to witness beside the voter it replaces")) { return; }
-	if (!check(w.settle(), "the group settles after the promotion")) { return; }
-	if (!check(change(w, 3, [&](cs::Membership& m) {
-			std::erase_if(m.members, [&](const cs::Member& x) { return x.incarnation == leaving; });
-			m.leaving = 0;
-		}, heir), "the replaced voter is removed")) { return; }
+	// The core removes the replaced voter (D3), which never learns that removal's commit.
+	if (!check(removed_by_core(w, leaving), "the core removes the replaced voter " + std::to_string(leaving))) { return; }
 	w.retire(leaving);
 	if (!check(w.settle(), "the group settles as two voters and a witness")) { return; }
 	const auto ranges = jw.p->w->ranges();

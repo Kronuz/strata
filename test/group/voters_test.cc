@@ -366,30 +366,37 @@ void deposed_read(unsigned voters) {
 // Every node applied the same entries, and its digest equals a replay from empty of the log.
 // A replica behind the leader's checkpoint catches up only by install: the leader names it in
 // `installs_needed` until the install ends, and it installs the bundle and applies past it.
-void install_gap(unsigned voters) {
-	context = std::to_string(voters) + " voters, a replica behind the leader's checkpoint";
-	world w(voters, 55);
-	if (!check(w.settle(), "the cluster settles")) { return; }
-	auto& l = *w.leader();
-	auto& behind = *w.nodes.at(l.id % voters + 1);
+// `behind` cut off while the others commit two writes and each checkpoints past it: whichever
+// leads has no log for it. The lowest checkpoint, or 0 if a step failed.
+cs::Index leave_behind(world& w, node& l, node& behind) {
 	w.isolated.insert(behind.id);
 	auto write = [&](const std::string& c) {
 		auto s = start(l.p->loop_ref(), l.p->g->propose(c));
 		for (int i = 0; i < 40000 && !s->done; ++i) { w.step(); }
 		return s->done && !s->error;
 	};
-	check(write("P|a|one") && write("P|b|two"), "the others commit without it");
-	// Every other replica checkpoints past it, so whichever leads has no log for it.
+	if (!check(write("P|a|one") && write("P|b|two"), "the others commit without it")) { return 0; }
 	cs::Index base = ~cs::Index(0);
 	for (auto& [id, x] : w.nodes) {
 		if (x.get() == &behind) { continue; }
 		auto k = start(x->p->loop_ref(), x->p->g->checkpoint());
 		for (int i = 0; i < 40000 && !k->done; ++i) { w.step(); }
-		if (!check(k->done && !k->error && k->value, "node " + std::to_string(id) + "'s checkpoint: " + what(k->error))) { return; }
+		if (!check(k->done && !k->error && k->value, "node " + std::to_string(id) + "'s checkpoint: " + what(k->error))) { return 0; }
 		base = std::min(base, k->value->through);
 	}
-	if (!check(behind.p->g->applied() < base, "the checkpoints pass the isolated replica")) { return; }
+	if (!check(behind.p->g->applied() < base, "the checkpoints pass the isolated replica")) { return 0; }
 	w.isolated.clear();
+	return base;
+}
+
+void install_gap(unsigned voters) {
+	context = std::to_string(voters) + " voters, a replica behind the leader's checkpoint";
+	world w(voters, 55);
+	if (!check(w.settle(), "the cluster settles")) { return; }
+	auto& l = *w.leader();
+	auto& behind = *w.nodes.at(l.id % voters + 1);
+	const auto base = leave_behind(w, l, behind);
+	if (!base) { return; }
 	std::set<cs::NodeId> named;
 	for (int i = 0; i < 20000 && named.empty(); ++i) {
 		w.step();
@@ -401,6 +408,34 @@ void install_gap(unsigned voters) {
 	if (!check(w.settle(), "the cluster settles by the install")) { return; }
 	check(behind.p->g->installs() == 1 && behind.p->g->installed_at() >= base, "the replica installs a bundle at or past the checkpoints: " + std::to_string(behind.p->g->installs()) + " at " + std::to_string(behind.p->g->installed_at()));
 	for (auto& [id, x] : w.nodes) { check(x->p->g->installs_needed().empty(), "node " + std::to_string(id) + " names no install once it ended"); }
+	same_digests(w);
+}
+
+// An install's pin stays with the leader's latest bundle; the leader's next checkpoint
+// supersedes it, and its disk fills before the release: the release stalls the chore, as an
+// apply short of space does, and never fences it; once the host frees space and resumes it,
+// the release commits and the cluster settles.
+void release_short_of_space(unsigned voters) {
+	context = std::to_string(voters) + " voters, the leader's pin release short of space";
+	world w(voters, 57);
+	if (!check(w.settle(), "the cluster settles")) { return; }
+	auto& l = *w.leader();
+	auto& behind = *w.nodes.at(l.id % voters + 1);
+	if (!leave_behind(w, l, behind)) { return; }
+	if (!check(w.settle() && behind.p->g->installs() == 1, "the cluster settles by the install")) { return; }
+	auto s = start(l.p->loop_ref(), l.p->g->propose("P|c|three"));
+	for (int i = 0; i < 40000 && !s->done; ++i) { w.step(); }
+	const auto before = l.p->g->recovered().position;
+	auto k = start(l.p->loop_ref(), l.p->g->checkpoint());
+	for (int i = 0; i < 40000 && l.p->g->recovered().position == before && !k->done; ++i) { w.step(); }
+	if (!check(l.p->g->recovered().position > before, "the leader publishes a later bundle")) { return; }
+	l.dir_disk.set_capacity(l.dir_disk.used());
+	for (int i = 0; i < 200000 && !l.p->g->stalled() && !l.p->g->fenced(); ++i) { w.step(); }
+	check(l.p->g->stalled() && !l.p->g->fenced(), "the leader's release stalls on space, unfenced: " + l.p->g->fence_reason());
+	l.dir_disk.set_capacity(~std::uint64_t(0));
+	l.p->g->resume();
+	if (!check(w.settle(), "the cluster settles once the leader resumes")) { return; }
+	check(!l.p->g->stalled(), "the leader released the superseded pin");
 	same_digests(w);
 }
 
@@ -535,8 +570,9 @@ bool is_superseded(std::exception_ptr e) {
 // --- A1: growth and healing by install (group-heal) ---------------------------------------
 
 // A joiner added as a learner past every replica's checkpoint installs the leader's bundle,
-// catches up, and is promoted to replace a voter, which is then removed; a leader change
-// falls between each step. The second round replaces the leader itself.
+// catches up, and is promoted to replace a voter, which the core then removes (D3); a leader
+// change falls between each step. The removed voter never learns its removal's commit, so it
+// leaves the world before the cluster settles. The second round replaces the leader itself.
 void grow_and_heal(unsigned voters) {
 	context = std::to_string(voters) + " voters, a learner installs, is promoted and replaces a voter";
 	world w(voters, 77);
@@ -570,14 +606,14 @@ void grow_and_heal(unsigned voters) {
 				}
 				m.leaving = leaving;
 			}, j.id), "the learner is promoted beside the voter it replaces")) { return; }
-		if (!check(w.settle(), "the cluster settles after the promotion")) { return; }
-		depose(w);
-		if (!check(change(w, voters, [&](cs::Membership& m) {
-				std::erase_if(m.members, [&](const cs::Member& x) { return x.incarnation == leaving; });
-				m.leaving = 0;
-			}, j.id), "the replaced voter is removed")) { return; }
+		cut_leader(w);
+		if (!check(removed_by_core(w, leaving), "the core removes the replaced voter " + std::to_string(leaving))) { return; }
 		w.retire(leaving);
-		check(w.settle(), "the cluster settles without the removed voter");
+		if (!check(w.settle(), "the cluster settles without the removed voter")) { return; }
+		for (auto& [id, x] : w.nodes) {
+			const auto m = x->p->lp->driver().state(gid)->membership;
+			check(!holds(m, leaving) && holds(m, j.id) && !m.leaving, "node " + std::to_string(id) + " holds the replacement's membership");
+		}
 		same_digests(w);
 	}
 	// The group still writes and settles with both newcomers voting.
@@ -796,6 +832,7 @@ int main(int argc, char** argv) {
 	deposed_read(5);
 	install_gap(3);
 	install_gap(5);
+	release_short_of_space(3);
 	grow_and_heal(3);
 	grow_and_heal(5);
 	write_paths(3, 8);

@@ -191,7 +191,7 @@ leader's waits, and so does a follower stalled on `no_space` and then elected by
 `installs_needed()` and installs (`install_gap`); the ungated schedules, whose checkpoints leave a
 replica behind, settle by install and pass the oracle over the log merged from every replica's
 applied entries; a learner joins past every checkpoint, installs, and is promoted to replace a
-voter that is then removed, across leader changes (`grow_and_heal`).
+voter that consensus's core then removes, across leader changes (`grow_and_heal`).
 
 `test/group/witness_test.cc` (ctest `group_witness`, group-heal A4), on the voters' world
 (`test/group/world.hh`): two data voters and a founding witness write on through a power cut of

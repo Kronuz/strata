@@ -119,6 +119,16 @@ MUTANTS = {
     "witness-refuses-image": [(WITNESS,
         "\t\tloop_->driver().validated(id_, token);\n",
         "\t\tloop_->driver().validation_failed(id_, token);\n")],
+    # A pin release short of space fences the leader instead of stalling its chore
+    # (--target=group_voters_test 0: release_short_of_space).
+    "release-fences": [(GROUP,
+        "\t\t\t\trelease_pin(*ix_, gone->pin);\n\t\t\t} catch (const std::system_error& x) {\n\t\t\t\tif (x.code() == std::errc::no_space_on_device) { return step::stall; }\n",
+        "\t\t\t\trelease_pin(*ix_, gone->pin);\n\t\t\t} catch (const std::system_error& x) {\n")],
+    # The pin goes with its flight's end, not when a later bundle supersedes it: the learner's
+    # fetch outruns the leader's chore at every flight (--target=group_voters_test 0: install_gap).
+    "pin-per-flight": [(GROUP,
+        "if (at != recovered_.position && p->flights.empty()) {",
+        "if (p->flights.empty()) {")],
     # A deposed proposer answers 503 instead of forwarding to the leader (A3).
     "no-forward": [(SUBMIT,
         "\t\t\t\tif (forwarded) {",

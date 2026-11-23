@@ -182,6 +182,7 @@ struct world {
 	std::deque<envelope> net;
 	std::deque<fetch_request> fetches;
 	std::set<cs::NodeId> isolated;  // their messages and fetches, both ways, are dropped
+	std::uint64_t uploads = 100;    // the next upload id: an app never reuses a retired name
 	struct acknowledged {
 		cs::Placement placement;
 		std::string command;
@@ -583,7 +584,7 @@ inline bool change(world& w, unsigned voters, const std::function<void(cs::Membe
 	return check(false, "the membership step commits");
 }
 // The leader is cut off until another replica leads in a later term, then healed.
-inline void depose(world& w) {
+inline void cut_leader(world& w) {
 	auto* l = w.leader();
 	if (!l) { return; }
 	const auto term = l->p->lp->driver().state(gid)->term;
@@ -595,7 +596,25 @@ inline void depose(world& w) {
 	}
 	check(next, "another replica leads once the leader is cut off");
 	w.isolated.clear();
+}
+inline void depose(world& w) {
+	cut_leader(w);
 	check(w.settle(), "the cluster settles after the leader change");
+}
+inline bool holds(const cs::Membership& m, cs::NodeId incarnation) {
+	return std::any_of(m.members.begin(), m.members.end(), [&](const cs::Member& x) { return x.incarnation == incarnation; });
+}
+// Once a promotion beside `leaving` commits, the leader in force removes it by itself (consensus
+// D3): true when a leader other than `leaving` holds a membership without it.
+inline bool removed_by_core(world& w, cs::NodeId leaving) {
+	for (int i = 0; i < 40000; ++i) {
+		if (auto* l = w.leader(); l && l->id != leaving) {
+			const auto m = l->p->lp->driver().state(gid)->membership;
+			if (!m.members.empty() && !m.leaving && !holds(m, leaving)) { return true; }
+		}
+		w.step();
+	}
+	return false;
 }
 // Commands at the leader and a checkpoint at every replica: no log reaches a new member.
 inline void write_and_compact(world& w, std::mt19937_64& gen, int writes) {
@@ -606,7 +625,7 @@ inline void write_and_compact(world& w, std::mt19937_64& gen, int writes) {
 			continue;
 		}
 		const auto key = group_test::keys[gen() % group_test::keys.size()];
-		const std::string c = k % 5 == 4 ? "U|" + std::to_string(100 + k) + "|0|" + text(gen, 40) : "P|" + key + "|" + text(gen, 1 + gen() % 20);
+		const std::string c = k % 5 == 4 ? "U|" + std::to_string(w.uploads++) + "|0|" + text(gen, 40) : "P|" + key + "|" + text(gen, 1 + gen() % 20);
 		auto s = start(l->p->loop_ref(), l->p->g->propose(c));
 		for (int i = 0; i < 40000 && !s->done; ++i) { w.step(); }
 	}

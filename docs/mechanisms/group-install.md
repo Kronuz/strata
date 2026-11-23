@@ -104,11 +104,16 @@ answered by the leader's `group::serve`).
 
 - **The leader** pins at `SnapshotNeeded`, on the chore between entries, the bundle at the key's
   boundary when it is its latest one (restored, installed or published); another boundary pins
-  nothing, the learner's pin fetch finds none, and its validation fails until the leader's next
-  flight. One pin per bundle, held by every flight that asked for it; the last flight's
-  `SnapshotReleased` releases it. A checkpoint's `unlink_retired` stops below the lowest live
-  pin, so the set's files a pin names stay until it goes. The teardown releases what is left;
-  pins a crash left in strata's manifest go at open (`release_pins`).
+  nothing. One pin per bundle, kept until a later bundle supersedes it and no flight holds it:
+  consensus sends the image as the flight starts, so the learner's pin fetch can outrun the
+  chore, find none and fail validation, and the leader's next flight then finds the pin. A pin
+  released at its flight's end would lose that race every time. A publish or an activation
+  queues the release of superseded pins; strata's release commits, and short of space it stalls
+  the chore as an apply does and repeats after `resume()`, so a full disk never fences the
+  leader. A checkpoint's `unlink_retired` stops below the lowest live pin, so the set's files a
+  pin names stay until it goes: the latest bundle's pin keeps them one checkpoint longer. The
+  teardown releases what is left; pins a crash left in strata's manifest go at open
+  (`release_pins`).
 - **`serve`** answers the fetch lane on any thread: a pin's own name or its files' chunks, nothing
   for a pin released. A pin holds the replica's directory, so a serve racing the teardown reads
   on.
@@ -147,10 +152,14 @@ election timeouts as at consensus's defaults), after which the leader starts it 
 past it installs and its digest equals the replay), the ungated schedules (group-core's seeds 8,
 12, 16, 18, 23, 24, 27 and seeds 101-140 at 3 voters, crashes and power cuts included, settle by
 install), and `grow_and_heal` (at 3 and 5 voters, a joiner added past every checkpoint installs,
-is promoted beside a voter it replaces, and that voter is removed, a leader change between each
-step; the second round replaces the leader). `test/group/install_suite.sh BUILD [regex]` builds
+is promoted beside a voter it replaces, and consensus's core removes that voter by itself (D3),
+a leader change between each step; the removed voter never learns its removal's commit, so the
+test retires it before settling; the second round replaces the leader). `test/group/install_suite.sh BUILD [regex]` builds
 and runs ctest's group tests, against a consensus checkout when CONSENSUS_DIR is set.
-`test/group/mutants.py install-silent` drops `SnapshotNeeded`: the ungated schedules do not
+`release_short_of_space` fills the leader's disk after a checkpoint supersedes the install's
+pin: the release stalls the leader, unfenced, and it settles once resumed (mutant
+`release-fences` fences it instead). Mutant `pin-per-flight` releases a pin at its flight's end:
+`install_gap` does not settle. `test/group/mutants.py install-silent` drops `SnapshotNeeded`: the ungated schedules do not
 settle.
 
 `test/group/install_test.cc` (ctest's `group_install`; `group_install_test [case]`):
