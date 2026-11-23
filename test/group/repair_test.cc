@@ -19,8 +19,9 @@
 //   staged: a staged live set file flipped between the stage and the activation: the activation
 //     refuses it, and a later image repairs the replica.
 //   leader: a damaged replica made leader hands leadership off, then reinstalls.
-//   source: a leader's segments damaged on disk and never read since its reboot (lazy maps); a
-//     learner's request makes it pin them, the pin meets the damage, and the leader marks
+//   source: a leader's segments damaged on disk and never read since its reboot (lazy maps: the
+//     pin's checkpoint maps them), or rotted on disk after it mapped them (the pin's footer
+//     check reads them); a learner's request makes it pin them, the pin meets the damage, and the leader marks
 //     itself damaged and hands off to the sound follower instead of shipping the bytes; the
 //     learner installs from the next leader and the source reinstalls too.
 //   deposed: the leader installing a damaged replica loses its leadership mid-flight; it names
@@ -476,15 +477,18 @@ void damaged_leader(std::uint64_t seed) {
 	++cases;
 }
 
-void damaged_source(std::uint64_t seed) {
-	context = "source, seed " + std::to_string(seed);
+// `rested`: the running leader's segment footers rot on disk after it mapped them; only the
+// pin's footer check reads them again. Else they are flipped while it is down and stay unread
+// since its reboot: the pin's checkpoint maps them first (its commit learns their facts).
+void damaged_source(std::uint64_t seed, bool rested) {
+	context = std::string(rested ? "source at rest" : "source unread") + ", seed " + std::to_string(seed);
 	world w(3, seed, true);
 	std::mt19937_64 gen(seed);
 	if (!prepare(w, gen)) { return; }
 	auto* first = w.leader();
 	if (!check(first != nullptr, "a leader")) { return; }
 	auto& s = *first;
-	w.shut(s, false);
+	if (!rested) { w.shut(s, false); }
 	int flipped = 0;
 	for (const auto& n : names_in(s)) {
 		const auto pn = strata::index_detail::parse_name(n);
@@ -494,9 +498,11 @@ void damaged_source(std::uint64_t seed) {
 		}
 	}
 	if (!check(flipped > 0, "segments to damage")) { return; }
-	w.boot(s);
-	if (!opened(w, s) || !check(w.settle(), "the cluster settles after the reboot")) { return; }
-	// It leads again, its segments unread.
+	if (!rested) {
+		w.boot(s);
+		if (!opened(w, s) || !check(w.settle(), "the cluster settles after the reboot")) { return; }
+	}
+	// It leads, its damaged segment bytes unread.
 	if (!check(lead(w, s) && !s.p->g->damaged(), "the source leads with its damaged segments unread")) { return; }
 	auto& x = follower(w);
 	const auto base = x.p->g->recovered().position;
@@ -509,19 +515,18 @@ void damaged_source(std::uint64_t seed) {
 		w.step();
 		if (s.p->g->damaged()) { reason = s.p->g->damage_reason(); }
 	}
-	check(reason.find("the pin met damage") != std::string::npos, "the source's pin finds its damage: " + reason);
+	check(reason.find(rested ? "a pinned segment's footer fails its check" : "the pin met damage") != std::string::npos, "the source's pin finds its damage: " + reason);
 	if (!healed(w)) {
 		for (auto& [id, n] : w.nodes) {
 			const auto st = n->open() ? n->p->lp->driver().state(gid) : std::nullopt;
-			std::printf("  source, seed %llu: node %llu %s, role %d, leader %llu, commit %llu, applied %llu, damaged %d (%s)\n", (unsigned long long)seed, (unsigned long long)id, n->open() ? "open" : "down",
+			std::printf("  %s: node %llu %s, role %d, leader %llu, commit %llu, applied %llu, damaged %d (%s)\n", context.c_str(), (unsigned long long)id, n->open() ? "open" : "down",
 				st ? int(st->role) : -1, (unsigned long long)(st ? st->leader : 0), (unsigned long long)(st ? st->committed : 0), (unsigned long long)(n->open() ? n->p->g->applied() : 0),
 				n->open() && n->p->g->damaged(), n->open() ? n->p->g->damage_reason().c_str() : "");
 		}
 	}
 	repaired(w, x, base);
 	check(!s.p->g->damaged() && !marked(s) && s.p->g->installs() >= 1, "the source reinstalls too");
-	std::printf("repair: source, seed %llu: %d segments damaged unread on the leader; its pin found them (%s); the learner installed at %llu from node %llu\n", (unsigned long long)seed,
-		flipped, reason.c_str(), (unsigned long long)x.p->g->installed_at(), (unsigned long long)(w.leader() ? w.leader()->id : 0));
+	std::printf("repair: %s: %d segments damaged on the leader; its pin found them (%s); the learner installed at %llu from node %llu\n", context.c_str(), flipped, reason.c_str(), (unsigned long long)x.p->g->installed_at(), (unsigned long long)(w.leader() ? w.leader()->id : 0));
 	++cases;
 }
 
@@ -671,7 +676,10 @@ int main(int argc, char** argv) {
 		if (wants("refusal")) { refusal(seed); }
 		if (wants("staged")) { staged_damage(seed); }
 		if (wants("leader")) { damaged_leader(seed); }
-		if (wants("source")) { damaged_source(seed); }
+		if (wants("source")) {
+			damaged_source(seed, false);
+			damaged_source(seed, true);
+		}
 		if (wants("deposed")) { deposed(seed); }
 	}
 	if (wants("crash") || only == "crash-manifest-dir") { crash(kind::manifest, false); }

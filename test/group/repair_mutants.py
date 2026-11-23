@@ -39,8 +39,9 @@ MUTANTS = {
     "set-damage-fences": ("file", [(GROUP,
         "\t\t\tmark_damaged(files_.io(), e.what());\n\t\t\treturn adopt_damaged(b, e.what());\n",
         "\t\t\tthrow;\n")]),
-    # Delivered ranges are dropped, never acknowledged: consensus refuses the request (Busy).
-    "no-ack": ("manifest", [(GROUP,
+    # Delivered ranges are dropped, never acknowledged: consensus's applied index stays at the
+    # replica's, and it refuses the request (Busy) while a range is outstanding.
+    "no-ack": ("refusal", [(GROUP,
         "\t\tif (const auto through = w->delivered()) { notify_applied(through); }\n",
         "")]),
     # A damaged replica leaves its waiters and new calls unanswered.
@@ -77,8 +78,8 @@ MUTANTS = {
     "no-retry": ("staged", [(GROUP,
         "\t\tself->hand_off();\n\t\tself->begin_repair();\n",
         "\t\tself->hand_off();\n")]),
-    # The pin ships a segment unchecked: a source whose segment is damaged unread keeps leading,
-    # and a learner's activation of those bytes fails.
+    # The pin ships a segment unchecked: a source whose mapped segment rotted on disk keeps
+    # leading, and a learner's activation of those bytes fails (source at rest).
     "pin-unchecked-footer": ("source", [(INSTALL,
         "\t\t\tif (footer) { install_detail::check_footer(*f, *length, *footer); }\n",
         "")]),

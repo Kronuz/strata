@@ -244,8 +244,9 @@ keeps its applied index while consensus's moves past it; the only healthy replic
 those commits is then lost and they survive), `staged` (a
 staged live set file flipped before the activation is refused, and a later image repairs),
 `leader` (a damaged leader hands off, then reinstalls), `source` (a leader's segments damaged
-and never read since its reboot: a learner's request makes it pin them, the pin meets the
-damage and marks it damaged, it hands off to the sound follower, and the learner and it install
+and never read since its reboot, which the pin's checkpoint maps, or rotted on disk after the
+leader mapped them, which only the pin's footer check reads: a learner's request makes it pin
+them, the pin meets the damage and marks it damaged, it hands off to the sound follower, and the learner and it install
 from the next leader), `deposed` (a leader that loses its
 leadership mid-flight names no install from then on, and none does once settled: every flight's
 release ends its peer's entry, review F3), and `crash` (a power cut at every
