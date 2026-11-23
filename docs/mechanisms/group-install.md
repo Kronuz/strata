@@ -156,8 +156,10 @@ A replica whose bytes fail their checks reinstalls its leader's image through th
   then every section's checksum) as it takes their CRC32C, so a source never ships a segment it
   would refuse to load: a failure is its damage. A learner checks the staged checkpoint the same
   way before it answers `validated`; a refusal there (or a fetched byte that fails the pin's
-  CRC32C) releases the leader's flight as rejected, and the leader reads its pin's files again
-  against their CRC32Cs: bytes that changed since the pin are its damage, and it hands off. A
+  CRC32C) fails the flight: consensus releases it `Unavailable` (a failed validation carries no
+  durable term; `Rejected` is the learner's core refusing validated bytes), and the leader reads
+  its pin's files again against their CRC32Cs on every such release: bytes that changed since
+  the pin are its damage, and it hands off. A
   live set file carries no CRC32C, so its damage is not seen (F24: no scrubber).
 - **The marker** `rd` (its text the reason, through a temporary and a rename, the directory
   synced) goes first: a crash anywhere from here reopens the replica damaged. A damaged index's
@@ -260,7 +262,7 @@ them, the pin meets the damage and marks it damaged, it hands off to the sound f
 from the next leader), `body` (as `source` at rest, with a byte rotted inside each segment's
 body behind a valid footer: the pin's whole check finds it), `rot` (the source's segment bodies
 rot after its pin was made and served: the next learner's stage fails the pin's CRC32C, the
-rejected flight makes the source read its pin again, and it hands off), `two-damaged` (two
+failed flight makes the source read its pin again, and it hands off), `two-damaged` (two
 damaged replicas, one leading, with no host view: the hand-offs reach the sound one),
 `handoff-down` (the ring's next voter is down and the hand-off passes it by), `lone` (a lone
 voter's damaged index stays set aside under `iq.`, byte for byte), `deposed` (a leader that loses its

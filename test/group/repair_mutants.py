@@ -89,6 +89,11 @@ MUTANTS = {
     "refusal-unchecked": ("rot", [(GROUP,
         "\t\t\t\tif (refused) { check_refused_pin(key); }\n",
         "")]),
+    # The pin is read again only on a release consensus never gives a learner's failed
+    # validation (Rejected, the reviewed rule): the rotted source keeps leading (F7).
+    "refusal-rejected": ("rot", [(GROUP,
+        "refused = reason == cs::SnapshotReleaseReason::Unavailable,",
+        "refused = reason == cs::SnapshotReleaseReason::Rejected,")]),
     # A refused activation reports the replica's first damage: the staged file's refusal is lost.
     "reason-kept": ("staged", [(GROUP,
         "\t\t\tif (marked_damaged(files_.io())) { return adopt_damaged(b, e.what()); }\n",

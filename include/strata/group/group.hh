@@ -504,7 +504,9 @@ public:
 			}
 			trim_sources();
 		}
-		push(new notice_work([this, peer, key, refused = reason == cs::SnapshotReleaseReason::Rejected, ended = false]() mutable {
+		// A learner's failed validation carries no durable term: consensus releases it Unavailable
+		// (Rejected is its core refusing validated bytes), as it does a lost transfer.
+		push(new notice_work([this, peer, key, refused = reason == cs::SnapshotReleaseReason::Unavailable, ended = false]() mutable {
 			if (!ended) {
 				if (refused) { check_refused_pin(key); }
 				unpin_for(peer, key);
@@ -1277,8 +1279,8 @@ private:
 		p->flights.emplace(peer, key.transfer);
 		made_sources().pins.emplace(key.boundary.index, std::move(p));
 	}
-	// On the chore: the learner refused the flight's bytes, so the pin is read again; bytes that
-	// changed since it was made are this source's damage, and it hands off as at the pin.
+	// On the chore: the flight failed (the learner may have refused its bytes), so the pin is read
+	// again; bytes that changed since it was made are this source's damage, and it hands off.
 	void check_refused_pin(cs::SnapshotKey key) {
 		if (damaged_.load()) { return; }
 		std::shared_ptr<pinned> p;
