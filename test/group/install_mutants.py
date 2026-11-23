@@ -49,6 +49,11 @@ MUTANTS = {
     "holder-unordered": ("crash", [(INSTALL,
         "\t\tdir.remove(std::string(d::strata_prefix) + p.strata.front().name);\n\t\tdir.sync_directory();\n",
         "")]),
+    # A deferred index installs without its first commit: a crash leaves segment copies with no
+    # manifest log, which strata refuses to open.
+    "install-onto-deferred": ("deferred", [(INSTALL,
+        "\t\tif (!index_detail::log_holding(dir)) { ix.commit(); }\n",
+        "")]),
     # Recovery does not finish an activation consensus persisted: P_b > P_H fences the replica.
     "no-resume": ("crash", [(INSTALL,
         "\tif (p && p->base == restored) {\n",

@@ -33,6 +33,8 @@ struct file_set_damage : std::runtime_error {
 class file_set {
 public:
 	explicit file_set(kronuz::journal::IO& io) : io_(&io) {}
+	// The directory the set shares with strata, the group's borrowed one.
+	kronuz::journal::IO& io() const noexcept { return *io_; }
 
 	// --- apply ----------------------------------------------------------------------------
 

@@ -10,6 +10,6 @@ override=
 [ -z "$CONSENSUS_DIR" ] || override="-DFETCHCONTENT_SOURCE_DIR_CONSENSUS=$CONSENSUS_DIR"
 # shellcheck disable=SC2086
 cmake -G Ninja -S "$root" -B "$build/strata" -DCMAKE_BUILD_TYPE=Release $override >/dev/null || exit 127
-cmake --build "$build/strata" -j4 --target group_voters_test group_lone_voter_test group_lifetime_test group_footprint_test group_file_set_test group_install_test || exit 127
+cmake --build "$build/strata" -j4 --target group_voters_test group_witness_test group_lone_voter_test group_lifetime_test group_footprint_test group_file_set_test group_install_test group_catalog_test || exit 127
 cd "$build/strata" || exit 127
 exec ctest -R "$regex" --no-tests=error --output-on-failure --stop-on-failure

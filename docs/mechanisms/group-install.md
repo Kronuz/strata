@@ -39,7 +39,7 @@ The pin's bytes: magic and version, G, the bundle, the two lists (name, length, 
 CRC32C over all of it. `decode_pin` refuses a strata name that is not a manifest or segment
 name, a set name the bundle does not hold at that length and CRC32C, a duplicate, and a damaged
 pin. A strata pin lives in the manifest, so it survives the leader's process; no install does,
-and `release_pins` drops them all when the leader reopens.
+so a reopened leader releases every pin its manifest keeps (`held_pins`, see the binding).
 
 ## Serving
 
@@ -74,8 +74,11 @@ consensus persists the install (the bundle becomes the replica's checkpoint) onl
 stage completes; then `activate` makes the replica the pin's:
 
 1. strata installs generation G from the staged files (`index::install` through a view of the
-   `is.` names): the old content or the new across a crash. The staged strata files go next,
-   the manifest log first, so a repeat does not install again.
+   `is.` names): the old content or the new across a crash. A deferred index (a fresh learner's,
+   which never committed) commits its empty state first: install writes its segment copies
+   before its manifest, and a directory holding segments with no manifest log is damage to
+   strata's open, not an interrupted create. The staged strata files go next, the manifest log
+   first, so a repeat does not install again.
 2. Each staged set file replaces the replica's own.
 3. The marker goes, then every staging name.
 
@@ -104,14 +107,21 @@ answered by the leader's `group::serve`).
 
 - **The leader** pins at `SnapshotNeeded`, on the chore between entries, the bundle at the key's
   boundary when it is its latest one (restored, installed or published); another boundary pins
-  nothing, the learner's pin fetch finds none, and its validation fails until the leader's next
-  flight. One pin per bundle, held by every flight that asked for it; the last flight's
-  `SnapshotReleased` releases it. A checkpoint's `unlink_retired` stops below the lowest live
-  pin, so the set's files a pin names stay until it goes. The teardown releases what is left;
-  pins a crash left in strata's manifest go at open (`release_pins`).
+  nothing. One pin per bundle, kept until a later bundle supersedes it and no flight holds it:
+  consensus sends the image as the flight starts, so the learner's pin fetch can outrun the
+  chore, find none and fail validation, and the leader's next flight then finds the pin. A pin
+  released at its flight's end would lose that race every time. A publish or an activation
+  queues the release of superseded pins; strata's release commits, and short of space it stalls
+  the chore as an apply does and repeats after `resume()`, so a full disk never fences the
+  leader. A checkpoint's `unlink_retired` stops below the lowest live pin, so the set's files a
+  pin names stay until it goes: the latest bundle's pin keeps them one checkpoint longer. A
+  close releases what is left on the chore once its consensus row is closed (the index is the
+  catalog's and stays open, D169); pins a crash or a fenced close left in strata's manifest go
+  after the next open: recovery reads them (`held_pins`) and queues their release on the chore,
+  where short of space it stalls as above, so a full disk never fails the open.
 - **`serve`** answers the fetch lane on any thread: a pin's own name or its files' chunks, nothing
-  for a pin released. A pin holds the replica's directory, so a serve racing the teardown reads
-  on.
+  for a pin released or once closed. The directory is borrowed, so the teardown waits for every
+  serve in flight before close returns it to the host.
 - **The learner** at `ValidateImage` decodes the image as a bundle at the boundary, fetches the
   pin from the source incarnation, then holds the chore for the stage (apply waits; the stage is
   the chore's only work), stages, and answers `validated`, or `validation_failed` with what it
@@ -121,6 +131,8 @@ answered by the leader's `group::serve`).
   the set and the state from the bundle; then `activated`, and consensus delivers past the
   boundary. A failure fences the replica (`activation_failed`). A crash between consensus's
   persist and `activated` recovers through the same `adopt`.
+- **A close** waits for the learner's stage and activation tasks as for the chore: its teardown
+  ends once neither runs, so the host may close the index and destroy the group on return.
 
 ## What it costs
 
@@ -147,11 +159,21 @@ election timeouts as at consensus's defaults), after which the leader starts it 
 past it installs and its digest equals the replay), the ungated schedules (group-core's seeds 8,
 12, 16, 18, 23, 24, 27 and seeds 101-140 at 3 voters, crashes and power cuts included, settle by
 install), and `grow_and_heal` (at 3 and 5 voters, a joiner added past every checkpoint installs,
-is promoted beside a voter it replaces, and that voter is removed, a leader change between each
-step; the second round replaces the leader). `test/group/install_suite.sh BUILD [regex]` builds
+is promoted beside a voter it replaces, and consensus's core removes that voter by itself (D3),
+a leader change between each step; the removed voter never learns its removal's commit, so the
+test retires it before settling; the second round replaces the leader). `test/group/install_suite.sh BUILD [regex]` builds
 and runs ctest's group tests, against a consensus checkout when CONSENSUS_DIR is set.
-`test/group/mutants.py install-silent` drops `SnapshotNeeded`: the ungated schedules do not
-settle.
+`release_short_of_space` fills the leader's disk after a checkpoint supersedes the install's
+pin: the release stalls the leader, unfenced, and it settles once resumed (mutant
+`release-fences` fences it instead). Mutant `pin-per-flight` releases a pin at its flight's end:
+`install_gap` does not settle. `test/group/mutants.py install-silent` drops `SnapshotNeeded`: the ungated schedules do not
+settle. `reopen_short_of_space` restarts a leader holding its bundle's pin on a full disk: it
+opens, the pin's release stalls, and once resumed the pin goes and the cluster settles (mutant
+`release-at-open` releases at recovery and fails the open). `deferred_learner_crash` cuts the
+power of a learner whose index is deferred at every mutation of its directory from its rejoin
+through the settled install: each reboot settles with equal digests and no staging name (mutant
+`install-onto-deferred`, which installs without the first commit, leaves a directory strata
+refuses to open).
 
 `test/group/install_test.cc` (ctest's `group_install`; `group_install_test [case]`):
 `values` (the pin, the serve's bounds, a fresh learner fetching every byte once in
@@ -161,5 +183,6 @@ the bytes not staged), `held` (an old replica keeps its files and fetches the re
 flipped byte in a held sealed volume: that file fetched whole), `crash` (a process crash and a
 power loss at every mutating operation from the stage through the activating recovery, persisted
 or not, then the activating recovery crashed at each of its own: old replica or complete new
-one), `threads` (fetches answered on four threads; TSan). `test/group/install_mutants.py` holds
+one), `deferred` (the same crashes on a fresh learner whose index is deferred: the empty replica
+or the complete new one), `threads` (fetches answered on four threads; TSan). `test/group/install_mutants.py` holds
 one mutant per guard, each killed by the case it names.

@@ -300,11 +300,12 @@ template <class Layout>
 void release_pin(basic_index<Layout>& ix, const install_pin& p) {
 	ix.release(p.generation);
 }
-// A pin lives in strata's manifest, so it outlives its source's process; no install does. A
-// reopened source releases every pin its index keeps.
-template <class Layout>
-void release_pins(basic_index<Layout>& ix, kronuz::journal::IO& dir) {
-	for (const auto g : index_detail::read_state(dir).pins) { ix.release(g); }
+// A pin lives in strata's manifest, so it outlives its source's process; no install does. The
+// generations the index in `dir` keeps pinned, for a reopened source to release; a deferred
+// index (no manifest yet) keeps none.
+inline std::vector<std::uint64_t> held_pins(kronuz::journal::IO& dir) {
+	if (!index_detail::log_holding(dir)) { return {}; }
+	return index_detail::read_state(dir).pins;
 }
 
 // Names on the fetch lane, the group's own routing ahead of them: a pin by its bundle's
@@ -532,6 +533,9 @@ template <class Layout>
 void activate(kronuz::journal::IO& dir, const install_pin& p, basic_index<Layout>& ix) {
 	namespace d = install_detail;
 	if (d::open_if(dir, std::string(d::strata_prefix) + p.strata.front().name)) {
+		// A deferred index commits its old state first: strata's install writes its copies
+		// before its manifest, which a crash must not leave in a directory with no manifest log.
+		if (!index_detail::log_holding(dir)) { ix.commit(); }
 		d::prefixed_io staged_io(dir, d::strata_prefix);
 		ix.install(staged_io, p.generation);
 		// strata holds it now: the staged manifest log goes, durably, before the segments it

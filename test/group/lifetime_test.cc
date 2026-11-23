@@ -22,10 +22,12 @@
 // closed state it resumes its term, no election, and with `reopen-turn` a reopen and the write
 // issued with it share one turn: as many barriers as a write to an open group (A7).
 //
-// failed-open: a reopen over a lost directory fails closed (P_b > P_H) and closes its row; the
-// same process then reopens the group over its directory and reads every acknowledged entry.
+// failed-open: a reopen over a lost directory fails closed (P_b > P_H), closes its row and leaves
+// the loop's table; the same process then reopens the group over its directory and reads every
+// acknowledged entry.
 // `group_lifetime_test [held|points|reopen|reopen-turn|failed-open]`.
 #include "blob_app.hh"
+#include "group_catalog_borrow.hh"
 #include "host_io.hh"
 #include "oracle.hh"
 
@@ -71,6 +73,8 @@ std::string what(std::exception_ptr e) {
 const j::TurnLogOptions turn_options{16 * 1024, 1024, 1, 4, 4096};
 const j::AdmissionLimits admission{{256u << 20, 8192}, {256 * 1024, 3}, {64u << 20, 4}, 32, 3};
 
+std::array<char, 16> uuid(cs::GroupId id) { return {'l', 'i', 'f', 'e', char('0' + id)}; }
+
 group_type::config config(cs::GroupId id, strata::byte_budget& storage) {
 	group_type::config c;
 	c.id = id;
@@ -88,9 +92,6 @@ group_type::config config(cs::GroupId id, strata::byte_budget& storage) {
 	c.options.timing = cs::Timing{20, 40, 100, 200, 60000};
 	c.options.scheduling = cs::WorkerLimits{16, 128};
 	c.identity = j::Identity{'L', 'T', char('0' + id)};
-	c.uuid = {'l', 'i', 'f', 'e', char('0' + id)};
-	c.strata.keyed = true;
-	c.strata.storage = &storage;
 	return c;
 }
 
@@ -178,8 +179,9 @@ void held() {
 	std::atomic<bool> turns_done{false}, driver_done{false};
 	task::spawn(loop_t.ref(), host->driver(0).run(j::completion_ref::of(inline_io), stop.token()), [&](std::exception_ptr) { turns_done.store(true); });
 	task::spawn(loop_t.ref(), lp->run(stop.token()), [&](std::exception_ptr) { driver_done.store(true); });
-	auto a = std::make_unique<group_type>(*lp, config(1, budget_a), std::make_unique<fl::io>(dir_a), app_a, chore_a.ref());
-	auto b = std::make_unique<group_type>(*lp, config(2, budget_b), std::make_unique<fl::io>(dir_b), app_b, chore_b.ref());
+	group_test::borrowed<group_type> a, b;
+	a.emplace(*lp, config(1, budget_a), std::make_unique<fl::io>(dir_a), budget_a, uuid(1), app_a, chore_a.ref());
+	b.emplace(*lp, config(2, budget_b), std::make_unique<fl::io>(dir_b), budget_b, uuid(2), app_b, chore_b.ref());
 	loop_t.begin();
 	chore_a.begin();
 	chore_b.begin();
@@ -289,7 +291,7 @@ struct process {
 	j::InlineCompletion inline_io;
 	std::unique_ptr<j::Host> host;
 	std::unique_ptr<sg::loop> lp;
-	std::unique_ptr<group_type> g;
+	group_test::borrowed<group_type> g;
 	task::cancel_source stop;
 	bool turns_done = false, driver_done = false;
 
@@ -298,7 +300,7 @@ struct process {
 		lp = std::make_unique<sg::loop>(ref(), j::completion_ref::of(inline_io), *host, 0, 11);
 		task::spawn(ref(), host->driver(0).run(j::completion_ref::of(held), stop.token()), [this](std::exception_ptr) { turns_done = true; });
 		task::spawn(ref(), lp->run(stop.token()), [this](std::exception_ptr) { driver_done = true; });
-		g = std::make_unique<group_type>(*lp, config(gid, d.storage), std::make_unique<fl::io>(d.dir), app, task::scheduler_ref::of(chore_s));
+		g.emplace(*lp, config(gid, d.storage), std::make_unique<fl::io>(d.dir), d.storage, uuid(gid), app, task::scheduler_ref::of(chore_s));
 		loop_s.run();
 	}
 	task::scheduler_ref ref() { return task::scheduler_ref::of(loop_s); }
@@ -571,8 +573,7 @@ void reopen(bool turn) {
 	const auto regroup = [&] {
 		auto c = config(gid, d.storage);
 		c.closed = record;
-		p->g.reset();
-		p->g = std::make_unique<group_type>(*p->lp, std::move(c), std::make_unique<fl::io>(d.dir), app, task::scheduler_ref::of(p->chore_s));
+		p->g.emplace(*p->lp, std::move(c), std::make_unique<fl::io>(d.dir), d.storage, uuid(gid), app, task::scheduler_ref::of(p->chore_s));
 	};
 	const auto same_term = [&](const std::string& how) {
 		const auto s = p->lp->driver().state(gid);
@@ -628,8 +629,8 @@ void failed_open() {
 	app.seen = &seen;
 	auto p = std::make_unique<process>(d, app);
 	const auto open_group = [&](fl::filesystem& dir) {
-		p->g.reset();
-		p->g = std::make_unique<group_type>(*p->lp, config(gid, d.storage), std::make_unique<fl::io>(dir), app, task::scheduler_ref::of(p->chore_s));
+		p->g.emplace(*p->lp, config(gid, d.storage), std::make_unique<fl::io>(dir), d.storage, uuid(gid), app, task::scheduler_ref::of(p->chore_s));
+		check(!p->lp->find(gid), "the constructor leaves the loop's table to open()");
 		auto o = start(p->ref(), p->g->open());
 		p->pump([&] { return o->done.load(); });
 		return o->error;
@@ -651,6 +652,7 @@ void failed_open() {
 	check(error != nullptr, "an open over the lost directory fails closed");
 	check(what(error).find("P_b > P_H") != std::string::npos, "it fails on the bundle past strata's head: " + what(error));
 	check(p->g->fenced(), "the failed group is fenced");
+	check(!p->lp->find(gid), "the failed open left the loop's table");
 	check(p->lp->driver().groups() == 0, "the failed open closed its row: " + std::to_string(p->lp->driver().groups()) + " rows");
 	const auto again = open_group(d.dir);
 	check(!again, "the same process reopens the group: " + what(again));
