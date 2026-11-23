@@ -20,8 +20,9 @@
 //   growth      D7's path from a lone voter: 0, 1, 2, 1, 0 replicas, a witness in each window
 //   device      a log device that persisted a non-prefix subset of its writes since its last
 //               sync, answered by the journal's checksums
-//   corruption  A3's simulator half: damaged segment, manifest and file-set files; skipped (77)
-//               until task `repair` merges
+//   corruption  A3's simulator half: a follower's segment, manifest log or sealed set file damaged
+//               under the row's faults; it reopens damaged and reinstalls (segments map at open
+//               here, STRATA_EAGER_SEGMENTS=1). Run by name only
 #include "world.hh"
 
 #include "simulation/checker.hh"
@@ -591,6 +592,9 @@ struct sim {
 		for (std::uint64_t e = 0; e < events && !done(); ++e) { step(false, issue); }
 		return done();
 	}
+	bool damaged() const {
+		return std::any_of(w.nodes.begin(), w.nodes.end(), [](const auto& n) { return n.second->open() && !n.second->witness && n.second->p->g->damaged(); });
+	}
 	bool idle() const {
 		return up.stage < 0 && std::all_of(clients.begin(), clients.end(), [](const client& c) { return c.what == client::doing::idle; });
 	}
@@ -655,7 +659,7 @@ struct sim {
 	// the history linearizable and every prefix read a consistent prefix.
 	void finish(std::uint64_t seed) {
 		heal();
-		if (!check(w.settle(), "the cluster settles")) { return; }
+		if (!check(run_until([&] { return !damaged(); }, 400000), "every damaged replica reinstalls") || !check(w.settle(), "the cluster settles")) { return; }
 		drain();
 		heal();  // a cut upload answered in the drain isolated its leader
 		check(w.settle(), "the cluster settles once the clients are answered");
@@ -1042,14 +1046,69 @@ void device(unsigned voters) {
 	add_totals(sum, row);
 }
 
+// --- corruption -----------------------------------------------------------------------------
+
+// A3's simulator half: a stopped follower's segment, manifest log or sealed set file damaged
+// between two stretches of the faults row's traffic and faults. It reopens damaged, reinstalls
+// through the rest, and the run's checks hold. The world sets no host view: the hand-offs of a
+// damaged leader go round the ring.
+void corruption() {
+	totals row;
+	std::uint64_t repairs = 0;
+	for (const auto k : {kind::segment, kind::manifest, kind::file}) {
+		for (std::uint64_t seed = 1; seed <= 3; ++seed) {
+			context = std::string("corruption, ") + name_of(k) + ", seed " + std::to_string(seed);
+			world w(3, 6000 + 10 * std::uint64_t(k) + seed);
+			sim s(w, seed, std::string("corruption_") + name_of(k));
+			if (!check(w.settle(), "the cluster settles")) { continue; }
+			s.run(1500, true);
+			s.drain();
+			s.heal();
+			if (!check(s.run_until([&] { return !s.damaged(); }, 400000) && w.settle(), "the cluster settles before the damage")) { continue; }
+			node* x = nullptr;
+			std::string sealed;
+			for (int round = 0; round < 8; ++round) {
+				s.compact();
+				x = nullptr;
+				for (auto& [id, n] : w.nodes) {
+					if (!x && n.get() != w.leader() && !n->witness && n->open()) { x = n.get(); }
+				}
+				sealed = x ? sealed_file(*x) : std::string();
+				if (k != kind::file || !sealed.empty()) { break; }
+				s.run(500, false);
+				s.drain();
+				check(w.settle(), "the cluster settles before the next checkpoints");
+			}
+			if (!check(x != nullptr, "a follower")) { continue; }
+			const auto before = x->installs + x->p->g->installs();
+			s.shut(*x, false);
+			if (!damage(*x, k, sealed)) { continue; }
+			s.boot(*x);
+			if (!check(s.run_until([&] { return x->open(); }, 40000, true), "the damaged follower reopens")) { continue; }
+			check(x->p->g->damaged() && marked(*x), "it reopens damaged");
+			s.run(1500, true);
+			s.finish(seed);
+			const auto after = x->installs + (x->up() ? x->p->g->installs() : 0);
+			check(after > before, "the damaged follower reinstalls");
+			repairs += after > before;
+			add_totals(row, s.t);
+		}
+	}
+	context = "corruption";
+	covers(row, {{"process crashes", row.crashes}, {"power cuts", row.power_cuts}, {"partitions", row.partitions}, {"checkpoints", row.checkpoints}, {"acknowledged writes", row.writes},
+		{"linearizable gets", row.gets}, {"prefix reads", row.prefix_reads}, {"repairs", repairs}});
+	std::printf("corruption: %llu damaged followers reinstalled (segment, manifest and set file, 3 seeds each)\n", (unsigned long long)repairs);
+	add_totals(sum, row);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
 	const std::string row = argc > 1 ? argv[1] : "";
 	const unsigned voters = argc > 2 ? unsigned(std::stoul(argv[2])) : 3;
 	if (row == "corruption") {
-		std::printf("corruption: A3's simulator half (a damaged segment, manifest or file-set file fences its replica, which reinstalls) waits for task repair: skipped\n");
-		return 77;
+		::setenv("STRATA_EAGER_SEGMENTS", "1", 1);  // a damaged segment is met at the reopen
+		corruption();
 	}
 	if (row.empty() || row == "faults") { faults(voters); }
 	if (row.empty() || row == "barriers") { barriers(voters); }

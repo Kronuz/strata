@@ -24,7 +24,9 @@
 #include <memory>
 #include <random>
 #include <set>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace group_test {
@@ -635,6 +637,64 @@ inline void write_and_compact(world& w, std::mt19937_64& gen, int writes) {
 		check(k->done && !k->error, "node " + std::to_string(id) + "'s checkpoint: " + what(k->error));
 	}
 	check(w.settle(), "the cluster settles after the checkpoints");
+}
+
+// --- damage (repair_test, sim_test's corruption row) ------------------------------------------
+
+enum class kind { segment, manifest, file };
+inline const char* name_of(kind k) { return k == kind::segment ? "segment" : k == kind::manifest ? "manifest" : "file"; }
+
+inline std::vector<std::string> names_in(node& x) {
+	std::vector<std::string> out;
+	fl::io io(x.dir_disk);
+	for (auto c = io.scan_directory(); auto n = c->next();) { out.push_back(*n); }
+	return out;
+}
+inline bool marked(node& x) {
+	fl::io io(x.dir_disk);
+	return sg::marked_damaged(io);
+}
+inline std::uint64_t size_of(node& x, const std::string& name) {
+	fl::io io(x.dir_disk);
+	return io.open_existing(name)->size();
+}
+inline void flip(node& x, const std::string& name, std::uint64_t at) {
+	fl::io io(x.dir_disk);
+	auto f = io.open_existing(name);
+	char c = 0;
+	f->read_at(at, std::span<char>(&c, 1));
+	c = char(c ^ 0x5a);
+	f->write_at(at, std::string_view(&c, 1));
+	f->sync();
+}
+
+// A sealed set file the follower's bundle names, by its set name.
+inline std::string sealed_file(node& x) {
+	for (const auto& [name, f] : x.p->g->recovered().files) {
+		if (f.crc && f.length) { return name; }
+	}
+	return {};
+}
+// One flipped byte in a stopped node's file of `k`: a segment's footer, every manifest log's
+// header, or a sealed set file's first byte.
+inline bool damage(node& x, kind k, const std::string& sealed) {
+	int flipped = 0;
+	for (const auto& n : names_in(x)) {
+		const auto p = strata::index_detail::parse_name(n);
+		if (k == kind::segment && p && p->type == strata::index_detail::parsed_name::segment && !flipped) {
+			flip(x, n, size_of(x, n) - 8);
+			++flipped;
+		}
+		if (k == kind::manifest && p && p->type == strata::index_detail::parsed_name::manifest) {
+			flip(x, n, 8);
+			++flipped;
+		}
+	}
+	if (k == kind::file && !sealed.empty()) {
+		flip(x, "app." + sealed, 0);
+		++flipped;
+	}
+	return check(flipped > 0, std::string("a ") + name_of(k) + " file to damage");
 }
 
 }  // namespace group_test

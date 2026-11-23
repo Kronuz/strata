@@ -18,6 +18,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 GROUP = "include/strata/group/group.hh"
 INSTALL = "include/strata/group/install.hh"
+REPAIR = "include/strata/group/repair.hh"
 TARGET = "group_repair_test"
 
 # name: (the case that kills it, [(file, old, new), ...])
@@ -78,20 +79,37 @@ MUTANTS = {
     "no-retry": ("staged", [(GROUP,
         "\t\tself->hand_off();\n\t\tself->begin_repair();\n",
         "\t\tself->hand_off();\n")]),
-    # The pin ships a segment unchecked: a source whose mapped segment rotted on disk keeps
-    # leading, and a learner's activation of those bytes fails (source at rest).
-    "pin-unchecked-footer": ("source", [(INSTALL,
-        "\t\t\tif (footer) { install_detail::check_footer(*f, *length, *footer); }\n",
+    # The pin ships a segment by its CRC32C alone: a source whose segment body rotted behind a
+    # valid footer keeps leading, and every learner refuses its bytes (F7).
+    "pin-unchecked": ("body", [(INSTALL,
+        "\t\t\tp.strata.push_back({name, s.size, install_detail::checked_segment<Layout>(*dir.open_existing(name), s.size, s.footer_crc)});\n",
+        "\t\t\tp.strata.push_back({name, s.size, install_detail::crc_of(*dir.open_existing(name), s.size)});\n")]),
+    # A refused flight leaves the source's pin unread: bytes that rotted after the pin keep
+    # failing every learner's stage, and the source keeps leading (F7).
+    "refusal-unchecked": ("rot", [(GROUP,
+        "\t\t\t\tif (refused) { check_refused_pin(key); }\n",
         "")]),
     # A refused activation reports the replica's first damage: the staged file's refusal is lost.
     "reason-kept": ("staged", [(GROUP,
         "\t\t\tif (marked_damaged(files_.io())) { return adopt_damaged(b, e.what()); }\n",
         "\t\t\tif (marked_damaged(files_.io())) { return adopt_damaged(b); }\n")]),
-    # A damaged leader hands off to any follower the host names, a damaged one too: two damaged
-    # replicas pass leadership between them and nothing reinstalls.
-    "handoff-any": ("source", [(GROUP,
-        "\t\t\t\ttarget = loop_->applied_past(id_, std::max<cs::Index>(s->committed, 1));\n",
-        "\t\t\t\ttarget = loop_->applied_past(id_, 0);\n")]),
+    # A damaged leader hands off to the membership's first other voter: two damaged replicas
+    # pass leadership between them and nothing reinstalls (F8).
+    "handoff-first": ("two-damaged", [(GROUP,
+        "\t\tconst auto target = ring[(std::size_t(self - ring.begin()) + hop) % ring.size()];\n",
+        "\t\t(void)hop;\n\t\tconst auto target = ring[self == ring.begin() ? 1 : 0];\n")]),
+    # Every hand-off goes to the ring's next voter: one that is down is tried forever (F8).
+    "handoff-fixed": ("handoff-down", [(GROUP,
+        "\t\tconst auto hop = 1 + handoffs_++ % (ring.size() - 1);\n",
+        "\t\tconst auto hop = 1;\n")]),
+    # The reopen deletes a damaged index's names: a lone voter loses its only bytes (F9).
+    "quarantine-deletes": ("lone", [(REPAIR,
+        "\t\t\tdir.replace(n, aside);\n",
+        "\t\t\tdir.remove(n);\n")]),
+    # The set-aside names stay after the reinstall replaced them (F9).
+    "quarantine-kept": ("manifest", [(GROUP,
+        "\t\trelease_quarantine(files_.io());\n",
+        "")]),
     # A sound replica stages an image consensus refuses as caught up: its stage stays behind.
     "stage-caught-up": ("crash-manifest-dir", [(GROUP,
         "\t\tif (!damaged_.load() && boundary.index <= applied_.load()) {\n",
@@ -99,9 +117,6 @@ MUTANTS = {
     # A flight's end names its peer still unless it installed or caught up: a leader deposed
     # mid-flight names the peer, and keeps its install state, for good.
     "needed-kept": ("deposed", [(GROUP,
-        "\tvoid install_released(cs::NodeId peer, cs::SnapshotKey key, cs::SnapshotReleaseReason) override {\n",
-        "\tvoid install_released(cs::NodeId peer, cs::SnapshotKey key, cs::SnapshotReleaseReason reason) override {\n"),
-        (GROUP,
         "\t\t// is a new flight, which names the peer again.\n\t\t{\n",
         "\t\t// is a new flight, which names the peer again.\n\t\tif (reason == cs::SnapshotReleaseReason::Installed || reason == cs::SnapshotReleaseReason::CaughtUp) {\n")]),
 }

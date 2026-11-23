@@ -5,7 +5,7 @@
 // equals the leader's and a replay's; bytes on the wire are counted exactly; a crash at every
 // mutating operation of the stage, the activation and the recovery's own activation leaves the
 // replica the old one or the complete new one. Cases: `values`, `retry`, `held`, `damaged`,
-// `crash`, `threads` (TSan), or all with no argument.
+// `crash`, `deferred`, `rotted`, `threads` (TSan), or all with no argument.
 #include "oracle.hh"
 
 #include "strata/group/install.hh"
@@ -564,6 +564,82 @@ void deferred() {
 	std::cout << "deferred: " << runs << " runs over " << total << " operations, " << olds << " empty, " << news << " new\n";
 }
 
+// A segment body that rotted behind a valid footer (F7). The source's pin checks each segment
+// whole and refuses it; a pin made before the rot fails the source's check_pin; a learner whose
+// staged bytes match the pin's CRC32C yet fail strata's checks refuses them at check_stage, and
+// its activation of such a stage marks it damaged and sweeps, never escaping as corrupt_segment.
+std::string segment_of(replica& r, const std::string& prefix = "") {
+	for (const auto& n : r.fs.list()) {
+		if (!n.starts_with(prefix)) { continue; }
+		const auto p = strata::index_detail::parse_name(n.substr(prefix.size()));
+		if (p && p->type == strata::index_detail::parsed_name::segment) { return n; }
+	}
+	return {};
+}
+void rot(replica& r, const std::string& name) {
+	auto f = r.io.open_existing(name);
+	const auto at = f->size() / 2;
+	char c = 0;
+	f->read_at(at, std::span<char>(&c, 1));
+	c = char(c ^ 0x5a);
+	f->write_at(at, std::string_view(&c, 1));
+	f->sync();
+}
+template <class E, class F>
+bool throws(F&& f) {
+	try {
+		f();
+	} catch (const E&) {
+		return true;
+	} catch (...) {}
+	return false;
+}
+void rotted() {
+	auto& l = leader();
+	{
+		replica r;
+		r.create();
+		r.apply(bundle_at);
+		const auto b = r.checkpoint();
+		const auto pin = sg::make_pin(*r.ix, r.io, b);
+		check(!throws<std::exception>([&] { sg::check_pin(r.io, pin); }), "a sound source's pin passes its check");
+		const auto seg = segment_of(r);
+		check(!seg.empty(), "the source holds a segment");
+		rot(r, seg);
+		check(throws<strata::corrupt_index>([&] { sg::check_pin(r.io, pin); }), "a pin whose segment rotted since fails its check");
+		check(throws<strata::corrupt_segment>([&] { (void)sg::make_pin(*r.ix, r.io, b); }), "a source whose segment body rotted refuses to pin it");
+	}
+	replica learner;
+	learner.create();
+	learner.apply(old_at);
+	const auto old = learner.checkpoint();
+	learner.recover(old);
+	const auto before = learner.of();
+	(void)run(sg::stage(learner.io, l.pin, source{}.fetch()));
+	const auto staged_seg = segment_of(learner, "is.");
+	check(!staged_seg.empty(), "the stage holds a segment");
+	rot(learner, staged_seg);
+	// The pin a rotted source would send: its CRC32C taken from the rotted bytes.
+	auto bad = l.pin;
+	for (auto& f : bad.strata) {
+		if ("is." + f.name == staged_seg) { f.crc = sg::install_detail::crc_of(*learner.io.open_existing(staged_seg), f.length); }
+	}
+	check(throws<strata::corrupt_segment>([&] { sg::check_stage<strata::document_layout>(learner.io, bad); }), "the learner's check refuses a stage whose segment fails strata's checks");
+	{
+		const auto bytes = sg::encode(bad);
+		auto m = learner.io.open_existing("ip");
+		m->truncate(0);
+		for (std::size_t done = 0; done < bytes.size();) { done += m->write_at(done, std::string_view(bytes).substr(done)); }
+		m->sync();
+	}
+	check(throws<sg::replica_damaged>([&] { learner.recover(l.b); }), "the activation of a stage strata refuses answers replica_damaged");
+	check(sg::marked_damaged(learner.io), "the replica is marked damaged");
+	const auto names = learner.fs.list();
+	check(std::none_of(names.begin(), names.end(), [](const std::string& n) { return n.starts_with("is.") || n.starts_with("ia.") || n == "ip"; }), "the refused stage is swept");
+	learner.recover(old);
+	check(learner.of() == before, "the replica's own content is as it was");
+}
+
 // Fetches answered on other threads, as the transport's loop answers them: the stage resumes on
 // its own scheduler. Run under TSan.
 void threads() {
@@ -627,7 +703,7 @@ void threads() {
 int main(int argc, char** argv) {
 	const std::string only = argc > 1 ? argv[1] : "";
 	const std::vector<std::pair<std::string, void (*)()>> cases = {
-		{"values", values}, {"retry", retry}, {"held", held}, {"damaged", damaged}, {"threads", threads}, {"crash", crash}, {"deferred", deferred}};
+		{"values", values}, {"retry", retry}, {"held", held}, {"damaged", damaged}, {"threads", threads}, {"crash", crash}, {"deferred", deferred}, {"rotted", rotted}};
 	try {
 		for (const auto& [name, fn] : cases) {
 			if (only.empty() || only == name) {

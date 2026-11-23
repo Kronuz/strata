@@ -2,7 +2,8 @@
 // replica whose strata or set bytes are damaged fences itself locally and reinstalls its leader's
 // image through install's path (consensus's Driver::reinstall). The marker `rd` beside the replica
 // records the damage durably, so a crash anywhere from the damage to the activation reopens the
-// replica damaged, never unfenced over damaged bytes; the install's activation removes it.
+// replica damaged, never unfenced over damaged bytes; the install's activation removes it. A
+// damaged index's names wait under `iq.` until then.
 #pragma once
 
 #include "strata/core/files.hh"
@@ -26,7 +27,7 @@ struct replica_damaged : std::runtime_error {
 };
 
 namespace repair_detail {
-inline constexpr std::string_view marker = "rd", marker_tmp = "rd.tmp";
+inline constexpr std::string_view marker = "rd", marker_tmp = "rd.tmp", quarantine_prefix = "iq.";
 inline std::unique_ptr<kronuz::journal::File> open_if(kronuz::journal::IO& io, std::string_view name) {
 	try {
 		return io.open_existing(name);
@@ -83,15 +84,33 @@ inline void clear_damaged(kronuz::journal::IO& dir) {
 	dir.sync_directory();
 }
 
-// Every strata name in `dir` removed (a damaged index's), so a deferred index takes the
-// reinstall; staging names (`is.`) are not strata's and stay.
+// Every strata name in `dir` set aside under `iq.` (a damaged index's), so a deferred index takes
+// the reinstall while the bytes stay: a lone voter, or a group whose every replica holds the
+// damage, keeps them. A name already set aside keeps its first copy. Staging names stay.
 inline void quarantine_strata(kronuz::journal::IO& dir) {
 	std::vector<std::string> names;
 	for (auto c = dir.scan_directory(); auto n = c->next();) {
 		if (index_detail::parse_name(*n)) { names.push_back(*n); }
 	}
-	for (const auto& n : names) { dir.remove(n); }
+	for (const auto& n : names) {
+		const auto aside = std::string(repair_detail::quarantine_prefix) + n;
+		if (repair_detail::open_if(dir, aside)) {
+			dir.remove(n);
+		} else {
+			dir.replace(n, aside);
+		}
+	}
 	dir.sync_directory();
+}
+
+// The set-aside bytes go once the replica is unmarked: an activation replaced them.
+inline void release_quarantine(kronuz::journal::IO& dir) {
+	std::vector<std::string> names;
+	for (auto c = dir.scan_directory(); auto n = c->next();) {
+		if (n->starts_with(repair_detail::quarantine_prefix)) { names.push_back(*n); }
+	}
+	for (const auto& n : names) { dir.remove(n); }
+	if (!names.empty()) { dir.sync_directory(); }
 }
 
 }  // namespace strata::group

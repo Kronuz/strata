@@ -23,8 +23,9 @@ the file format, then checked by `sim/include/simulation/checker.hh`:
 - uploads: three chunks and a final that writes a key from the staging file. One cut by a leader
   change (its chunks or final in different terms) writes nothing; a whole one writes its value.
 
-After each run the cluster heals and settles: every acknowledged command is at its placement,
-every data member's digest equals a replay of the log, and the history is linearizable.
+After each run the cluster heals, every damaged replica reinstalls, and the cluster settles:
+every acknowledged command is at its placement, every data member's digest equals a replay of the
+log, and the history is linearizable.
 
 | Row | Faults | Short budget |
 |---|---|---|
@@ -33,7 +34,7 @@ every data member's digest equals a replay of the log, and the history is linear
 | `membership_3`, `membership_5` | replace a follower, replace the leader, add a voter, remove a follower, under traffic | one run |
 | `growth_1` | cluster-release D7 from a lone voter: 0, 1, 2, 1, 0 replicas, with the two-data-voter window and a witness | one run |
 | `device_3` | a log device that persisted a non-prefix subset of its unsynced sectors at a power cut, answered by the journal's checksums | seeds until two such logs |
-| `corruption` | A3's simulator half: a damaged segment, manifest or file-set file fences its replica, which reinstalls at or below commit | skipped (77) until task `repair` merges |
+| `corruption` | A3's simulator half: a stopped follower's segment, manifest log or sealed set file damaged between two stretches of `faults` traffic and faults (no host view, so a damaged leader's hand-offs go round the ring); it reopens damaged, reinstalls, and the run's checks hold. Segments map at open (`STRATA_EAGER_SEGMENTS=1`, set by the row) | 3 seeds per file class, 1,500 events before and after the damage |
 
 Each row asserts its coverage: every fault class it names happened at least once.
 
@@ -47,3 +48,4 @@ Each row asserts its coverage: every fault class it names happened at least once
 | `recovery-as-found` | recovery takes the file set as the bundle names it (lengths and names) | `barriers 3` |
 | `read-skips-probe` | `read_applied` waits for the Driver's quorum probe | `faults 3` |
 | `apply-abandoned-chunk` | an upload of a lower term is retired at the first entry of a higher one | `faults 3` |
+| `marker-kept` | an activation that replaced the damaged bytes clears the damage marker | `corruption` |

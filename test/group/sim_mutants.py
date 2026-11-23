@@ -40,6 +40,10 @@ SIM = {
               "\t\tfor (auto& u : s.uploads) { u.second.term = std::max(u.second.term, e.term); }\n")],
     # read_applied without the Driver's quorum probe (mutants.py's).
     "read-skips-probe": mutants.MUTANTS["read-skips-probe"],
+    # The activation keeps the damage marker: a repaired replica stays damaged (row `corruption`).
+    "marker-kept": [("include/strata/group/install.hh",
+        "\tclear_damaged(dir);  // the replica holds the pin's bytes now (repair.hh)\n",
+        "")],
 }
 
 if __name__ == "__main__":

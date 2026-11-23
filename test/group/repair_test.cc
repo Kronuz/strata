@@ -24,6 +24,14 @@
 //     check reads them); a learner's request makes it pin them, the pin meets the damage, and the leader marks
 //     itself damaged and hands off to the sound follower instead of shipping the bytes; the
 //     learner installs from the next leader and the source reinstalls too.
+//   body: as `source` at rest, a byte inside each segment's body behind a valid footer: the pin
+//     reads each segment whole and finds it.
+//   rot: the source's segment bodies rot after its pin was made and served: the next learner's
+//     stage fails the pin's CRC32C and refuses; the source reads its pin again, finds the
+//     damage, hands off, and both reinstall.
+//   two-damaged: two damaged replicas, one leading, with no host view: the hand-offs go round
+//     the ring to the sound one; handoff-down: the ring's next voter is down and is passed by.
+//   lone: a lone voter's damaged index is set aside under `iq.`, byte for byte, and stays.
 //   deposed: the leader installing a damaged replica loses its leadership mid-flight; it names
 //     no install from then on, and once the new leader repairs the replica no node names one.
 //   crash: a power cut at every mutation of the damaged follower's directory disk, then of its
@@ -37,28 +45,17 @@
 
 #include <cerrno>
 #include <cstdio>
-#include <system_error>
+#include <functional>
+#include <map>
 #include <span>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace {
 
 using namespace group_test;
 
-enum class kind { segment, manifest, file };
-const char* name_of(kind k) { return k == kind::segment ? "segment" : k == kind::manifest ? "manifest" : "file"; }
-
-std::vector<std::string> names_in(node& x) {
-	std::vector<std::string> out;
-	fl::io io(x.dir_disk);
-	for (auto c = io.scan_directory(); auto n = c->next();) { out.push_back(*n); }
-	return out;
-}
-bool marked(node& x) {
-	fl::io io(x.dir_disk);
-	return sg::marked_damaged(io);
-}
 bool deferred(node& x) {
 	fl::io io(x.dir_disk);
 	return !strata::index_detail::log_holding(io);
@@ -66,24 +63,10 @@ bool deferred(node& x) {
 std::string staging_left(node& x) {
 	std::string out;
 	for (const auto& n : names_in(x)) {
-		if (n.starts_with("is.") || n.starts_with("ia.") || n == "ip" || n == "ip.tmp" || n == "rd.tmp") { out += " " + n; }
+		if (n.starts_with("is.") || n.starts_with("ia.") || n.starts_with("iq.") || n == "ip" || n == "ip.tmp" || n == "rd.tmp") { out += " " + n; }
 	}
 	return out;
 }
-std::uint64_t size_of(node& x, const std::string& name) {
-	fl::io io(x.dir_disk);
-	return io.open_existing(name)->size();
-}
-void flip(node& x, const std::string& name, std::uint64_t at) {
-	fl::io io(x.dir_disk);
-	auto f = io.open_existing(name);
-	char c = 0;
-	f->read_at(at, std::span<char>(&c, 1));
-	c = char(c ^ 0x5a);
-	f->write_at(at, std::string_view(&c, 1));
-	f->sync();
-}
-
 node& follower(world& w) {
 	auto* l = w.leader();
 	for (auto& [id, x] : w.nodes) {
@@ -106,35 +89,6 @@ bool prepare(world& w, std::mt19937_64& gen) {
 	write_and_compact(w, gen, 30);
 	return failures == before;
 }
-// A sealed set file the follower's bundle names, by its set name.
-std::string sealed_file(node& x) {
-	for (const auto& [name, f] : x.p->g->recovered().files) {
-		if (f.crc && f.length) { return name; }
-	}
-	return {};
-}
-// One flipped byte in a stopped node's file of `k`: a segment's footer, every manifest log's
-// header, or a sealed set file's first byte.
-bool damage(node& x, kind k, const std::string& sealed) {
-	int flipped = 0;
-	for (const auto& n : names_in(x)) {
-		const auto p = strata::index_detail::parse_name(n);
-		if (k == kind::segment && p && p->type == strata::index_detail::parsed_name::segment && !flipped) {
-			flip(x, n, size_of(x, n) - 8);
-			++flipped;
-		}
-		if (k == kind::manifest && p && p->type == strata::index_detail::parsed_name::manifest) {
-			flip(x, n, 8);
-			++flipped;
-		}
-	}
-	if (k == kind::file && !sealed.empty()) {
-		flip(x, "app." + sealed, 0);
-		++flipped;
-	}
-	return check(flipped > 0, std::string("a ") + name_of(k) + " file to damage");
-}
-
 // A boot whose host or index open fails on the powered-off disk: the process goes as at a
 // power cut. False then.
 bool boot(world& w, node& x) {
@@ -480,8 +434,10 @@ void damaged_leader(std::uint64_t seed) {
 // `rested`: the running leader's segment footers rot on disk after it mapped them; only the
 // pin's footer check reads them again. Else they are flipped while it is down and stay unread
 // since its reboot: the pin's checkpoint maps them first (its commit learns their facts).
-void damaged_source(std::uint64_t seed, bool rested) {
-	context = std::string(rested ? "source at rest" : "source unread") + ", seed " + std::to_string(seed);
+// `body`: a byte in the middle of each segment rots instead, behind a valid footer (rested): the
+// pin reads each segment whole.
+void damaged_source(std::uint64_t seed, bool rested, bool body = false) {
+	context = std::string(body ? "source body" : rested ? "source at rest" : "source unread") + ", seed " + std::to_string(seed);
 	world w(3, seed, true);
 	std::mt19937_64 gen(seed);
 	if (!prepare(w, gen)) { return; }
@@ -493,7 +449,7 @@ void damaged_source(std::uint64_t seed, bool rested) {
 	for (const auto& n : names_in(s)) {
 		const auto pn = strata::index_detail::parse_name(n);
 		if (pn && pn->type == strata::index_detail::parsed_name::segment) {
-			flip(s, n, size_of(s, n) - 8);
+			flip(s, n, body ? size_of(s, n) / 2 : size_of(s, n) - 8);
 			++flipped;
 		}
 	}
@@ -515,7 +471,7 @@ void damaged_source(std::uint64_t seed, bool rested) {
 		w.step();
 		if (s.p->g->damaged()) { reason = s.p->g->damage_reason(); }
 	}
-	check(reason.find(rested ? "a pinned segment's footer fails its check" : "the pin met damage") != std::string::npos, "the source's pin finds its damage: " + reason);
+	check(reason.find(rested && !body ? "a pinned segment's footer fails its check" : "the pin met damage") != std::string::npos, "the source's pin finds its damage: " + reason);
 	if (!healed(w)) {
 		for (auto& [id, n] : w.nodes) {
 			const auto st = n->open() ? n->p->lp->driver().state(gid) : std::nullopt;
@@ -527,6 +483,152 @@ void damaged_source(std::uint64_t seed, bool rested) {
 	repaired(w, x, base);
 	check(!s.p->g->damaged() && !marked(s) && s.p->g->installs() >= 1, "the source reinstalls too");
 	std::printf("repair: %s: %d segments damaged on the leader; its pin found them (%s); the learner installed at %llu from node %llu\n", context.c_str(), flipped, reason.c_str(), (unsigned long long)x.p->g->installed_at(), (unsigned long long)(w.leader() ? w.leader()->id : 0));
+	++cases;
+}
+
+// A source's segment bodies rot after its pin was made and served: the next learner's stage fails
+// the pin's CRC32C and refuses the flight; the source reads its pin again, finds its damage and
+// hands off; the learner and the source reinstall from the sound follower.
+void rot_after_pin(std::uint64_t seed) {
+	context = "rot after the pin, seed " + std::to_string(seed);
+	world w(3, seed, true);
+	std::mt19937_64 gen(seed);
+	if (!prepare(w, gen)) { return; }
+	auto& x = follower(w);
+	w.shut(x, false);
+	if (!damage(x, kind::manifest, {})) { return; }
+	w.boot(x);
+	if (!opened(w, x) || !check(healed(w) && w.settle(), "the first learner reinstalls")) { return; }
+	auto* l = w.leader();
+	if (!check(l && l->p->g->serve(sg::pin_name(l->p->g->recovered().position)).has_value(), "the leader holds the pin it served")) { return; }
+	auto& s = *l;
+	int flipped = 0;
+	for (const auto& n : names_in(s)) {
+		const auto pn = strata::index_detail::parse_name(n);
+		if (pn && pn->type == strata::index_detail::parsed_name::segment) {
+			flip(s, n, size_of(s, n) / 2);
+			++flipped;
+		}
+	}
+	if (!check(flipped > 0, "segments to damage")) { return; }
+	auto& y = third(w, s, x);
+	const auto base = y.p->g->recovered().position;
+	w.shut(y, false);
+	if (!damage(y, kind::manifest, {})) { return; }
+	w.boot(y);
+	if (!opened(w, y)) { return; }
+	std::string reason;
+	for (int i = 0; i < 400000 && reason.empty(); ++i) {
+		w.step();
+		if (s.p->g->damaged()) { reason = s.p->g->damage_reason(); }
+	}
+	check(reason.find("a refused pin fails its check") != std::string::npos, "the refused source finds its damage: " + reason);
+	repaired(w, y, base);
+	check(!s.p->g->damaged() && !marked(s) && s.p->g->installs() >= 1, "the source reinstalls too");
+	std::printf("repair: %s: %d segment bodies rotted under node %llu's pin; the refusal found them (%s); the learner installed at %llu\n", context.c_str(), flipped,
+		(unsigned long long)s.id, reason.c_str(), (unsigned long long)y.p->g->installed_at());
+	++cases;
+}
+
+// Damaged node `a` made leader, its fetches failing meanwhile so it stays damaged.
+bool lead_damaged(world& w, node& a, const std::function<void()>& starve) {
+	bool led = false;
+	for (int attempt = 0; attempt < 20 && !led; ++attempt) {
+		if (auto* l = w.leader(); l && l != &a) { (void)start(l->p->loop_ref(), l->p->lp->driver().transfer_leadership(gid, a.id)); }
+		for (int i = 0; i < 4000 && !led; ++i) {
+			w.step();
+			starve();
+			const auto st = a.p->lp->driver().state(gid);
+			led = st && st->role == cs::Role::Leader && a.p->g->damaged();
+		}
+	}
+	return led;
+}
+
+// Two damaged replicas, one leading, and no host view (no applied_past: every production host):
+// the hand-offs go round the ring and reach the sound replica; both reinstall.
+void two_damaged(std::uint64_t seed) {
+	context = "two damaged, seed " + std::to_string(seed);
+	world w(3, seed);
+	std::mt19937_64 gen(seed);
+	if (!prepare(w, gen)) { return; }
+	auto& a = *w.nodes.at(1);
+	auto& b = *w.nodes.at(2);
+	w.shut(a, false);
+	w.shut(b, false);
+	if (!damage(a, kind::manifest, {}) || !damage(b, kind::manifest, {})) { return; }
+	w.boot(a);
+	w.boot(b);
+	auto starve = [&] {
+		w.fail_fetches(a.id);
+		w.fail_fetches(b.id);
+	};
+	for (int i = 0; i < 40000 && !(a.p->opening->done && b.p->opening->done); ++i) {
+		w.step();
+		starve();
+	}
+	if (!check(a.p->g->damaged() && b.p->g->damaged(), "both reopen damaged") || !check(lead_damaged(w, a, starve), "damaged node 1 leads")) { return; }
+	if (!check(healed(w) && w.settle(), "both damaged replicas reinstall")) { return; }
+	digests(w);
+	std::printf("repair: two damaged, seed %llu: leader now %llu, installs %llu and %llu\n", (unsigned long long)seed, (unsigned long long)(w.leader() ? w.leader()->id : 0),
+		(unsigned long long)a.p->g->installs(), (unsigned long long)b.p->g->installs());
+	++cases;
+}
+
+// A damaged leader whose next voter in the ring is down: its next hand-off passes it by.
+void handoff_down(std::uint64_t seed) {
+	context = "hand-off past a down voter, seed " + std::to_string(seed);
+	world w(3, seed);
+	std::mt19937_64 gen(seed);
+	if (!prepare(w, gen)) { return; }
+	auto& a = *w.nodes.at(1);
+	auto& b = *w.nodes.at(2);
+	w.shut(a, false);
+	if (!damage(a, kind::manifest, {})) { return; }
+	w.boot(a);
+	auto starve = [&] { w.fail_fetches(a.id); };
+	if (!opened(w, a) || !check(lead_damaged(w, a, starve), "damaged node 1 leads")) { return; }
+	w.shut(b, false);
+	if (!check(healed(w), "the damaged leader hands off past the down voter and reinstalls")) { return; }
+	w.boot(b);
+	if (!opened(w, b) || !check(w.settle(), "the cluster settles once the down voter is back")) { return; }
+	digests(w);
+	std::printf("repair: hand-off past a down voter, seed %llu: leader now %llu, node 1 installs %llu\n", (unsigned long long)seed, (unsigned long long)(w.leader() ? w.leader()->id : 0),
+		(unsigned long long)a.p->g->installs());
+	++cases;
+}
+
+// A lone voter (D7) whose manifest log is damaged: no replica can reinstall it, so the reopen
+// sets its bytes aside under `iq.`, byte for byte, and it waits damaged.
+void lone(std::uint64_t seed) {
+	context = "lone voter, seed " + std::to_string(seed);
+	world w(1, seed, true);
+	std::mt19937_64 gen(seed);
+	if (!prepare(w, gen)) { return; }
+	auto& x = *w.nodes.at(1);
+	w.shut(x, false);
+	if (!damage(x, kind::manifest, {})) { return; }
+	std::map<std::string, std::string> before;
+	{
+		fl::io io(x.dir_disk);
+		for (const auto& n : names_in(x)) {
+			if (strata::index_detail::parse_name(n)) { before[n] = strata::index_detail::read_all(*io.open_existing(n)); }
+		}
+	}
+	w.boot(x);
+	if (!opened(w, x)) { return; }
+	for (int i = 0; i < 50000; ++i) { w.step(); }
+	check(x.p->g->damaged() && marked(x), "the lone voter stays damaged");
+	std::size_t kept = 0;
+	{
+		fl::io io(x.dir_disk);
+		for (const auto& [n, bytes] : before) {
+			auto f = sg::repair_detail::open_if(io, "iq." + n);
+			kept += f && strata::index_detail::read_all(*f) == bytes && !sg::repair_detail::open_if(io, n);
+		}
+	}
+	check(!before.empty() && kept == before.size(), "every strata file is set aside whole: " + std::to_string(kept) + " of " + std::to_string(before.size()));
+	std::printf("repair: lone voter, seed %llu: %zu strata files set aside, damaged\n", (unsigned long long)seed, kept);
 	++cases;
 }
 
@@ -680,7 +782,12 @@ int main(int argc, char** argv) {
 			damaged_source(seed, false);
 			damaged_source(seed, true);
 		}
+		if (wants("body")) { damaged_source(seed, true, true); }
+		if (wants("rot")) { rot_after_pin(seed); }
 		if (wants("deposed")) { deposed(seed); }
+		if (wants("two-damaged")) { two_damaged(seed); }
+		if (wants("handoff-down")) { handoff_down(seed); }
+		if (wants("lone")) { lone(seed); }
 	}
 	if (wants("crash") || only == "crash-manifest-dir") { crash(kind::manifest, false); }
 	if (wants("crash") || only == "crash-manifest-host") { crash(kind::manifest, true); }

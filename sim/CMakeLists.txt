@@ -55,9 +55,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR OR SIMULATION_TESTS)
       add_test(NAME simulation_group_${row} COMMAND group_sim_test ${name} ${voters})
       set_tests_properties(simulation_group_${row} PROPERTIES TIMEOUT 600)
     endforeach()
-    # A3's simulator half: corruption of every file class, answered by repair (task `repair`).
+    # A3's simulator half: corruption of every file class, answered by repair.
     add_test(NAME simulation_group_corruption COMMAND group_sim_test corruption)
-    set_tests_properties(simulation_group_corruption PROPERTIES SKIP_RETURN_CODE 77)
+    set_tests_properties(simulation_group_corruption PROPERTIES TIMEOUT 600)
   endif()
 
   # 2^32 events (SIM-R17); off by default, run in Release.

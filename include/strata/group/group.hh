@@ -16,6 +16,7 @@
 
 #include "consensus/driver.h"
 
+#include <algorithm>
 #include <atomic>
 #include <charconv>
 #include <condition_variable>
@@ -192,7 +193,8 @@ public:
 	// The index a group recovers on, which its host opens and lends (the catalog's open_index):
 	// the durable one, else a deferred create, written first by the first checkpoint's commit; a
 	// crash before it recreates the index from the log (D112). A damaged one marks the replica
-	// damaged first, then its names go and a deferred index takes the reinstall (repair.hh).
+	// damaged first, then its names are set aside and a deferred index takes the reinstall; the
+	// set-aside bytes go once an activation replaced them (repair.hh).
 	static index_type open_index(jn::IO& directory, const typename index_type::options& o, const std::array<char, 16>& uuid) {
 		try {
 			return index_type::open(directory, o);
@@ -492,7 +494,7 @@ public:
 			return step::done;
 		}));
 	}
-	void install_released(cs::NodeId peer, cs::SnapshotKey key, cs::SnapshotReleaseReason) override {
+	void install_released(cs::NodeId peer, cs::SnapshotKey key, cs::SnapshotReleaseReason reason) override {
 		// Every flight ends in one release, whatever its reason (a lost leadership's too); a retry
 		// is a new flight, which names the peer again.
 		{
@@ -502,8 +504,9 @@ public:
 			}
 			trim_sources();
 		}
-		push(new notice_work([this, peer, key, ended = false]() mutable {
+		push(new notice_work([this, peer, key, refused = reason == cs::SnapshotReleaseReason::Rejected, ended = false]() mutable {
 			if (!ended) {
+				if (refused) { check_refused_pin(key); }
 				unpin_for(peer, key);
 				ended = true;
 			}
@@ -1170,6 +1173,7 @@ private:
 			if (marked_damaged(files_.io())) { return adopt_damaged(b, e.what()); }
 		}
 		if (marked_damaged(files_.io())) { return adopt_damaged(b); }
+		release_quarantine(files_.io());
 		head_ = ix_->applied();
 		if (b.position > head_.index) { throw group_fenced("strata::group: the bundle is past strata's durable head (P_b > P_H)"); }
 		try {
@@ -1272,6 +1276,25 @@ private:
 		std::lock_guard lock(mu_);
 		p->flights.emplace(peer, key.transfer);
 		made_sources().pins.emplace(key.boundary.index, std::move(p));
+	}
+	// On the chore: the learner refused the flight's bytes, so the pin is read again; bytes that
+	// changed since it was made are this source's damage, and it hands off as at the pin.
+	void check_refused_pin(cs::SnapshotKey key) {
+		if (damaged_.load()) { return; }
+		std::shared_ptr<pinned> p;
+		{
+			std::lock_guard lock(mu_);
+			if (sources_) {
+				if (auto it = sources_->pins.find(key.boundary.index); it != sources_->pins.end()) { p = it->second; }
+			}
+		}
+		if (!p) { return; }
+		try {
+			check_pin(files_.io(), p->pin);
+		} catch (...) {
+			const auto e = std::current_exception();
+			if (damage(e) && !become_damaged("strata::group: a refused pin fails its check: " + error_text(e))) { fence(error_text(e)); }
+		}
 	}
 	// The flight ended: its pin stays while its bundle is the latest, for the next flight.
 	void unpin_for(cs::NodeId peer, cs::SnapshotKey key) {
@@ -1398,10 +1421,19 @@ private:
 				},
 				false, true);
 			co_await task::schedule_on{chore_};
+			bool complete = false;
 			try {
-				(void)co_await ::strata::group::stage(files_.io(), std::move(pin), fetch, install_window);
+				(void)co_await ::strata::group::stage(files_.io(), pin, fetch, install_window);
+				complete = true;
+				check_stage<layout>(files_.io(), pin);  // a refusal here: the source checks its pin
 				ok = true;
-			} catch (...) {}
+			} catch (...) {
+				if (complete) {
+					try {
+						sweep(files_.io());  // bytes the pin vouches for but strata refuses: none kept
+					} catch (...) {}
+				}
+			}
 			installing_.store(false);
 			kick();
 		} catch (...) {}
@@ -1556,26 +1588,22 @@ private:
 		if (task::current() != loop_->scheduler()) { co_await task::schedule_on{loop_->scheduler()}; }
 		repairing_ = false;
 	}
-	// A damaged leader serves nothing: leadership goes to a follower the host names as applied
-	// through the commit index (caught up, so not damaged: a damaged replica applies nothing),
-	// none named waits for the next try; with no host view, to a voter of the membership.
+	// A damaged leader serves nothing: each try hands leadership to the next data voter in the
+	// membership's ring after itself, one further per try. Damaged leaders handing to each other
+	// so reach a sound one within one turn of the ring, and a target that is down is passed by.
 	void hand_leadership_away() {
 		const auto s = loop_->driver().state(id_);
-		if (!s) { return; }
-		std::optional<cs::NodeId> target;
-		if (loop_->applied_past) {
-			try {
-				target = loop_->applied_past(id_, std::max<cs::Index>(s->committed, 1));
-			} catch (...) {}
-		} else {
-			for (const auto& m : s->membership.members) {
-				if (m.role == cs::MemberRole::Voter && m.incarnation != s->leader) {
-					target = m.incarnation;
-					break;
-				}
-			}
+		if (!s || s->role != cs::Role::Leader) { return; }
+		std::vector<cs::NodeId> ring;
+		for (const auto& m : s->membership.members) {
+			if (m.role == cs::MemberRole::Voter) { ring.push_back(m.incarnation); }
 		}
-		if (target) { task::spawn(loop_->scheduler(), transfer_on_loop(loop_, id_, *target)); }
+		std::sort(ring.begin(), ring.end());
+		const auto self = std::find(ring.begin(), ring.end(), s->leader);
+		if (self == ring.end() || ring.size() < 2) { return; }
+		const auto hop = 1 + handoffs_++ % (ring.size() - 1);
+		const auto target = ring[(std::size_t(self - ring.begin()) + hop) % ring.size()];
+		task::spawn(loop_->scheduler(), transfer_on_loop(loop_, id_, target));
 	}
 
 	// --- a stalled leader's hand-off (D3) -------------------------------------------------
@@ -1668,6 +1696,7 @@ private:
 	std::atomic<bool> installing_{false};                // a stage holds the chore
 	std::atomic<bool> damaged_{false};                   // repair.hh: marked damaged, until reinstalled
 	bool repairing_ = false;                             // the loop's: a reinstall call in flight
+	std::uint8_t handoffs_ = 0;                          // the loop's: a damaged leader's hand-offs tried
 	unsigned tasks_ = 0;                                  // install tasks in flight, under mu_
 	mutable std::atomic<unsigned> serving_{0};            // serves reading the directory
 	std::atomic<std::uint64_t> installs_{0};

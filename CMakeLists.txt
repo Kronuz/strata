@@ -472,6 +472,15 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   # The deterministic simulator (docs/mechanisms/simulator.md): its own project under sim/.
   set(SIMULATION_TESTS ON)
   add_subdirectory(sim)
+  # strata::group's whole suite in one build (test/group/suite.sh): every group_*_test here and
+  # the simulator's group_sim_test.
+  get_property(group_test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+  list(FILTER group_test_targets INCLUDE REGEX "^group_.*_test$")
+  add_custom_target(group_tests)
+  add_dependencies(group_tests ${group_test_targets})
+  if(TARGET group_sim_test)
+    add_dependencies(group_tests group_sim_test)
+  endif()
 endif()
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND STRATA_KV_PROTO)
   add_executable(kv_proto_blocks EXCLUDE_FROM_ALL bench/kv/proto/blocks.cc)
