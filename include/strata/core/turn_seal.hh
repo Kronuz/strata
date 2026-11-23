@@ -2,10 +2,11 @@
 // D7): the driver seals each group's open record through TurnDriver::seal, and this class gives a
 // blocking owner thread what run() and durable() give a coroutine loop. Its turn mutex is the
 // driver's loop context: every driver and group-table call but unseal(), wake() and joined() runs
-// under it. After each turn it tells each group's watcher how far the log is durable, the step a
-// watcher coroutine on durable() takes. Its loop holds each turn for the writers the last one
-// released, counted per writer (rocksdb-parity D5's cohort wait), so a closed loop of writers
-// rides one barrier each, writers sharing a group too.
+// under it, and the thread holding it adopts the loop's group table. After each turn it tells
+// each group's watcher how far the log is durable, the step a watcher coroutine on durable()
+// takes. Its loop holds each turn for the writers the last one released, counted per writer
+// (rocksdb-parity D5's cohort wait), so a closed loop of writers rides one barrier each, writers
+// sharing a group too.
 #pragma once
 
 #include "journal/host.h"
@@ -68,7 +69,7 @@ public:
 	// Registers the group's sealer with the driver and its watcher here, replacing an earlier
 	// pair; `owner` names them for unseal(). Returns the group's last durable sequence.
 	std::uint64_t seal(std::uint64_t group, sealer fn, watcher done, const void* owner) {
-		const std::lock_guard turn(turn_mu_);
+		const auto turn = hold_loop();
 		mine(group);
 		const std::uint64_t staged = turns_.seal(group, std::move(fn), owner);
 		const std::lock_guard lock(mu_);
@@ -84,56 +85,56 @@ public:
 	// Recovery (D6): what the log kept of a group, from its latest checkpoint record, and whether
 	// recovery calls it lost. release() drops the copy once the group's index replayed it.
 	std::vector<record> records(std::uint64_t group) {
-		const std::lock_guard turn(turn_mu_);
+		const auto turn = hold_loop();
 		return turns_.records(group);
 	}
 	bool lost(std::uint64_t group) {
-		const std::lock_guard turn(turn_mu_);
+		const auto turn = hold_loop();
 		return turns_.lost(group);
 	}
 	void release(std::uint64_t group) {
-		const std::lock_guard turn(turn_mu_);
+		const auto turn = hold_loop();
 		turns_.release(group);
 	}
 
 	// The group table (D7): membership lives in the host, never in the index.
 	const kronuz::journal::Identity& identity() const noexcept { return identity_; }
 	kronuz::journal::GroupStatus status(std::uint64_t group) {
-		const std::lock_guard turn(turn_mu_);
+		const auto turn = hold_loop();
 		mine(group);
 		return host_.status(group);
 	}
 	// A bounded group's bound (GroupStatus::bounded): the highest sequence damage to its log could
 	// hold. An index whose head ends below it loses the group: lose(), durable when it returns.
 	std::uint64_t bound(std::uint64_t group) {
-		const std::lock_guard turn(turn_mu_);
+		const auto turn = hold_loop();
 		return host_.bound(group);
 	}
 	void lose(std::uint64_t group) {
-		const std::lock_guard turn(turn_mu_);
+		const auto turn = hold_loop();
 		host_.lose(group);
 	}
 	// The table's checkpoint record of the group, once it closed: its sequence and payload.
 	std::optional<std::pair<std::uint64_t, std::string>> table_record(std::uint64_t group) {
-		const std::lock_guard turn(turn_mu_);
+		const auto turn = hold_loop();
 		const auto e = host_.entry(group);
 		if (!e || e->manifest.empty()) { return std::nullopt; }
 		return std::pair{e->base, e->manifest};
 	}
 	// Each is durable when it returns.
 	void create(std::uint64_t group) {
-		const std::lock_guard turn(turn_mu_);
+		const auto turn = hold_loop();
 		mine(group);
 		host_.create_group(group);
 	}
 	void reopen(std::uint64_t group) {
-		const std::lock_guard turn(turn_mu_);
+		const auto turn = hold_loop();
 		host_.reopen_group(group);
 	}
 	// Leaves the log: the table takes the group's last record, a durable checkpoint covering every
 	// batch, and the driver forgets the group and its sealer.
 	void close(std::uint64_t group, std::uint64_t sequence, std::string payload) {
-		const std::lock_guard turn(turn_mu_);
+		const auto turn = hold_loop();
 		host_.close_group(group, sequence, std::move(payload));
 		const std::uint64_t retired = turns_.retired(group);
 		const std::lock_guard lock(mu_);
@@ -143,12 +144,12 @@ public:
 	}
 	// The last sequence a closed life of the group could hand out (TurnDriver::retired).
 	std::uint64_t retired(std::uint64_t group) {
-		const std::lock_guard turn(turn_mu_);
+		const auto turn = hold_loop();
 		return turns_.retired(group);
 	}
 	// Stages a record for the next turn (a reopened group's table record, D7).
 	void stage(kronuz::journal::TurnRecord r) {
-		const std::lock_guard turn(turn_mu_);
+		const auto turn = hold_loop();
 		turns_.stage(std::move(r));
 		const std::lock_guard lock(mu_);
 		woken_ = true;
@@ -156,12 +157,12 @@ public:
 	}
 	// The group recovered: stored, whatever the log holds (host.h's attach).
 	void attach(std::uint64_t group) {
-		const std::lock_guard turn(turn_mu_);
+		const auto turn = hold_loop();
 		host_.attach(group);
 	}
 	// The group's last durable sequence.
 	std::uint64_t sequence(std::uint64_t group) {
-		const std::lock_guard turn(turn_mu_);
+		const auto turn = hold_loop();
 		return turns_.sequence(group);
 	}
 	bool failed() const {
@@ -194,7 +195,7 @@ public:
 	// Writes one turn of what the groups hold, if anything: false when there is nothing. A failed
 	// turn fails the log (fail-stop, D9): every later turn and wait throws its failure.
 	bool turn() {
-		const std::lock_guard turn(turn_mu_);
+		const auto turn = hold_loop();
 		std::vector<std::pair<std::uint64_t, entry>> groups;
 		std::size_t late = 0;
 		{
@@ -429,6 +430,13 @@ private:
 	std::uint64_t retired_locked(std::uint64_t group) const {
 		const auto it = closed_.find(group);
 		return it == closed_.end() ? 0 : it->second;
+	}
+	// The turn mutex, held: the calling thread then owns the loop's group table, which the mutex
+	// hands over after the last holder's table calls (journal host-ranges.md, the handoff).
+	[[nodiscard]] std::unique_lock<std::mutex> hold_loop() {
+		std::unique_lock turn(turn_mu_);
+		host_.adopt_loop(loop_);
+		return turn;
 	}
 	void mine(std::uint64_t group) const {
 		if (host_.loop(group) != loop_) { throw std::invalid_argument("strata: the group belongs to another loop"); }
