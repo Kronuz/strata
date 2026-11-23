@@ -661,7 +661,6 @@ struct sim {
 		heal();
 		if (!check(run_until([&] { return !damaged(); }, 400000), "every damaged replica reinstalls") || !check(w.settle(), "the cluster settles")) { return; }
 		drain();
-		heal();  // a cut upload answered in the drain isolated its leader
 		check(w.settle(), "the cluster settles once the clients are answered");
 		const node* first = nullptr;
 		for (auto& [id, x] : w.nodes) {

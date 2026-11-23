@@ -433,9 +433,10 @@ struct world {
 			if (!x.p->loop_s.run() && !x.p->chore_s.run()) { return; }
 		}
 	}
-	// Every node up, every message and IO through, every chore idle, every node applied the
-	// commit index: false if it does not settle (`report`: the nodes' state on stderr).
+	// Every node up and reachable, every message and IO through, every chore idle, every node
+	// applied the commit index: false if it does not settle (`report`: the nodes' state on stderr).
 	bool settle(bool report = true) {
+		isolated.clear();
 		for (auto& [id, x] : nodes) {
 			if (!x->up()) { boot(*x); }
 		}

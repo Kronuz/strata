@@ -28,6 +28,12 @@ WITNESS = "include/strata/group/witness.hh"
 
 # name: [(file, old, new), ...]
 MUTANTS = {
+    # A settle runs with an isolated node still cut off: a cut upload's isolation in a
+    # fault-free stretch outlives the stretch (corruption row, file seed 3). voters_test's
+    # settle_heals fails.
+    "settle-keeps-isolation": [("test/group/world.hh",
+        "\t\tisolated.clear();\n\t\tfor (auto& [id, x] : nodes) {\n\t\t\tif (!x->up()) { boot(*x); }\n",
+        "\t\tfor (auto& [id, x] : nodes) {\n\t\t\tif (!x->up()) { boot(*x); }\n")],
     # Recovery replays the file set only above P_H, as strata does (D16's a1-literal).
     "replay-from-ph": [(GROUP,
         "\t\tif (phase_ == phase::effects) {\n",

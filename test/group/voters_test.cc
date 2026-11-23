@@ -224,6 +224,29 @@ void default_limits() {
 	check(turns_done && driver_done, "the default-limits loop stops");
 }
 
+// A settle heals what is still cut off: the leader is isolated (as a cut upload in a fault-free
+// stretch isolates it), the others elect and commit a write without it, and the settle brings
+// it back to their commit.
+void settle_heals(unsigned voters) {
+	context = std::to_string(voters) + " voters, a settle with the leader cut off";
+	world w(voters, 79);
+	if (!check(w.settle(), "the cluster settles")) { return; }
+	auto& l = *w.leader();
+	const auto term = l.p->lp->driver().state(gid)->term;
+	w.isolated.insert(l.id);
+	node* next = nullptr;
+	for (int i = 0; i < 40000 && !next; ++i) {
+		w.step();
+		next = leader_above(w, term, &l);
+	}
+	if (!check(next != nullptr, "another replica leads")) { return; }
+	auto s = start(next->p->loop_ref(), next->p->g->propose("P|a|without"));
+	for (int i = 0; i < 20000 && !s->done; ++i) { w.step(); }
+	if (!check(s->done && !s->error, "the write commits without the cut-off leader: " + what(s->error))) { return; }
+	check(w.settle(), "the settle heals the cut-off leader");
+	check(l.p->g->applied() == next->p->g->applied(), "the old leader applied the write");
+}
+
 // A `quorum` waiter across a close and a reopen (journal group_closed): a leader cut off from
 // its followers places a write it cannot commit and closes; the close answers the waiter
 // `closed`. The group reopens, its records after the closed one's retired
@@ -968,6 +991,7 @@ void write_paths(unsigned voters, std::uint64_t schedules) {
 int main(int argc, char** argv) {
 	const std::uint64_t schedules = argc > 1 ? std::stoull(argv[1]) : 12, first = argc > 2 ? std::stoull(argv[2]) : 1;
 	default_limits();
+	settle_heals(3);
 	close_with_uncommitted(3);
 	close_with_uncommitted(5);
 	levels(3);
