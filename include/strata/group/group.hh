@@ -353,7 +353,7 @@ public:
 	// up): each installs this leader's latest bundle from its pin.
 	std::set<cs::NodeId> installs_needed() const {
 		std::lock_guard lock(mu_);
-		return installs_needed_;
+		return sources_ ? sources_->needed : std::set<cs::NodeId>{};
 	}
 	std::string fence_reason() const {
 		std::lock_guard lock(mu_);
@@ -378,8 +378,8 @@ public:
 		std::shared_ptr<const pinned> p;
 		{
 			std::lock_guard lock(mu_);
-			if (closed_) { return std::nullopt; }
-			if (auto it = pins_.find(position); it != pins_.end()) { p = it->second; }
+			if (closed_ || !sources_) { return std::nullopt; }
+			if (auto it = sources_->pins.find(position); it != sources_->pins.end()) { p = it->second; }
 		}
 		if (!p) { return std::nullopt; }
 		try {
@@ -404,7 +404,7 @@ public:
 	void install_needed(cs::NodeId peer, cs::SnapshotKey key) override {
 		{
 			std::lock_guard lock(mu_);
-			installs_needed_.insert(peer);
+			made_sources().needed.insert(peer);
 		}
 		push(new notice_work([this, peer, key] {
 			pin_for(peer, key);
@@ -414,7 +414,8 @@ public:
 	void install_released(cs::NodeId peer, cs::SnapshotKey key, cs::SnapshotReleaseReason reason) override {
 		if (reason == cs::SnapshotReleaseReason::Installed || reason == cs::SnapshotReleaseReason::CaughtUp) {
 			std::lock_guard lock(mu_);
-			installs_needed_.erase(peer);
+			if (sources_) { sources_->needed.erase(peer); }
+			trim_sources();
 		}
 		push(new notice_work([this, peer, key, ended = false]() mutable {
 			if (!ended) {
@@ -977,6 +978,19 @@ private:
 		std::shared_ptr<jn::IO> dir;
 		std::set<std::pair<cs::NodeId, cs::Token>> flights;  // (peer, transfer) holding it
 	};
+	// A leader's install state, made at its first install notice and freed once it holds
+	// nothing, so an idle group carries one pointer for it. Under mu_.
+	struct sources {
+		std::set<cs::NodeId> needed;                         // peers below the base, until their install ends
+		std::map<cs::Index, std::shared_ptr<pinned>> pins;  // by P_b
+	};
+	sources& made_sources() {
+		if (!sources_) { sources_ = std::make_unique<sources>(); }
+		return *sources_;
+	}
+	void trim_sources() {
+		if (sources_ && sources_->needed.empty() && sources_->pins.empty()) { sources_.reset(); }
+	}
 	static std::string read_image(jn::ArtifactReader& r) {
 		std::string bytes(std::size_t(r.descriptor().length), '\0');
 		for (std::size_t at = 0; at < bytes.size();) {
@@ -995,7 +1009,9 @@ private:
 		std::shared_ptr<pinned> p;
 		{
 			std::lock_guard lock(mu_);
-			if (auto it = pins_.find(key.boundary.index); it != pins_.end()) { p = it->second; }
+			if (sources_) {
+				if (auto it = sources_->pins.find(key.boundary.index); it != sources_->pins.end()) { p = it->second; }
+			}
 		}
 		if (!p) {
 			try {
@@ -1006,12 +1022,13 @@ private:
 		}
 		std::lock_guard lock(mu_);
 		p->flights.emplace(peer, key.transfer);
-		pins_.emplace(key.boundary.index, std::move(p));
+		made_sources().pins.emplace(key.boundary.index, std::move(p));
 	}
 	// The flight ended: its pin stays while its bundle is the latest, for the next flight.
 	void unpin_for(cs::NodeId peer, cs::SnapshotKey key) {
 		std::lock_guard lock(mu_);
-		if (auto it = pins_.find(key.boundary.index); it != pins_.end()) { it->second->flights.erase({peer, key.transfer}); }
+		if (!sources_) { return; }
+		if (auto it = sources_->pins.find(key.boundary.index); it != sources_->pins.end()) { it->second->flights.erase({peer, key.transfer}); }
 	}
 	// Releases each pin no flight holds whose bundle a later one superseded, then the set's
 	// retired files it held. strata's release commits: short of space it stalls as an apply
@@ -1022,7 +1039,8 @@ private:
 			std::shared_ptr<pinned> gone;
 			{
 				std::lock_guard lock(mu_);
-				for (const auto& [at, p] : pins_) {
+				if (!sources_) { break; }
+				for (const auto& [at, p] : sources_->pins) {
 					if (at != recovered_.position && p->flights.empty()) {
 						gone = p;
 						break;
@@ -1037,7 +1055,8 @@ private:
 				throw;
 			}
 			std::lock_guard lock(mu_);
-			pins_.erase(gone->pin.base.position);
+			if (sources_) { sources_->pins.erase(gone->pin.base.position); }
+			trim_sources();
 		}
 		files_.unlink_retired(unlink_through(published_.load()));
 		return step::done;
@@ -1050,7 +1069,8 @@ private:
 		std::map<cs::Index, std::shared_ptr<pinned>> held;
 		{
 			std::lock_guard lock(mu_);
-			held.swap(pins_);
+			if (sources_) { held.swap(sources_->pins); }
+			trim_sources();
 		}
 		if (!ix_) { return; }
 		for (const auto& [at, p] : held) {
@@ -1062,7 +1082,7 @@ private:
 	// A retired set file a live pin names stays until the pin goes: unlinks stop below it.
 	cs::Index unlink_through(cs::Index through) const {
 		std::lock_guard lock(mu_);
-		return pins_.empty() ? through : std::min(through, pins_.begin()->first);
+		return !sources_ || sources_->pins.empty() ? through : std::min(through, sources_->pins.begin()->first);
 	}
 	// The learner's stage: the pin from the image's source, then the chore held for the stage
 	// alone (apply waits behind it), then the answer on the loop. A failure answers
@@ -1239,8 +1259,7 @@ private:
 	std::multimap<cs::Index, applied_waiter*> readers_;
 	std::map<cs::Index, outcome> recent_;
 	std::multiset<cs::Index> outstanding_;  // the `since` of each proposal not yet registered
-	std::set<cs::NodeId> installs_needed_;
-	std::map<cs::Index, std::shared_ptr<pinned>> pins_;  // the leader's, by P_b
+	std::unique_ptr<sources> sources_;
 	std::atomic<bool> installing_{false};                // a stage holds the chore
 	std::atomic<std::uint64_t> installs_{0};
 	std::atomic<cs::Index> applied_{0}, readable_at_{0}, published_{0}, installed_at_{0};  // published_: the last bundle's P_b
