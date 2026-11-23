@@ -808,6 +808,82 @@ int main() {
 			if (which == cut::first_refresh) { CHECK(empties > 0); }
 			if (which == cut::second_commit) { CHECK(previous > 0 && committed > 0); }
 		}
+		// install() into a fresh deferred index, cut at every mutation the same way: no index, the
+		// empty one, or the installed checkpoint.
+		{
+			fl::filesystem sfs;
+			fl::io sio(sfs);
+			auto source = kv_index::create(sio, keyed, uuid_b);
+			CHECK(source.apply(first_tx(), {}).result == verdict::accepted);
+			source.refresh();
+			CHECK(source.apply(transaction{{put("Qc", 3)}}, {}).result == verdict::accepted);
+			source.refresh();
+			const std::uint64_t cp = source.checkpoint();
+			const std::uint64_t installed = source.digest();
+			std::uint64_t total = 0;
+			{
+				fl::filesystem fs;
+				fl::io io(fs);
+				auto ix = kv_index::create_deferred(io, keyed, uuid_a);
+				const auto m0 = fs.mutations();
+				ix.install(sio, cp);
+				total = fs.mutations() - m0;
+				CHECK(ix.digest() == installed);
+			}
+			std::size_t uncreated = 0, empties = 0, done = 0, failed = 0;
+			for (std::uint64_t n = 0; n <= total; ++n) {
+				for (std::uint64_t power = 0; power <= 8; ++power) {
+					fl::filesystem fs;
+					fl::io io(fs);
+					{
+						std::optional<kv_index> ix;
+						ix.emplace(kv_index::create_deferred(io, keyed, uuid_a));
+						fs.power_off_after(n);
+						try {
+							ix->install(sio, cp);
+						} catch (...) {
+						}
+						fs.power_off_after(0);
+						try {
+							ix.reset();
+						} catch (...) {
+						}
+					}
+					if (power) {
+						fs.crash(n * 7919 + power * 31 + 7);
+					} else {
+						fs.power_on();
+					}
+					std::string listing;
+					for (const auto& f : fs.list()) { listing += " " + f; }
+					std::string verdict_of;
+					try {
+						auto ix = kv_index::open(io, keyed);
+						const auto d = ix.digest();
+						if (d == empty && ix.applied() == files::position{}) {
+							++empties;
+						} else if (d == installed) {
+							++done;
+						} else {
+							verdict_of = "opens another state";
+						}
+						ix.close();
+					} catch (const index_not_created&) {
+						++uncreated;
+					} catch (const std::exception& e) {
+						verdict_of = std::string("refused: ") + e.what();
+					}
+					if (!verdict_of.empty()) {
+						++failed;
+						std::fprintf(stderr, "FAIL install into a deferred index cut at %llu/%llu (%s): %s;%s\n", (unsigned long long)n, (unsigned long long)total,
+							power ? ("power loss seed " + std::to_string(power)).c_str() : "process crash", verdict_of.c_str(), listing.c_str());
+					}
+				}
+			}
+			std::printf("  install into a deferred index: %llu mutations, %llu cuts x 9: %zu not created, %zu empty, %zu installed, %zu failed\n",
+				(unsigned long long)total, (unsigned long long)total + 1, uncreated, empties, done, failed);
+			CHECK(failed == 0 && empties > 0 && done > 0);
+		}
 	}
 	// T1: power loss at every mutation point of seeded workloads, with merges on the
 	// writer's thread, then with background merges on a stepping executor (condition 7):

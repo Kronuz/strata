@@ -1198,7 +1198,8 @@ public:
 	void guard_calls(const std::atomic<std::uint64_t>* word, call_guard held) noexcept { guard_word_ = word, guard_held_ = held; }
 
 	// Writes the buffer as a segment (searchable, not yet durable). ENOSPC leaves the
-	// buffer in place to retry once space returns; other failures fence.
+	// buffer in place to retry once space returns; other failures fence. A deferred index's first
+	// refresh with documents syncs: it commits the empty first generation (commit_empty()).
 	void refresh() {
 		const writer_scope leased{*this};
 		live();
@@ -1961,6 +1962,7 @@ public:
 	void install(kronuz::journal::IO& source, std::uint64_t generation) {
 		const writer_scope leased{*this};
 		live();
+		if (!m_.generation) { guarded([&] { commit_empty(); }); }  // the first manifest before any copy
 		const files::log_state theirs = read_generation(source, generation);
 		check_readable(theirs.configured);
 		auto got = load_files(source, theirs, true, load_);
