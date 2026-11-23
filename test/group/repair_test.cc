@@ -190,16 +190,48 @@ bool write_at(world& w, node& l, const std::string& c, cs::Placement* placed = n
 	if (s->done && !s->error && placed) { *placed = s->value->placement; }
 	return s->done && !s->error;
 }
+// Steps until no open replica is damaged: settle() waits for applied indexes only, which a
+// damaged replica at its leader's base already matches. False when one stays damaged.
+bool healed(world& w) {
+	auto damaged = [&] {
+		for (auto& [id, n] : w.nodes) {
+			if (n->open() && !n->witness && n->p->g->damaged()) { return true; }
+		}
+		return false;
+	};
+	for (int i = 0; i < 400000 && damaged(); ++i) { w.step(); }
+	return !damaged();
+}
+// Leadership moved to `x`: consensus answers a read NotLeader anywhere else.
+bool lead(world& w, node& x) {
+	for (int attempt = 0; attempt < 5 && w.leader() != &x; ++attempt) {
+		if (auto* l = w.leader()) {
+			auto t = start(l->p->loop_ref(), l->p->lp->driver().transfer_leadership(gid, x.id));
+			for (int i = 0; i < 4000 && !t->done; ++i) { w.step(); }
+		}
+		for (int i = 0; i < 4000 && w.leader() != &x; ++i) { w.step(); }
+	}
+	for (int i = 0; i < 500 && w.leader() == &x; ++i) { w.step(); }  // its term's first entry commits
+	return w.leader() == &x;
+}
+// Every digest equal to the replay; a read that meets damage fails the check, not the process.
+void digests(world& w) {
+	try {
+		same_digests(w);
+	} catch (const std::exception& e) {
+		check(false, std::string("the digests read: ") + e.what());
+	}
+}
 // The repaired replica: settled, unmarked, one image at or past `base`, no staging name left,
 // every digest equal to the replay.
 void repaired(world& w, node& x, cs::Index base) {
-	if (!check(w.settle(), "the cluster settles by the reinstall")) { return; }
+	if (!check(healed(w), "every replica reinstalls") || !check(w.settle(), "the cluster settles by the reinstall")) { return; }
 	auto& g = *x.p->g;
 	check(!g.damaged() && !marked(x), "the replica is no longer damaged");
 	check(g.installs() == 1 && g.installed_at() >= base, "one image at or past the replica's base " + std::to_string(base) + ": " + std::to_string(g.installs()) + " at " + std::to_string(g.installed_at()));
 	const auto left = staging_left(x);
 	check(left.empty(), "no staging name stays:" + left);
-	same_digests(w);
+	digests(w);
 }
 
 // A read of every key, present or not, through every segment that may hold it: each maps.
@@ -232,12 +264,13 @@ void damaged_at_open(kind k, std::uint64_t seed) {
 	const bool lazy = k == kind::segment && !strata::detail::eager_segments_default();
 	const bool at_read = lazy && !x.p->g->damaged();
 	if (at_read) {
+		if (!check(lead(w, x), "the replica leads, for its read")) { return; }
 		auto r = run_until_done(w, x, x.p->g->read_applied(read_all));
 		check(r->done && damaged_error(r->error), "the first read of the damaged segment answers replica_damaged: " + what(r->error));
 	}
 	const auto reason = x.p->g->damage_reason();
 	const bool fresh = deferred(x);
-	check(x.p->g->damaged() && marked(x), at_read ? "the first read marks the replica damaged" : "the replica reopens damaged");
+	if (!check(x.p->g->damaged() && marked(x), at_read ? "the first read marks the replica damaged" : "the replica reopens damaged")) { return; }
 	check(fresh == (k != kind::file && !lazy), "a damaged index at open is quarantined for a deferred one; one damaged at a read, or a damaged set file, keeps it");
 	check(!x.p->g->readable(), "a damaged replica is not readable");
 	repaired(w, x, base);
@@ -278,12 +311,16 @@ void damaged_at_read(std::uint64_t seed) {
 	if (!prepare(w, gen)) { return; }
 	auto& x = follower(w);
 	const auto base = x.p->g->recovered().position;
+	if (!check(lead(w, x), "the replica leads, for its read")) { return; }
 	auto r = run_until_done(w, x, x.p->g->read_applied([](blob::index_type&) -> bool { throw strata::corrupt_index("test: a segment read fails its checksum"); }));
 	check(r->done && damaged_error(r->error), "the read answers replica_damaged, never bytes: " + what(r->error));
-	check(x.p->g->damaged() && marked(x), "the read's damage marks the replica damaged");
+	if (!check(x.p->g->damaged() && marked(x), "the read's damage marks the replica damaged")) { return; }
 	repaired(w, x, base);
+	auto* l = w.leader();
+	if (!check(l != nullptr, "a leader")) { return; }
+	auto theirs = run_until_done(w, *l, l->p->g->read_applied([](blob::index_type& ix) { return ix.get("a").has_value(); }));
+	if (!check(lead(w, x), "the repaired replica leads, for its read")) { return; }
 	auto mine = run_until_done(w, x, x.p->g->read_applied([](blob::index_type& ix) { return ix.get("a").has_value(); }));
-	auto theirs = run_until_done(w, *w.leader(), w.leader()->p->g->read_applied([](blob::index_type& ix) { return ix.get("a").has_value(); }));
 	check(mine->done && !mine->error && theirs->done && !theirs->error && *mine->value == *theirs->value, "the repaired replica reads as the leader: " + what(mine->error));
 	std::printf("repair: read, seed %llu: the read answered replica_damaged, one image at %llu\n", (unsigned long long)seed, (unsigned long long)x.p->g->installed_at());
 	++cases;
@@ -445,17 +482,7 @@ void damaged_source(std::uint64_t seed) {
 	w.boot(s);
 	if (!opened(w, s) || !check(w.settle(), "the cluster settles after the reboot")) { return; }
 	// It leads again, its segments unread.
-	bool led = false;
-	if (auto* l = w.leader(); l && l != &s) {
-		auto t = start(l->p->loop_ref(), l->p->lp->driver().transfer_leadership(gid, s.id));
-		for (int i = 0; i < 40000 && !led; ++i) {
-			w.step();
-			led = w.leader() == &s;
-		}
-	} else {
-		led = w.leader() == &s;
-	}
-	if (!check(led && !s.p->g->damaged(), "the source leads with its damaged segments unread")) { return; }
+	if (!check(lead(w, s) && !s.p->g->damaged(), "the source leads with its damaged segments unread")) { return; }
 	auto& x = follower(w);
 	const auto base = x.p->g->recovered().position;
 	w.shut(x, false);
@@ -537,7 +564,7 @@ bool cut_at(kind dk, bool host, std::uint64_t k, std::uint64_t* used) {
 	const auto m0 = fs.mutations();
 	if (k == ~std::uint64_t(0)) {
 		boot(w, x);
-		check(w.settle() && x.p->g->installs() == 1, "the dry run settles by the reinstall");
+		check(healed(w) && w.settle() && x.p->g->installs() == 1, "the dry run settles by the reinstall");
 		*used = fs.mutations() - m0;
 		return false;
 	}
@@ -563,7 +590,7 @@ bool cut_at(kind dk, bool host, std::uint64_t k, std::uint64_t* used) {
 		}
 		check(x.p->g->damaged() || x.installs + x.p->g->installs() >= 1, "the reboot is damaged or repaired, never unfenced over damaged bytes");
 		check(x.p->g->damaged() == marked(x), "damaged exactly while marked");
-		if (!check(w.settle(), "the cluster settles after the power cut")) { return true; }
+		if (!check(healed(w) && w.settle(), "the cluster settles after the power cut")) { return true; }
 	} catch (const std::exception& e) {
 		check(false, std::string("the reboot throws: ") + e.what());
 		std::fflush(stdout);
@@ -573,7 +600,7 @@ bool cut_at(kind dk, bool host, std::uint64_t k, std::uint64_t* used) {
 	check(x.installs + x.p->g->installs() >= 1 && x.p->g->recovered().position >= base, "an image at or past its base activated");
 	const auto left = staging_left(x);
 	check(left.empty(), "no staging name stays:" + left);
-	same_digests(w);
+	digests(w);
 	return true;
 }
 void crash(kind dk, bool host) {
