@@ -35,7 +35,7 @@ set(COMPLETION_ASIO OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG d8b538c6778f0a1b969e42c8428995d1d29d4731)
 # The manifest log's block framing (manifest-log D2), and the turn log, its driver and host that a
 # logged index writes through (standalone-turn-log D1); strata::group runs on the drivers.
-FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.git GIT_TAG e4b0100350d977171d13a55c3da4d286fa3b75fb)
+FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.git GIT_TAG a3eecb543a39193960ad4e2a0dbb67ef22d46a10)
 # Background work's threaded executor: one WorkPool per node, a WorkGroup per index.
 FetchContent_Declare(workpool GIT_REPOSITORY https://github.com/Kronuz/workpool.git GIT_TAG 640c66bfebccae811377670a265b62f4878ede8a)
 # strata::group's replication: consensus's Driver (docs/DRIVER.md, contract consensus:driver).
