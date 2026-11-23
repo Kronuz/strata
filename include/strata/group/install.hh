@@ -128,6 +128,22 @@ inline std::uint32_t crc_of(kronuz::journal::File& f, std::uint64_t length) {
 	if (read_prefix(f, length, crc) != length) { throw install_failed("strata::group: an install file ends before its length"); }
 	return crc.value();
 }
+// A pinned segment's footer against its manifest entry (its checksum, magic and table CRC): a
+// source never ships a segment it has not read and would refuse to map. Throws corrupt_segment.
+inline void check_footer(kronuz::journal::File& f, std::uint64_t size, std::uint32_t toc_crc) {
+	namespace fm = format;
+	char b[fm::footer_size];
+	std::uint64_t got = 0;
+	while (size >= fm::footer_size && got < fm::footer_size) {
+		const auto n = f.read_at(size - fm::footer_size + got, std::span<char>(b + got, fm::footer_size - got));
+		if (!n) { break; }
+		got += n;
+	}
+	if (got != fm::footer_size || std::memcmp(b + 52, fm::footer_magic, 4) != 0 || kronuz::crc32c::crc32c(b, 48) != fm::get<std::uint32_t>(b + 48) ||
+		fm::get<std::uint32_t>(b + 16) != toc_crc) {
+		throw corrupt_segment("a pinned segment's footer fails its check");
+	}
+}
 // The first staged file of `p` whose bytes fail its CRC32C, by its reason: strata's while they are
 // staged, and each set file not yet moved into place.
 inline std::optional<std::string> staged_damage(kronuz::journal::IO& dir, const install_pin& p, bool strata_staged) {
@@ -302,8 +318,10 @@ install_pin make_pin(basic_index<Layout>& ix, kronuz::journal::IO& dir, const bu
 		if (ix.applied().index < b.position) { throw std::logic_error("strata::group: strata is behind the bundle it would pin (P_H < P_b)"); }
 		const auto holder = index_detail::log_holding(dir, p.generation);
 		if (!holder) { throw files::generation_not_retained(p.generation); }
-		auto add = [&](std::vector<install_file>& out, std::string name, std::string path, std::optional<std::uint64_t> length, std::optional<std::uint32_t> crc) {
+		auto add = [&](std::vector<install_file>& out, std::string name, std::string path, std::optional<std::uint64_t> length, std::optional<std::uint32_t> crc,
+					   std::optional<std::uint32_t> footer = std::nullopt) {
 			auto f = dir.open_existing(path);
+			if (footer) { install_detail::check_footer(*f, *length, *footer); }
 			install_file e{std::move(name), length.value_or(f->size()), 0};
 			e.crc = crc ? *crc : install_detail::crc_of(*f, e.length);
 			out.push_back(std::move(e));
@@ -312,7 +330,7 @@ install_pin make_pin(basic_index<Layout>& ix, kronuz::journal::IO& dir, const bu
 		add(p.strata, log, log, std::nullopt, std::nullopt);
 		for (const auto& [id, s] : basic_index<Layout>::read_generation(dir, p.generation).segments) {
 			const auto name = index_detail::segment_name(id);
-			add(p.strata, name, name, s.size, std::nullopt);
+			add(p.strata, name, name, s.size, std::nullopt, s.footer_crc);
 		}
 		for (const auto& [name, f] : b.files) { add(p.files, name, std::string(bundle_detail::prefix) + name, f.length, f.crc); }
 	} catch (...) {

@@ -1250,7 +1250,12 @@ private:
 			try {
 				p = std::make_shared<pinned>(pinned{make_pin(*ix_, files_.io(), recovered_), {}});
 			} catch (...) {
-				return;  // strata behind its bundle, or the generation not retained: no pin
+				// A segment that fails its footer check: this source is damaged, and repairs as a
+				// read that met it would (it hands leadership off first). Else strata is behind its
+				// bundle, or the generation is not retained: no pin.
+				const auto e = std::current_exception();
+				if (damage(e) && !become_damaged(error_text(e))) { fence(error_text(e)); }
+				return;
 			}
 		}
 		std::lock_guard lock(mu_);

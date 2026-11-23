@@ -151,7 +151,9 @@ A replica whose bytes fail their checks reinstalls its leader's image through th
   missing, short or, sealed, CRC32C-failing file), met at the index's open (`group::open_index`),
   at recovery's `files_.recover`, at apply or at a read. A segment maps at its first read
   (cold-tier D2), so its footer and sections are checked there, at the read, apply or merge
-  that first touches it; a host that sets `eager_segments` finds it at the open. A live set file
+  that first touches it; a host that sets `eager_segments` finds it at the open. A leader's pin
+  checks each segment's footer (checksum, magic, the manifest's table CRC) before it lists the
+  segment, so a source never ships a segment it has not read: a mismatch is its damage. A live set file
   carries no CRC32C, so its damage is not seen (F24: no scrubber).
 - **The marker** `rd` (its text the reason, through a temporary and a rename, the directory
   synced) goes first: a crash anywhere from here reopens the replica damaged. A damaged index's
@@ -231,7 +233,9 @@ damaged, commits counting its log, it answers every read, checkpoint and write
 `replica_damaged`, serves no install and keeps its applied index while consensus's moves on;
 the only healthy replica that applied those commits is then lost and they survive), `staged` (a
 staged live set file flipped before the activation is refused, and a later image repairs),
-`leader` (a damaged leader hands off, then reinstalls), `deposed` (a leader that loses its
+`leader` (a damaged leader hands off, then reinstalls), `source` (a leader's segments damaged
+and never read since its reboot: a learner's request makes it pin them, the footer check marks
+it damaged, it hands off, and the learner and it install from the next leader), `deposed` (a leader that loses its
 leadership mid-flight names no install from then on, and none does once settled: every flight's
 release ends its peer's entry, review F3), and `crash` (a power cut at every
 mutation of the directory disk, then the host disk, from the damaged reboot through the settled

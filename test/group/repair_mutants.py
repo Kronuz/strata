@@ -77,6 +77,11 @@ MUTANTS = {
     "no-retry": ("staged", [(GROUP,
         "\t\tself->hand_off();\n\t\tself->begin_repair();\n",
         "\t\tself->hand_off();\n")]),
+    # The pin ships a segment unchecked: a source whose segment is damaged unread keeps leading,
+    # and a learner's activation of those bytes fails.
+    "pin-unchecked-footer": ("source", [(INSTALL,
+        "\t\t\tif (footer) { install_detail::check_footer(*f, *length, *footer); }\n",
+        "")]),
     # A flight's end names its peer still unless it installed or caught up: a leader deposed
     # mid-flight names the peer, and keeps its install state, for good.
     "needed-kept": ("deposed", [(GROUP,
