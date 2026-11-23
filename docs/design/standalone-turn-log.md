@@ -469,19 +469,21 @@ The host and its logs run on faultfs unchanged: they take any `kronuz::journal::
 - **`ack=none` against RocksDB's WAL-unsynced row.** strata's record waits in process memory until
   its turn's write, so a process crash can lose up to one barrier plus one write (about 21 ms on
   macOS); backpressure holds that bound, at one record per turn (D3). RocksDB's record is already in the kernel when `Write` returns. Under power loss the
-  comparison reverses. The write is also invisible to its own writer until that barrier (Q3).
+  comparison reverses. Its writer reads it at once; other readers see it at that barrier (Q3).
 - **Silent:** media damage confined to the newest epoch's last turn, above every checkpoint, reads
   as a torn tail and drops acknowledged writes (D10).
 - **Loud:** after a failed barrier whose pages Linux kept, a same-boot reopen followed by a power
   loss opens the groups in that turn as `log_lost` (D9). Separately, one damaged block whose
   manifest does not read back loses every open group on the loop that holds nothing after it
-  (`turn_log.h:416-418`), even an index whose head covers its last record (Q4).
+  (`turn_log.h:416-418`), even an index whose head covers its last record; damage a manifest names
+  bounds instead, and such an index opens (Q4).
 - **The writer stalls** for D5's checkpoint, once per buffer flush, and for up to two barriers per
   host refresh (D4).
 
 ## Questions for the owner
 
-Q1 and Q2 are ruled (D104, Xapiand master); Q3 to Q5 are ruled (D103).
+Q1 and Q2 are ruled (D104, Xapiand master). Q3 to Q5 are ruled (D103) and closed by quest
+`turn-log-parity`; each closing paragraph cites strata at that quest's merge of main (`4ca43683`).
 
 **Q1. Several logs on one device (macOS).** The review's probe P2 measured `F_FULLFSYNC` from 1, 2,
 4 and 8 threads on their own files, under a light hold, so the shape matters more than the values:
@@ -517,6 +519,15 @@ RocksDB's WAL-unsynced row reads its own writes. Options:
 Ruled (owner, D103, Xapiand:1935c388d): option 1. The `ack=none` row states the window; quest
 `turn-log-parity` closes the gap after `document-gate` lands.
 
+Closed (`turn-log-parity` A1): option 3's guarantee without a token, since the writer is the lease
+holder. The owner reads the applied state with no V cut (`find_key`, `index.hh:2058`, through
+`lookup_key` at `:4704` and `locate_docid` at `:4677`); views read at V (`view::at`, `:1678`), which
+only the watcher moves, once the records are durable (`log_state::durable_through`, `:577`); and no
+flush or pending delete publishes above V (`await_log`, `:3683`, in `commit` `:1304`, `apply_pending`
+`:5203` and `flush` `:5225`). Test: `test/test_ryw.cc` (`held`, `crash`, `race`; ctest `ryw`, also
+under TSan). Mutants, each `--fails-without`: the owner cut at V (job 261121-090430-5cd461), an
+install before the log wait (261121-090433-fa1d1f), V following apply (261121-090436-c180a4).
+
 **Q4. A tolerant open after log damage** (N5). One damaged block can fail every idle index on a
 loop with `log_lost`, even an index whose head covers its last record. Options:
 
@@ -526,6 +537,16 @@ loop with `log_lost`, even an index whose head covers its last record. Options:
 
 Ruled (owner, D103): option 1, `log_lost`; quest `turn-log-parity` closes the gap after
 `document-gate` lands.
+
+Closed (`turn-log-parity` A2): option 2, with journal's bound (journal `docs/mechanisms/lost-bound.md`).
+A `GroupStatus::bounded` group opens when the head's applied position reaches `Host::bound` and
+replays the records after it; below the bound the index calls `Host::lose` and fails `log_lost`
+(`attach_log`, `index.hh:3391`; `turn_sealer::bound` and `lose`, `turn_seal.hh:109`, `:113`).
+Replay skips a chunk at or below the head with no run before it, since the head holds its run
+(`replay_log`, `index.hh:3536`). Damage journal reads as a torn tail reports no bound and still
+refuses. Test: `test/test_reopen_damaged.cc` (`manifest_named`, `chunk_covered`; ctest
+`reopen_damaged`). Mutants: an open of every bounded index (job 261121-145613-34602d) and the
+covered chunk run without the skip (261121-214545-0d42a7).
 
 **Q5. The command limit on a logged index** (review R4). A logged index refuses as `invalid` a
 transaction whose command passes 64 MiB, which an unlogged index admits up to its lane and
@@ -538,6 +559,18 @@ one does. Options:
 
 Ruled (owner, D103): option 1, the 64 MiB limit, with the narrowing noted in the gate report;
 quest `turn-log-parity` closes the gap after `document-gate` lands.
+
+Closed (`turn-log-parity` A3): neither option's stall. A command past `command_bytes` streams as
+a run of chunk records under the writer's lease (`join_log`, `index.hh:3634`; `join_chunks`,
+`:3658`; the chunk payload, `command.hh:244`, `:257`); only the last chunk's record carries the
+new V, and replay applies a run whole at its last chunk and drops an interrupted one
+(`replay_log`, `index.hh:3506`). `kv_strata` takes a batch past its 1 MiB cap the same way
+(`bench/kv/kv_strata.hh:291`). Mechanism note: `docs/mechanisms/large-transactions.md`. Tests:
+`test/test_large_tx.cc` (`admit`, `sweep` cutting power and the process at every mutation of a
+run, `big`, `visible`; ctest `large_tx`), `test/kv_strata_batch_test.cc`, and `fuzz_command` with
+the chunk kind. Mutants: the limit kept (job 261121-110107-c64ff6), apply per chunk
+(261121-110108-aa171b), V before the last chunk (261121-110110-5b9806), an interrupted run not
+moving the applied position (261121-110112-a647c1).
 
 ## Built
 
