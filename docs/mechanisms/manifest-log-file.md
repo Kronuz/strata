@@ -51,6 +51,33 @@ reader refuses past slack 2, which leaves room for a log written under a larger 
 - A truncate-back or a barrier that fails breaks the appender; every later call throws
   `std::logic_error`, and the index fences.
 
+## The first manifest
+
+A directory holds an index exactly when it holds a manifest log, so a log is on disk before any
+data file. `create()` commits the empty state as generation 1 before anything is applied. A
+deferred index (`create_deferred`) writes nothing until its first flush: when no generation is
+committed and the buffer holds documents, `flush()` (a commit's, a refresh's or a budget's) first
+rolls over the empty state create() would have committed (the UUID and the configured structures,
+nothing applied) as `manifest-1`, then writes its segments, and the commit appends its edit,
+generation 2, to that log. A flush with nothing buffered writes no log, so `create()` still writes
+one generation. A logged index applies nothing before its first commit (D7's join), so it never
+takes this path. The cost is one rollover per index, once: in `lifecycle_test`'s sweep a first
+commit of two documents takes 12 mutations and 6 syncs where it took 9 and 4.
+
+A cut before `manifest-1` is renamed leaves at most `manifest-1.tmp`: the open throws
+`index_not_created` and `create` clears it. A cut after it opens the empty index; the segments and
+spill files the flush wrote are names no generation holds.
+
+## Files no manifest names
+
+- In a directory with a log, the open sets the segment counter above every name on disk, so a later
+  flush never reuses one; it unlinks `.tmp` orphans after a successful open, and retention queues
+  every other file no kept generation names for reclaim at the first commit or `reclaim()`.
+- In a directory with no log, only a lone `manifest-1.tmp` is an interrupted create. Any other
+  strata file, a segment above all, is damage: the open throws `corrupt_index` ("no manifest log")
+  and `create` refuses the directory. Nothing is deleted there, since the files may be what a lost
+  log named.
+
 ## Proof
 
 `test/manifest_log_test.cc` stages "caller rules", "crash images" (every subset of the sectors an
@@ -60,4 +87,6 @@ the oracle says it is within the bounds, by edits and by bytes), "replay cost" (
 times the declarations in one edit about 15x, edits adding segments onto a hundred times the state
 about 1.6x), "allocation failure" (every allocation of a read failed in turn), and "appender" (over
 faultfs). `test/manifest_log_mutants.py` breaks each rule once; `fuzz/fuzz_manifest_log_file.cc`
-fuzzes `read_log` from framed seeds (`manifest_log_test --log-seeds`).
+fuzzes `read_log` from framed seeds (`manifest_log_test --log-seeds`). `test/lifecycle_test.cc`
+cuts a deferred index's first commit and first refresh at every mutation, as a process crash and as
+power loss under 8 seeds, with a second commit's sweep as the control.
