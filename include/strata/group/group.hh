@@ -416,7 +416,13 @@ public:
 			std::lock_guard lock(mu_);
 			installs_needed_.erase(peer);
 		}
-		push(new notice_work([this, peer, key, gone = std::shared_ptr<pinned>{}]() mutable { return unpin_for(peer, key, gone); }));
+		push(new notice_work([this, peer, key, ended = false]() mutable {
+			if (!ended) {
+				unpin_for(peer, key);
+				ended = true;
+			}
+			return release_superseded();
+		}));
 	}
 	// The learner: the image is the leader's bundle; stage its pin, then answer.
 	void validate(cs::Token token, cs::LogBoundary boundary, cs::NodeId source, jn::ArtifactReader& image) override {
@@ -913,6 +919,7 @@ private:
 		co_await on_chore([&] {
 			if (published.through == b.position) { recovered_ = b; }
 			files_.unlink_retired(unlink_through(b.position));
+			release_later();
 		});
 		co_return published;
 	}
@@ -979,9 +986,10 @@ private:
 		}
 		return bytes;
 	}
-	// On the chore, between entries: the flight's pin of the latest bundle, made once per bundle.
-	// A key at another boundary (a later bundle published) pins nothing: the learner's fetch of
-	// the pin finds none and its validation fails, and the leader's next flight sends the latest.
+	// On the chore, between entries: the flight's pin of the latest bundle, made once per bundle
+	// and kept until a later one supersedes it. consensus sends the image as the flight starts,
+	// so a learner's fetch can outrun this pin; its validation fails and the next flight finds
+	// the pin. A key at another boundary (a later bundle published) pins nothing.
 	void pin_for(cs::NodeId peer, cs::SnapshotKey key) {
 		if (!ix_ || key.boundary.index != recovered_.position || !recovered_.position) { return; }
 		std::shared_ptr<pinned> p;
@@ -1000,28 +1008,42 @@ private:
 		p->flights.emplace(peer, key.transfer);
 		pins_.emplace(key.boundary.index, std::move(p));
 	}
-	// The flight ended: its pin goes with its last flight, and the set's retired files it held.
-	// strata's release commits: short of space it stalls as an apply does, `gone` kept for the
-	// retry after resume().
-	step unpin_for(cs::NodeId peer, cs::SnapshotKey key, std::shared_ptr<pinned>& gone) {
-		if (!gone) {
-			std::lock_guard lock(mu_);
-			auto it = pins_.find(key.boundary.index);
-			if (it == pins_.end()) { return step::done; }
-			it->second->flights.erase({peer, key.transfer});
-			if (!it->second->flights.empty()) { return step::done; }
-			gone = std::move(it->second);
-			pins_.erase(it);
-		}
+	// The flight ended: its pin stays while its bundle is the latest, for the next flight.
+	void unpin_for(cs::NodeId peer, cs::SnapshotKey key) {
+		std::lock_guard lock(mu_);
+		if (auto it = pins_.find(key.boundary.index); it != pins_.end()) { it->second->flights.erase({peer, key.transfer}); }
+	}
+	// Releases each pin no flight holds whose bundle a later one superseded, then the set's
+	// retired files it held. strata's release commits: short of space it stalls as an apply
+	// does, the pin kept for the retry after resume().
+	step release_superseded() {
 		if (!ix_) { return step::done; }
-		try {
-			release_pin(*ix_, gone->pin);
-		} catch (const std::system_error& x) {
-			if (x.code() == std::errc::no_space_on_device) { return step::stall; }
-			throw;
+		for (;;) {
+			std::shared_ptr<pinned> gone;
+			{
+				std::lock_guard lock(mu_);
+				for (const auto& [at, p] : pins_) {
+					if (at != recovered_.position && p->flights.empty()) {
+						gone = p;
+						break;
+					}
+				}
+			}
+			if (!gone) { break; }
+			try {
+				release_pin(*ix_, gone->pin);
+			} catch (const std::system_error& x) {
+				if (x.code() == std::errc::no_space_on_device) { return step::stall; }
+				throw;
+			}
+			std::lock_guard lock(mu_);
+			pins_.erase(gone->pin.base.position);
 		}
 		files_.unlink_retired(unlink_through(published_.load()));
 		return step::done;
+	}
+	void release_later() {
+		push(new notice_work([this] { return release_superseded(); }));
 	}
 	// The teardown's: every pin released while strata is open.
 	void release_pins_held() {
@@ -1073,7 +1095,10 @@ private:
 	task::task<void> activate_image(bundle b, cs::Token token) {
 		std::optional<std::string> failed;
 		try {
-			co_await on_chore([this, &b] { adopt(b, true); });
+			co_await on_chore([this, &b] {
+				adopt(b, true);
+				release_later();
+			});
 		} catch (...) {
 			failed = error_text(std::current_exception());
 		}

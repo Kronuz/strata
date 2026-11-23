@@ -879,9 +879,10 @@ void install_gap(unsigned voters) {
 	same_digests(w);
 }
 
-// The leader's disk fills between the install's activation and its pin's release: the release
-// stalls the leader's chore, as an apply short of space does, and never fences it; once the
-// host frees space and resumes it, the release commits and the cluster settles.
+// An install's pin stays with the leader's latest bundle; the leader's next checkpoint
+// supersedes it, and its disk fills before the release: the release stalls the chore, as an
+// apply short of space does, and never fences it; once the host frees space and resumes it,
+// the release commits and the cluster settles.
 void release_short_of_space(unsigned voters) {
 	context = std::to_string(voters) + " voters, the leader's pin release short of space";
 	world w(voters, 57);
@@ -889,15 +890,20 @@ void release_short_of_space(unsigned voters) {
 	auto& l = *w.leader();
 	auto& behind = *w.nodes.at(l.id % voters + 1);
 	if (!leave_behind(w, l, behind)) { return; }
-	for (int i = 0; i < 200000 && behind.p->g->installs() == 0; ++i) { w.step(); }
-	if (!check(behind.p->g->installs() == 1 && !l.p->g->installs_needed().empty(), "the replica activates the install before the leader hears it ended")) { return; }
+	if (!check(w.settle() && behind.p->g->installs() == 1, "the cluster settles by the install")) { return; }
+	auto s = start(l.p->loop_ref(), l.p->g->propose("P|c|three"));
+	for (int i = 0; i < 40000 && !s->done; ++i) { w.step(); }
+	const auto before = l.p->g->recovered().position;
+	auto k = start(l.p->loop_ref(), l.p->g->checkpoint());
+	for (int i = 0; i < 40000 && l.p->g->recovered().position == before && !k->done; ++i) { w.step(); }
+	if (!check(l.p->g->recovered().position > before, "the leader publishes a later bundle")) { return; }
 	l.dir_disk.set_capacity(l.dir_disk.used());
 	for (int i = 0; i < 200000 && !l.p->g->stalled() && !l.p->g->fenced(); ++i) { w.step(); }
 	check(l.p->g->stalled() && !l.p->g->fenced(), "the leader's release stalls on space, unfenced: " + l.p->g->fence_reason());
 	l.dir_disk.set_capacity(~std::uint64_t(0));
 	l.p->g->resume();
 	if (!check(w.settle(), "the cluster settles once the leader resumes")) { return; }
-	check(!l.p->g->stalled() && l.p->g->installs_needed().empty(), "the leader released the pin and names no install");
+	check(!l.p->g->stalled(), "the leader released the superseded pin");
 	same_digests(w);
 }
 
