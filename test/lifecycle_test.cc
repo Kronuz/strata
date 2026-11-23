@@ -699,11 +699,12 @@ int main() {
 		for (const cut which : {cut::first_commit, cut::first_refresh, cut::second_commit}) {
 			const char* name = which == cut::first_commit ? "first commit" : which == cut::first_refresh ? "first refresh" : "second commit";
 			const files::position at1{1, 1}, at2{2, 1};
-			auto prepare = [&](fl::io& io, std::optional<kv_index>& ix) {
+			auto prepare = [&](fl::io& io, std::optional<kv_index>& ix, std::uint64_t* first = nullptr) {
 				ix.emplace(kv_index::create_deferred(io, keyed, uuid_a));
 				CHECK(ix->apply(first_tx(), at1).result == verdict::accepted);
 				if (which == cut::second_commit) {
 					ix->commit();
+					if (first) { *first = ix->digest(); }
 					CHECK(ix->apply(transaction{{put("Qc", 3), put("Qa", 4)}}, at2).result == verdict::accepted);
 				}
 			};
@@ -713,8 +714,7 @@ int main() {
 				fl::filesystem fs;
 				fl::io io(fs);
 				std::optional<kv_index> ix;
-				prepare(io, ix);
-				before = ix->digest();
+				prepare(io, ix, &before);
 				const auto m0 = fs.mutations(), s0 = fs.syncs();
 				ix->commit();
 				total = fs.mutations() - m0;
