@@ -114,9 +114,6 @@ struct replica {
 		c.options.timing = cs::Timing{10, 40, 60, 120, 60000};
 		c.options.scheduling = cs::WorkerLimits{16, 128};
 		c.identity = j::Identity{'G', char('0' + gid), char('0' + inc)};
-		c.uuid = {'g', char('0' + gid), char('0' + inc)};
-		c.strata.keyed = true;
-		c.strata.storage = &storage;
 	}
 
 	virtual void open_group(std::uint64_t seed) = 0;
@@ -180,13 +177,13 @@ template <class App>
 struct replica_of final : replica {
 	using group_type = sg::group<App>;
 	App app;
-	std::unique_ptr<group_type> g;
+	group_test::borrowed<group_type> g;  // the directory and index it borrows (D169)
 	std::unique_ptr<sg::writer<group_type>> writer;
 
 	void open_group(std::uint64_t) override {
 		typename group_type::config c;
 		fill(c);
-		g = std::make_unique<group_type>(*p->lp, std::move(c), std::make_unique<fl::io>(dir_disk), app, task::scheduler_ref::of(p->chore_s));
+		g.emplace(*p->lp, std::move(c), std::make_unique<fl::io>(dir_disk), storage, {'g', char('0' + gid), char('0' + inc)}, app, task::scheduler_ref::of(p->chore_s));
 		writer = std::make_unique<sg::writer<group_type>>(*g);
 		p->opening = start(p->loop_ref(), g->open());
 	}

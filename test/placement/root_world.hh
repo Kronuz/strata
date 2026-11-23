@@ -4,6 +4,7 @@
 // through submit.hh's writer at the leader with the root's prepared operations.
 #pragma once
 
+#include "../group/group_catalog_borrow.hh"
 #include "../group/host_io.hh"
 
 #include "faultlab/faultfs.h"
@@ -74,7 +75,7 @@ constexpr cs::GroupId root_gid = 1;
 inline const j::TurnLogOptions turn_options{16 * 1024, 1024, 1, 4, 4096};
 inline const j::AdmissionLimits admission{{256u << 20, 8192}, {256 * 1024, 3}, {64u << 20, 4}, 32, 3};
 
-inline group_type::config config(cs::NodeId self, unsigned voters, strata::byte_budget& storage) {
+inline group_type::config config(cs::NodeId self, unsigned voters) {
 	group_type::config c;
 	c.id = root_gid;
 	c.options.configuration.local = self;
@@ -91,9 +92,6 @@ inline group_type::config config(cs::NodeId self, unsigned voters, strata::byte_
 	c.options.timing = cs::Timing{10, 40, 60, 120, 60000};
 	c.options.scheduling = cs::WorkerLimits{16, 128};
 	c.identity = j::Identity{'R', char('0' + self)};
-	c.uuid = {'r', 'o', 'o', 't', char('0' + self)};
-	c.strata.keyed = true;
-	c.strata.storage = &storage;
 	return c;
 }
 
@@ -141,7 +139,7 @@ struct node {
 		j::InlineCompletion inline_io;
 		std::unique_ptr<j::Host> host;
 		std::unique_ptr<sg::loop> lp;
-		std::unique_ptr<group_type> g;
+		group_test::borrowed<group_type> g;  // the directory and index it borrows (D169)
 		std::unique_ptr<sg::writer<group_type>> writer;
 		task::cancel_source stop;
 		bool turns_done = false, driver_done = false;
@@ -195,7 +193,7 @@ struct world {
 		auto* raw = p.get();
 		task::spawn(p->loop_ref(), p->host->driver(0).run(j::completion_ref::of(p->held), p->stop.token()), [raw](std::exception_ptr) { raw->turns_done = true; });
 		task::spawn(p->loop_ref(), p->lp->run(p->stop.token()), [raw](std::exception_ptr) { raw->driver_done = true; });
-		p->g = std::make_unique<group_type>(*p->lp, config(x.id, voters, x.storage), std::make_unique<fl::io>(x.dir_disk), x.app, task::scheduler_ref::of(p->chore_s));
+		p->g.emplace(*p->lp, config(x.id, voters), std::make_unique<fl::io>(x.dir_disk), x.storage, {'r', 'o', 'o', 't', char('0' + x.id)}, x.app, task::scheduler_ref::of(p->chore_s));
 		p->writer = std::make_unique<sg::writer<group_type>>(*p->g);
 		p->opening = start(p->loop_ref(), p->g->open());
 		x.p = std::move(p);
