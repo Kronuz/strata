@@ -37,7 +37,7 @@ MUTANTS = {
         "\t\t\tquarantine_strata(directory);\n\t\t\tmark_damaged(directory, error_text(e));\n")]),
     # A set file that fails its check at recovery fails the open instead of marking damage.
     "set-damage-fences": ("file", [(GROUP,
-        "\t\t\tmark_damaged(files_.io(), e.what());\n\t\t\treturn adopt_damaged(b);\n",
+        "\t\t\tmark_damaged(files_.io(), e.what());\n\t\t\treturn adopt_damaged(b, e.what());\n",
         "\t\t\tthrow;\n")]),
     # Delivered ranges are dropped, never acknowledged: consensus refuses the request (Busy).
     "no-ack": ("manifest", [(GROUP,
@@ -82,6 +82,19 @@ MUTANTS = {
     "pin-unchecked-footer": ("source", [(INSTALL,
         "\t\t\tif (footer) { install_detail::check_footer(*f, *length, *footer); }\n",
         "")]),
+    # A refused activation reports the replica's first damage: the staged file's refusal is lost.
+    "reason-kept": ("staged", [(GROUP,
+        "\t\t\tif (marked_damaged(files_.io())) { return adopt_damaged(b, e.what()); }\n",
+        "\t\t\tif (marked_damaged(files_.io())) { return adopt_damaged(b); }\n")]),
+    # A damaged leader hands off to any follower the host names, a damaged one too: two damaged
+    # replicas pass leadership between them and nothing reinstalls.
+    "handoff-any": ("source", [(GROUP,
+        "\t\t\t\ttarget = loop_->applied_past(id_, std::max<cs::Index>(s->committed, 1));\n",
+        "\t\t\t\ttarget = loop_->applied_past(id_, 0);\n")]),
+    # A sound replica stages an image consensus refuses as caught up: its stage stays behind.
+    "stage-caught-up": ("crash-manifest-dir", [(GROUP,
+        "\t\tif (!damaged_.load() && boundary.index <= applied_.load()) {\n",
+        "\t\tif (false) {\n")]),
     # A flight's end names its peer still unless it installed or caught up: a leader deposed
     # mid-flight names the peer, and keeps its install state, for good.
     "needed-kept": ("deposed", [(GROUP,

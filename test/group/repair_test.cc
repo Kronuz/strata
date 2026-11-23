@@ -11,17 +11,18 @@
 //   apply, read: strata's damage met at apply or at a read on a running follower; the read
 //     answers replica_damaged, never the bytes.
 //   refusal: while damaged, with the third voter cut off so commits count the damaged replica's
-//     log, it answers every read, checkpoint and write replica_damaged, serves no install, keeps
-//     its applied index while consensus's moves past it; then the only healthy replica that
+//     log (until its install request is admitted), it answers every read, checkpoint and write
+//     replica_damaged, serves no install, keeps its applied index while consensus's moves past
+//     it, the damaging write's range acknowledged unapplied; then the only healthy replica that
 //     applied those commits is lost, and they survive: the damaged one leads, hands off, and
 //     reinstalls from the replica that caught up from its log.
 //   staged: a staged live set file flipped between the stage and the activation: the activation
 //     refuses it, and a later image repairs the replica.
 //   leader: a damaged replica made leader hands leadership off, then reinstalls.
 //   source: a leader's segments damaged on disk and never read since its reboot (lazy maps); a
-//     learner's request makes it pin them, the pin's footer check finds the damage, and the
-//     leader marks itself damaged and hands off instead of shipping the bytes; the learner
-//     installs from the next leader and the source reinstalls too.
+//     learner's request makes it pin them, the pin meets the damage, and the leader marks
+//     itself damaged and hands off to the sound follower instead of shipping the bytes; the
+//     learner installs from the next leader and the source reinstalls too.
 //   deposed: the leader installing a damaged replica loses its leadership mid-flight; it names
 //     no install from then on, and once the new leader repairs the replica no node names one.
 //   crash: a power cut at every mutation of the damaged follower's directory disk, then of its
@@ -347,21 +348,35 @@ void refusal(std::uint64_t seed) {
 			throw strata::corrupt_index("test: a segment read at apply fails its checksum");
 		}
 	};
-	// Commits count x's log alone beside the leader's: y is cut off. x's fetches fail, so it stays damaged.
+	// Commits count x's log alone beside the leader's: y is cut off. x's fetches fail, so it stays
+	// damaged. The first write's apply damages x, which acknowledges its range unapplied; later
+	// writes commit on x's log until its install request is admitted, after which its leader
+	// sends it the image alone and consensus delivers it nothing (install-request.md), so the
+	// first write that cannot commit ends the writes.
 	struct written {
 		cs::Placement at;
 		std::string command;
 	};
 	std::vector<written> acked;
-	for (int k = 0; k < 6; ++k) {
-		written c{{}, "P|" + keys[k] + "|while-damaged-" + std::to_string(k)};
-		if (check(write_at(w, l, c.command, &c.at, &x), "a write commits on the leader's and the damaged replica's logs")) { acked.push_back(c); }
+	written first{{}, "P|" + keys[0] + "|while-damaged-0"};
+	if (!check(write_at(w, l, first.command, &first.at, &x), "the write that damages the replica commits on the leader's and its logs")) { return; }
+	acked.push_back(first);
+	for (int i = 0; i < 40000 && !x.p->g->damaged(); ++i) {
+		w.step();
+		w.fail_fetches(x.id);
 	}
 	if (!check(x.p->g->damaged(), "the replica is damaged")) { return; }
+	for (int k = 1; k < 6; ++k) {
+		written c{{}, "P|" + keys[k] + "|while-damaged-" + std::to_string(k)};
+		if (!write_at(w, l, c.command, &c.at, &x)) { break; }
+		acked.push_back(c);
+	}
 	auto& g = *x.p->g;
 	const auto held = g.applied();
 	const auto core = x.p->lp->driver().state(gid);
-	check(core && core->applied > held && core->applied >= acked.back().at.index, "consensus's applied index moves past the replica's: the ranges acknowledged unapplied (" + std::to_string(core ? core->applied : 0) + " > " + std::to_string(held) + ")");
+	check(core && core->applied > held && core->applied >= first.at.index,
+		"consensus's applied index moves past the replica's: the damaging write's range acknowledged unapplied (" + std::to_string(core ? core->applied : 0) + " > " + std::to_string(held) + ", the write at " +
+			std::to_string(first.at.index) + ")");
 	auto r = run_until_done(w, x, g.read_applied([](blob::index_type& ix) { return ix.get("a").has_value(); }), true);
 	check(r->done && damaged_error(r->error), "a read answers replica_damaged: " + what(r->error));
 	auto k = run_until_done(w, x, g.checkpoint(), true);
@@ -380,7 +395,7 @@ void refusal(std::uint64_t seed) {
 		check(it != x.log.end() && it->second.command == c.command, "a write committed while damaged is applied at its placement " + std::to_string(c.at.index));
 	}
 	x.app.before_write = {};
-	std::printf("repair: refusal, seed %llu: %zu writes committed on a damaged replica's log, consensus applied %llu over the replica's %llu, every waiter refused; node %llu lost, the writes survive\n",
+	std::printf("repair: refusal, seed %llu: %zu writes committed on a damaged replica's log (the first damaged it), consensus applied %llu over the replica's %llu, every waiter refused; node %llu lost, the writes survive\n",
 		(unsigned long long)seed, acked.size(), (unsigned long long)(core ? core->applied : 0), (unsigned long long)held, (unsigned long long)lost);
 	++cases;
 }
@@ -494,7 +509,15 @@ void damaged_source(std::uint64_t seed) {
 		w.step();
 		if (s.p->g->damaged()) { reason = s.p->g->damage_reason(); }
 	}
-	check(reason.find("a pinned segment's footer fails its check") != std::string::npos, "the source's pin finds its damage: " + reason);
+	check(reason.find("the pin met damage") != std::string::npos, "the source's pin finds its damage: " + reason);
+	if (!healed(w)) {
+		for (auto& [id, n] : w.nodes) {
+			const auto st = n->open() ? n->p->lp->driver().state(gid) : std::nullopt;
+			std::printf("  source, seed %llu: node %llu %s, role %d, leader %llu, commit %llu, applied %llu, damaged %d (%s)\n", (unsigned long long)seed, (unsigned long long)id, n->open() ? "open" : "down",
+				st ? int(st->role) : -1, (unsigned long long)(st ? st->leader : 0), (unsigned long long)(st ? st->committed : 0), (unsigned long long)(n->open() ? n->p->g->applied() : 0),
+				n->open() && n->p->g->damaged(), n->open() ? n->p->g->damage_reason().c_str() : "");
+		}
+	}
 	repaired(w, x, base);
 	check(!s.p->g->damaged() && !marked(s) && s.p->g->installs() >= 1, "the source reinstalls too");
 	std::printf("repair: source, seed %llu: %d segments damaged unread on the leader; its pin found them (%s); the learner installed at %llu from node %llu\n", (unsigned long long)seed,
@@ -547,6 +570,27 @@ void deposed(std::uint64_t seed) {
 	++cases;
 }
 
+// The damage of `dk` is gone from the open replica: strata's index holds a manifest log again,
+// or the sealed file its bundle names reads back its CRC32C. A replica unmarked and clean was
+// repaired, whichever process counted the activation.
+bool damage_gone(node& x, kind dk, const std::string& sealed) {
+	if (dk == kind::manifest) { return !deferred(x); }
+	const auto& files = x.p->g->recovered().files;
+	const auto it = files.find(sealed);
+	if (it == files.end() || !it->second.crc) { return true; }
+	fl::io io(x.dir_disk);
+	auto f = sg::repair_detail::open_if(io, "app." + sealed);
+	return f && sg::install_detail::crc_of(*f, it->second.length) == *it->second.crc;
+}
+// The names a complete stage left, with the replica's state beside them.
+std::string stage_state(node& x) {
+	fl::io io(x.dir_disk);
+	const auto pin = sg::staged(io);
+	auto& g = *x.p->g;
+	return " (stage at " + (pin ? std::to_string(pin->base.position) : std::string("none")) + ", recovered " + std::to_string(g.recovered().position) + ", applied " +
+		std::to_string(g.applied()) + ", installs " + std::to_string(x.installs) + "+" + std::to_string(g.installs()) + ")";
+}
+
 // A power cut on the damaged follower's directory disk (or host disk) after `k` mutations from
 // its reboot; ~0 is the dry run, which returns the mutations through the settled repair in
 // `used`. False when the repair settles before the cut.
@@ -588,7 +632,7 @@ bool cut_at(kind dk, bool host, std::uint64_t k, std::uint64_t* used) {
 			std::fflush(stdout);
 			std::_Exit(1);
 		}
-		check(x.p->g->damaged() || x.installs + x.p->g->installs() >= 1, "the reboot is damaged or repaired, never unfenced over damaged bytes");
+		check(x.p->g->damaged() || (!marked(x) && damage_gone(x, dk, sealed)), "the reboot is damaged or repaired, never unfenced over damaged bytes" + stage_state(x));
 		check(x.p->g->damaged() == marked(x), "damaged exactly while marked");
 		if (!check(healed(w) && w.settle(), "the cluster settles after the power cut")) { return true; }
 	} catch (const std::exception& e) {
@@ -597,9 +641,9 @@ bool cut_at(kind dk, bool host, std::uint64_t k, std::uint64_t* used) {
 		std::_Exit(1);
 	}
 	check(!x.p->g->damaged() && !marked(x), "the replica is repaired");
-	check(x.installs + x.p->g->installs() >= 1 && x.p->g->recovered().position >= base, "an image at or past its base activated");
+	check(damage_gone(x, dk, sealed) && x.p->g->recovered().position >= base, "an image at or past its base replaced the damaged bytes" + stage_state(x));
 	const auto left = staging_left(x);
-	check(left.empty(), "no staging name stays:" + left);
+	check(left.empty(), "no staging name stays:" + left + stage_state(x));
 	digests(w);
 	return true;
 }

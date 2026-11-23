@@ -512,6 +512,12 @@ public:
 	}
 	// The learner: the image is the leader's bundle; stage its pin, then answer.
 	void validate(cs::Token token, cs::LogBoundary boundary, cs::NodeId source, jn::ArtifactReader& image) override {
+		// At or below what a sound replica applied, consensus refuses the image (caught up): only
+		// a damaged replica's request installs there. Nothing is staged that would stay behind.
+		if (!damaged_.load() && boundary.index <= applied_.load()) {
+			loop_->driver().validated(id_, token);
+			return;
+		}
 		std::optional<bundle> b;
 		try {
 			b = decode(read_image(image));
@@ -1160,7 +1166,9 @@ private:
 				installs_.fetch_add(1);
 				installed_at_.store(b.position);
 			}
-		} catch (const replica_damaged&) {}  // a staged file failed its check: marked, stage swept
+		} catch (const replica_damaged& e) {  // a staged file failed its check: marked, stage swept
+			if (marked_damaged(files_.io())) { return adopt_damaged(b, e.what()); }
+		}
 		if (marked_damaged(files_.io())) { return adopt_damaged(b); }
 		head_ = ix_->applied();
 		if (b.position > head_.index) { throw group_fenced("strata::group: the bundle is past strata's durable head (P_b > P_H)"); }
@@ -1168,7 +1176,7 @@ private:
 			files_.recover(b.files);
 		} catch (const file_set_damage& e) {
 			mark_damaged(files_.io(), e.what());
-			return adopt_damaged(b);
+			return adopt_damaged(b, e.what());
 		}
 		state_ = restored ? app_->decode(b.state) : state_type{};
 		applied_term_ = b.term;
@@ -1186,7 +1194,8 @@ private:
 			}
 		}
 	}
-	void adopt_damaged(const bundle& b) {
+	// The damage's reason: the newest found, else the marker's text (a reopen's).
+	void adopt_damaged(const bundle& b, std::optional<std::string> found = std::nullopt) {
 		state_ = state_type{};
 		applied_term_ = b.term;
 		phase_ = phase::effects;
@@ -1194,7 +1203,9 @@ private:
 		applied_.store(b.position, std::memory_order_release);
 		published_.store(b.position);
 		std::string reason = "strata::group: the replica is marked damaged";
-		if (auto f = repair_detail::open_if(files_.io(), repair_detail::marker)) {
+		if (found) {
+			reason = std::move(*found);
+		} else if (auto f = repair_detail::open_if(files_.io(), repair_detail::marker)) {
 			try {
 				if (auto text = index_detail::read_all(*f); !text.empty()) { reason = std::move(text); }
 			} catch (...) {}
@@ -1254,7 +1265,7 @@ private:
 				// read that met it would (it hands leadership off first). Else strata is behind its
 				// bundle, or the generation is not retained: no pin.
 				const auto e = std::current_exception();
-				if (damage(e) && !become_damaged(error_text(e))) { fence(error_text(e)); }
+				if (damage(e) && !become_damaged("strata::group: the pin met damage: " + error_text(e))) { fence(error_text(e)); }
 				return;
 			}
 		}
@@ -1545,16 +1556,18 @@ private:
 		if (task::current() != loop_->scheduler()) { co_await task::schedule_on{loop_->scheduler()}; }
 		repairing_ = false;
 	}
-	// A damaged leader serves nothing: leadership goes to the follower the host names, else to a
-	// voter of the membership.
+	// A damaged leader serves nothing: leadership goes to a follower the host names as applied
+	// through the commit index (caught up, so not damaged: a damaged replica applies nothing),
+	// none named waits for the next try; with no host view, to a voter of the membership.
 	void hand_leadership_away() {
+		const auto s = loop_->driver().state(id_);
+		if (!s) { return; }
 		std::optional<cs::NodeId> target;
 		if (loop_->applied_past) {
 			try {
-				target = loop_->applied_past(id_, 0);
+				target = loop_->applied_past(id_, std::max<cs::Index>(s->committed, 1));
 			} catch (...) {}
-		}
-		if (const auto s = loop_->driver().state(id_); !target && s) {
+		} else {
 			for (const auto& m : s->membership.members) {
 				if (m.role == cs::MemberRole::Voter && m.incarnation != s->leader) {
 					target = m.incarnation;

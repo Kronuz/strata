@@ -166,16 +166,25 @@ A replica whose bytes fail their checks reinstalls its leader's image through th
   outstanding, and it re-delivers past the image's boundary from this replica's log. The
   acknowledgement moves consensus's applied index only; votes and commits count the log, which
   the replica holds, and the group's own applied index stays, so nothing is served from state
-  it lacks.
+  it lacks. Once the leader admits the request it sends the replica the image alone, and its
+  Core delivers nothing while the request is pending: its log stops counting toward commits
+  until the image activates.
 - **The request.** `Driver::reinstall` on the loop, one at a time, repeated each election
   timeout while damaged (`Current`: the leader ships one image per base; `NotLeader`, `Busy`). A
-  damaged leader (`LeaderMustTransfer`) hands leadership to the follower the host names
-  (`applied_past`), else to a voter of its membership, first.
+  damaged leader (`LeaderMustTransfer`) first hands leadership to a follower the host names as
+  applied through the commit index (`applied_past`): caught up, so not damaged, since a damaged
+  replica applies nothing. None named waits for the next try, so two damaged replicas never pass
+  leadership between them. A host with no view hands it to a voter of the membership.
 - **The image** stages as any install: kept bytes that fail the pin's CRC32C are fetched whole,
   so only damaged or missing files cross the lane. The activation reads every staged file back
   against its CRC32C before it moves anything; one that fails marks the replica damaged, sweeps
   the stage, and the activation still answers `activated` (consensus holds the image as its
-  base; failing it would fence the Core), so the replica asks again. A complete activation
+  base; failing it would fence the Core), so the replica asks again; its reason is the refused
+  file's, the marker kept.
+- **An owed image.** A leader still owes an image after a flight fails, and it may reach the
+  replica once another image repaired it. A sound replica stages no image at or below its
+  applied index: consensus refuses it as caught up (only a pending request installs there), so
+  validation answers at once and nothing is left staged. A complete activation
   removes the marker, durably, before it sweeps the stage; the group's recovery from the bundle
   then ends the local fence. A crash after the marker goes recovers through `resume` as any
   activation does.
@@ -229,18 +238,20 @@ it reopens damaged, a damaged index replaced by a deferred one, and reinstalls o
 segment is found by the first read that maps it, which answers `replica_damaged`, and at the
 open under `eager_segments`, ctest's `group_repair_eager`), `apply`
 and `read` (damage met while running; the read answers `replica_damaged`), `refusal` (while
-damaged, commits counting its log, it answers every read, checkpoint and write
-`replica_damaged`, serves no install and keeps its applied index while consensus's moves on;
-the only healthy replica that applied those commits is then lost and they survive), `staged` (a
+damaged, the write that damaged it and those before its request is admitted commit counting
+its log; it answers every read, checkpoint and write `replica_damaged`, serves no install and
+keeps its applied index while consensus's moves past it; the only healthy replica that applied
+those commits is then lost and they survive), `staged` (a
 staged live set file flipped before the activation is refused, and a later image repairs),
 `leader` (a damaged leader hands off, then reinstalls), `source` (a leader's segments damaged
-and never read since its reboot: a learner's request makes it pin them, the footer check marks
-it damaged, it hands off, and the learner and it install from the next leader), `deposed` (a leader that loses its
+and never read since its reboot: a learner's request makes it pin them, the pin meets the
+damage and marks it damaged, it hands off to the sound follower, and the learner and it install
+from the next leader), `deposed` (a leader that loses its
 leadership mid-flight names no install from then on, and none does once settled: every flight's
 release ends its peer's entry, review F3), and `crash` (a power cut at every
 mutation of the directory disk, then the host disk, from the damaged reboot through the settled
 repair, for a damaged manifest log on a deferred index and a damaged set file: each reboot is damaged
-or repaired, never unfenced over damaged bytes). `test/group/repair_mutants.py` holds one mutant
+or repaired, never unfenced over damaged bytes, and no stage stays once settled). `test/group/repair_mutants.py` holds one mutant
 per mechanism, each killed by the case it names; `test/group/repair_suite.sh` builds and runs
 the group tests.
 
