@@ -5112,6 +5112,7 @@ private:
 	// ends. A failure keeps the frozen buffers unwritten for the next flush.
 	void flush() {
 		await_log();
+		if (!m_.generation && buffer_size()) { commit_empty(); }  // the first manifest before any data file
 		freeze();
 		while (!frozen_.empty()) {
 			const std::size_t first = segs_.size();
@@ -5594,6 +5595,21 @@ private:
 		log_edits_ = 0;
 		rollover_owed_ = false;
 		return true;
+	}
+
+	// A deferred index's first manifest, written before its first data file so that no segment is
+	// ever on disk without a log beside it: the empty state create() commits, with the join's
+	// attributes and nothing applied, so a crash before the next commit opens it empty.
+	void commit_empty() {
+		files::log_state c = m_;
+		c.generation = std::max(next_generation_, m_.generation + 1);
+		c.next_segment = cur_.next_segment;
+		c.configured = c.mask = cur_.configured;
+		if (attributes_owed_) { c.attributes = *attributes_owed_; }
+		files::recount(c);
+		roll_over({}, std::move(c), true);
+		attributes_owed_.reset();
+		kept_files_[m_.generation] = names_of(m_, log_g_);
 	}
 
 	// D4: the edit appended at the log's end in one write and synced, after the commit's new
