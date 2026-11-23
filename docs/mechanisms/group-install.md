@@ -106,7 +106,8 @@ answered by the leader's `group::serve`).
   boundary when it is its latest one (restored, installed or published); another boundary pins
   nothing, the learner's pin fetch finds none, and its validation fails until the leader's next
   flight. One pin per bundle, held by every flight that asked for it; the last flight's
-  `SnapshotReleased` releases it. A checkpoint's `unlink_retired` stops below the lowest live
+  `SnapshotReleased` releases it. strata's release commits: short of space it stalls the chore
+  as an apply does, and repeats after `resume()`, so a full disk never fences the leader. A checkpoint's `unlink_retired` stops below the lowest live
   pin, so the set's files a pin names stay until it goes. The teardown releases what is left;
   pins a crash left in strata's manifest go at open (`release_pins`).
 - **`serve`** answers the fetch lane on any thread: a pin's own name or its files' chunks, nothing
@@ -150,7 +151,9 @@ install), and `grow_and_heal` (at 3 and 5 voters, a joiner added past every chec
 is promoted beside a voter it replaces, and that voter is removed, a leader change between each
 step; the second round replaces the leader). `test/group/install_suite.sh BUILD [regex]` builds
 and runs ctest's group tests, against a consensus checkout when CONSENSUS_DIR is set.
-`test/group/mutants.py install-silent` drops `SnapshotNeeded`: the ungated schedules do not
+`release_short_of_space` fills the leader's disk between the install's activation and the
+release: the leader stalls, unfenced, and settles once resumed (mutant `release-fences` fences it
+instead). `test/group/mutants.py install-silent` drops `SnapshotNeeded`: the ungated schedules do not
 settle.
 
 `test/group/install_test.cc` (ctest's `group_install`; `group_install_test [case]`):

@@ -834,30 +834,37 @@ void same_digests(world& w) {
 
 // A replica behind the leader's checkpoint catches up only by install: the leader names it in
 // `installs_needed` until the install ends, and it installs the bundle and applies past it.
-void install_gap(unsigned voters) {
-	context = std::to_string(voters) + " voters, a replica behind the leader's checkpoint";
-	world w(voters, 55);
-	if (!check(w.settle(), "the cluster settles")) { return; }
-	auto& l = *w.leader();
-	auto& behind = *w.nodes.at(l.id % voters + 1);
+// `behind` cut off while the others commit two writes and each checkpoints past it: whichever
+// leads has no log for it. The lowest checkpoint, or 0 if a step failed.
+cs::Index leave_behind(world& w, node& l, node& behind) {
 	w.isolated.insert(behind.id);
 	auto write = [&](const std::string& c) {
 		auto s = start(l.p->loop_ref(), l.p->g->propose(c));
 		for (int i = 0; i < 40000 && !s->done; ++i) { w.step(); }
 		return s->done && !s->error;
 	};
-	check(write("P|a|one") && write("P|b|two"), "the others commit without it");
-	// Every other replica checkpoints past it, so whichever leads has no log for it.
+	if (!check(write("P|a|one") && write("P|b|two"), "the others commit without it")) { return 0; }
 	cs::Index base = ~cs::Index(0);
 	for (auto& [id, x] : w.nodes) {
 		if (x.get() == &behind) { continue; }
 		auto k = start(x->p->loop_ref(), x->p->g->checkpoint());
 		for (int i = 0; i < 40000 && !k->done; ++i) { w.step(); }
-		if (!check(k->done && !k->error && k->value, "node " + std::to_string(id) + "'s checkpoint: " + what(k->error))) { return; }
+		if (!check(k->done && !k->error && k->value, "node " + std::to_string(id) + "'s checkpoint: " + what(k->error))) { return 0; }
 		base = std::min(base, k->value->through);
 	}
-	if (!check(behind.p->g->applied() < base, "the checkpoints pass the isolated replica")) { return; }
+	if (!check(behind.p->g->applied() < base, "the checkpoints pass the isolated replica")) { return 0; }
 	w.isolated.clear();
+	return base;
+}
+
+void install_gap(unsigned voters) {
+	context = std::to_string(voters) + " voters, a replica behind the leader's checkpoint";
+	world w(voters, 55);
+	if (!check(w.settle(), "the cluster settles")) { return; }
+	auto& l = *w.leader();
+	auto& behind = *w.nodes.at(l.id % voters + 1);
+	const auto base = leave_behind(w, l, behind);
+	if (!base) { return; }
 	std::set<cs::NodeId> named;
 	for (int i = 0; i < 20000 && named.empty(); ++i) {
 		w.step();
@@ -869,6 +876,28 @@ void install_gap(unsigned voters) {
 	if (!check(w.settle(), "the cluster settles by the install")) { return; }
 	check(behind.p->g->installs() == 1 && behind.p->g->installed_at() >= base, "the replica installs a bundle at or past the checkpoints: " + std::to_string(behind.p->g->installs()) + " at " + std::to_string(behind.p->g->installed_at()));
 	for (auto& [id, x] : w.nodes) { check(x->p->g->installs_needed().empty(), "node " + std::to_string(id) + " names no install once it ended"); }
+	same_digests(w);
+}
+
+// The leader's disk fills between the install's activation and its pin's release: the release
+// stalls the leader's chore, as an apply short of space does, and never fences it; once the
+// host frees space and resumes it, the release commits and the cluster settles.
+void release_short_of_space(unsigned voters) {
+	context = std::to_string(voters) + " voters, the leader's pin release short of space";
+	world w(voters, 57);
+	if (!check(w.settle(), "the cluster settles")) { return; }
+	auto& l = *w.leader();
+	auto& behind = *w.nodes.at(l.id % voters + 1);
+	if (!leave_behind(w, l, behind)) { return; }
+	for (int i = 0; i < 200000 && behind.p->g->installs() == 0; ++i) { w.step(); }
+	if (!check(behind.p->g->installs() == 1 && !l.p->g->installs_needed().empty(), "the replica activates the install before the leader hears it ended")) { return; }
+	l.dir_disk.set_capacity(l.dir_disk.used());
+	for (int i = 0; i < 200000 && !l.p->g->stalled() && !l.p->g->fenced(); ++i) { w.step(); }
+	check(l.p->g->stalled() && !l.p->g->fenced(), "the leader's release stalls on space, unfenced: " + l.p->g->fence_reason());
+	l.dir_disk.set_capacity(~std::uint64_t(0));
+	l.p->g->resume();
+	if (!check(w.settle(), "the cluster settles once the leader resumes")) { return; }
+	check(!l.p->g->stalled() && l.p->g->installs_needed().empty(), "the leader released the pin and names no install");
 	same_digests(w);
 }
 
@@ -1347,6 +1376,7 @@ int main(int argc, char** argv) {
 	deposed_read(5);
 	install_gap(3);
 	install_gap(5);
+	release_short_of_space(3);
 	grow_and_heal(3);
 	grow_and_heal(5);
 	write_paths(3, 8);

@@ -406,14 +406,17 @@ public:
 			std::lock_guard lock(mu_);
 			installs_needed_.insert(peer);
 		}
-		push(new notice_work([this, peer, key] { pin_for(peer, key); }));
+		push(new notice_work([this, peer, key] {
+			pin_for(peer, key);
+			return step::done;
+		}));
 	}
 	void install_released(cs::NodeId peer, cs::SnapshotKey key, cs::SnapshotReleaseReason reason) override {
 		if (reason == cs::SnapshotReleaseReason::Installed || reason == cs::SnapshotReleaseReason::CaughtUp) {
 			std::lock_guard lock(mu_);
 			installs_needed_.erase(peer);
 		}
-		push(new notice_work([this, peer, key] { unpin_for(peer, key); }));
+		push(new notice_work([this, peer, key, gone = std::shared_ptr<pinned>{}]() mutable { return unpin_for(peer, key, gone); }));
 	}
 	// The learner: the image is the leader's bundle; stage its pin, then answer.
 	void validate(cs::Token token, cs::LogBoundary boundary, cs::NodeId source, jn::ArtifactReader& image) override {
@@ -506,14 +509,11 @@ private:
 		std::size_t next = 0;
 	};
 
-	// A loop notice the chore carries out between entries, the queue's.
+	// A loop notice the chore carries out between entries, the queue's; a stall repeats it.
 	struct notice_work final : work {
-		explicit notice_work(std::function<void()> f) : fn(std::move(f)) {}
-		step run() override {
-			fn();
-			return step::done;
-		}
-		std::function<void()> fn;
+		explicit notice_work(std::function<step()> f) : fn(std::move(f)) {}
+		step run() override { return fn(); }
+		std::function<step()> fn;
 	};
 
 	// A call the chore runs for an awaiting task, which resumes on its own scheduler.
@@ -1001,20 +1001,27 @@ private:
 		pins_.emplace(key.boundary.index, std::move(p));
 	}
 	// The flight ended: its pin goes with its last flight, and the set's retired files it held.
-	void unpin_for(cs::NodeId peer, cs::SnapshotKey key) {
-		std::shared_ptr<pinned> gone;
-		{
+	// strata's release commits: short of space it stalls as an apply does, `gone` kept for the
+	// retry after resume().
+	step unpin_for(cs::NodeId peer, cs::SnapshotKey key, std::shared_ptr<pinned>& gone) {
+		if (!gone) {
 			std::lock_guard lock(mu_);
 			auto it = pins_.find(key.boundary.index);
-			if (it == pins_.end()) { return; }
+			if (it == pins_.end()) { return step::done; }
 			it->second->flights.erase({peer, key.transfer});
-			if (!it->second->flights.empty()) { return; }
+			if (!it->second->flights.empty()) { return step::done; }
 			gone = std::move(it->second);
 			pins_.erase(it);
 		}
-		if (!ix_) { return; }
-		release_pin(*ix_, gone->pin);
+		if (!ix_) { return step::done; }
+		try {
+			release_pin(*ix_, gone->pin);
+		} catch (const std::system_error& x) {
+			if (x.code() == std::errc::no_space_on_device) { return step::stall; }
+			throw;
+		}
 		files_.unlink_retired(unlink_through(published_.load()));
+		return step::done;
 	}
 	// The teardown's: every pin released while strata is open.
 	void release_pins_held() {
