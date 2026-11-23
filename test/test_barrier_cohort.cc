@@ -96,6 +96,9 @@ void run(const config& c) {
 		while (s->turn()) {}  // the joins' records
 	}
 	log_fs.sync_latency(barrier);
+	// Served before any writer waits: a wait that finds no loop yet writes its turn inline,
+	// racing the loop's first turn.
+	for (auto& s : sealers) { s->served(true); }
 	std::vector<std::thread> loops;
 	for (auto& s : sealers) { loops.emplace_back([s = s.get()] { s->serve(); }); }
 
