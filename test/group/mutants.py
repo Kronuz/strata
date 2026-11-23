@@ -25,6 +25,7 @@ INDEX = "include/strata/core/index.hh"
 CATALOG = "include/strata/core/catalog.hh"
 FOOTPRINT = "test/group/footprint_test.cc"
 WITNESS = "include/strata/group/witness.hh"
+INSTALL = "include/strata/group/install.hh"
 
 # name: [(file, old, new), ...]
 MUTANTS = {
@@ -130,6 +131,16 @@ MUTANTS = {
     "release-fences": [(GROUP,
         "\t\t\t\trelease_pin(*ix_, gone->pin);\n\t\t\t} catch (const std::system_error& x) {\n\t\t\t\tif (x.code() == std::errc::no_space_on_device) { return step::stall; }\n",
         "\t\t\t\trelease_pin(*ix_, gone->pin);\n\t\t\t} catch (const std::system_error& x) {\n")],
+    # Recovery releases the pins an earlier process left, committing strata: a full disk fails
+    # the open (--target=group_voters_test 0: reopen_short_of_space).
+    "release-at-open": [(GROUP,
+        "\t\tauto stale = held_pins(files_.io());\n",
+        "\t\tfor (const auto g : held_pins(files_.io())) { ix_->release(g); }\n\t\tstd::vector<std::uint64_t> stale;\n")],
+    # A deferred index installs without its first commit: a crash leaves segment copies with no
+    # manifest log, which strata refuses to open (--target=group_voters_test 0: deferred_learner_crash).
+    "install-onto-deferred": [(INSTALL,
+        "\t\tif (!index_detail::log_holding(dir)) { ix.commit(); }\n",
+        "")],
     # The pin goes with its flight's end, not when a later bundle supersedes it: the learner's
     # fetch outruns the leader's chore at every flight (--target=group_voters_test 0: install_gap).
     "pin-per-flight": [(GROUP,

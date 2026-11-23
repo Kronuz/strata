@@ -479,6 +479,110 @@ void release_short_of_space(unsigned voters) {
 	same_digests(w);
 }
 
+// The strata pins a node's manifest keeps.
+std::size_t pins_of(node& x) {
+	fl::io io(x.dir_disk);
+	return strata::index_detail::log_holding(io) ? strata::index_detail::read_state(io).pins.size() : 0;
+}
+
+// A leader that served an install keeps its bundle's pin in strata's manifest and restarts on a
+// full disk: it opens, since recovery releases nothing; the release waits on the chore and
+// stalls there unfenced, as an apply short of space does; once the host frees space and resumes
+// it, the pin goes and the cluster settles.
+void reopen_short_of_space(unsigned voters) {
+	context = std::to_string(voters) + " voters, a leader holding a pin reopens on a full disk";
+	world w(voters, 57);
+	if (!check(w.settle(), "the cluster settles")) { return; }
+	auto& l = *w.leader();
+	auto& behind = *w.nodes.at(l.id % voters + 1);
+	if (!leave_behind(w, l, behind)) { return; }
+	if (!check(w.settle() && behind.p->g->installs() == 1, "the cluster settles by the install")) { return; }
+	auto* x = w.leader();
+	if (!check(x && pins_of(*x) == 1, "the leader holds its bundle's pin")) { return; }
+	x->dir_disk.set_capacity(x->dir_disk.used());
+	w.shut(*x, false);
+	w.boot(*x);
+	for (int i = 0; i < 400000 && !x->p->opening->done; ++i) { w.step(); }
+	if (!check(x->open(), "the node opens on a full disk: " + what(x->p->opening->error))) {
+		x->dir_disk.set_capacity(~std::uint64_t(0));
+		return;
+	}
+	for (int i = 0; i < 200000 && !x->p->g->stalled() && !x->p->g->fenced(); ++i) { w.step(); }
+	check(x->p->g->stalled() && !x->p->g->fenced(), "the pin's release stalls on space, unfenced: " + x->p->g->fence_reason());
+	check(pins_of(*x) == 1, "the pin stays while space is short");
+	x->dir_disk.set_capacity(~std::uint64_t(0));
+	x->p->g->resume();
+	if (!check(w.settle(), "the cluster settles once space is freed")) { return; }
+	check(pins_of(*x) == 0, "the pin is released once resumed: " + std::to_string(pins_of(*x)));
+	same_digests(w);
+}
+
+// The install's staging names left in a node's directory.
+std::string staging_names(node& x) {
+	std::string out;
+	fl::io io(x.dir_disk);
+	for (auto c = io.scan_directory(); auto n = c->next();) {
+		if (n->starts_with("is.") || n->starts_with("ia.") || *n == "ip" || *n == "ip.tmp") { out += " " + *n; }
+	}
+	return out;
+}
+
+// A power cut on the learner's directory disk after `k` mutations from its rejoin, its strata
+// index still deferred (it never checkpointed); ~0 is the dry run, which returns the mutations
+// of the whole install in `used`. False once the install settles before the cut.
+bool deferred_cut_at(unsigned voters, std::uint64_t k, std::uint64_t* used) {
+	context = std::to_string(voters) + " voters, a deferred learner's power cut after " + std::to_string(k) + " mutations";
+	world w(voters, 55);
+	if (!check(w.settle(), "the cluster settles")) { return false; }
+	auto& l = *w.leader();
+	auto& behind = *w.nodes.at(l.id % voters + 1);
+	if (!leave_behind(w, l, behind)) { return false; }
+	{
+		fl::io io(behind.dir_disk);
+		if (!check(!strata::index_detail::log_holding(io), "the learner's index is deferred")) { return false; }
+	}
+	auto& fs = behind.dir_disk;
+	const auto m0 = fs.mutations();
+	if (k == ~std::uint64_t(0)) {
+		check(w.settle() && behind.p->g->installs() == 1, "the dry run settles by the install");
+		*used = fs.mutations() - m0;
+		return false;
+	}
+	fs.power_off_after(k);
+	bool cut = false;
+	for (int i = 0; i < 400000 && !cut; ++i) {
+		w.step();
+		cut = fs.powered_off();
+		if (!cut && i % 1000 == 999 && behind.up() && behind.p->g->installs() >= 1 && fs.mutations() - m0 < k && w.settle(false)) { break; }
+	}
+	if (!cut) {
+		fs.power_on();
+		return false;
+	}
+	++w.crashes;
+	w.shut(behind, true);
+	try {
+		if (!check(w.settle(), "the cluster settles after the learner's power cut")) { return true; }
+	} catch (const std::exception& e) {
+		// A reboot that throws leaves a node the world cannot shut down.
+		check(false, std::string("the learner's reboot throws: ") + e.what());
+		std::fflush(stdout);
+		std::_Exit(1);
+	}
+	same_digests(w);
+	const auto left = staging_names(*w.nodes.at(behind.id));
+	check(left.empty(), "no staging name stays once settled:" + left);
+	return true;
+}
+void deferred_learner_crash(unsigned voters) {
+	std::uint64_t used = 0, cut = 0;
+	deferred_cut_at(voters, ~std::uint64_t(0), &used);
+	for (std::uint64_t k = 0; k <= used; ++k) { cut += deferred_cut_at(voters, k, nullptr); }
+	context = std::to_string(voters) + " voters, a deferred learner's power cuts";
+	check(used > 20 && 2 * cut >= used, "the cuts fall inside the install's " + std::to_string(used) + " mutations: " + std::to_string(cut));
+	std::printf("voters: deferred learner, %llu power cuts over %llu mutations\n", (unsigned long long)cut, (unsigned long long)used);
+}
+
 // --- A3: the write path (Q10 (b), PLAN.md D106) --------------------------------------------
 
 using writer_type = sg::writer<group_type>;
@@ -874,6 +978,8 @@ int main(int argc, char** argv) {
 	install_gap(5);
 	release_short_of_space(3);
 	close_mid_install(3);
+	reopen_short_of_space(3);
+	deferred_learner_crash(3);
 	grow_and_heal(3);
 	grow_and_heal(5);
 	write_paths(3, 8);

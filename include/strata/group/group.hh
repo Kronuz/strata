@@ -1081,9 +1081,16 @@ private:
 	// loaded. Core then delivers every committed entry above P_b: file effects re-run, strata
 	// skips at or below P_H.
 	void recover(std::optional<bundle> restored) {
-		// A pin outlives its process in strata's manifest; no flight does.
-		release_pins(*ix_, files_.io());
 		adopt(restored.value_or(bundle{}), restored.has_value());
+		// A pin outlives its process in strata's manifest; no flight does. Its release commits,
+		// so it waits on the chore, where short of space it stalls and never fails the open.
+		auto stale = held_pins(files_.io());
+		if (stale.empty()) { return; }
+		{
+			std::lock_guard lock(mu_);
+			made_sources().stale = std::move(stale);
+		}
+		release_later();
 	}
 	// The replica as bundle `b` names it, strata open: a complete stage for `b` activates first
 	// (install's resume), then strata at P_H >= P_b, the set at the bundle's lengths, the state.
@@ -1119,13 +1126,14 @@ private:
 	struct sources {
 		std::set<cs::NodeId> needed;                         // peers below the base, until their install ends
 		std::map<cs::Index, std::shared_ptr<pinned>> pins;  // by P_b
+		std::vector<std::uint64_t> stale;                    // generations an earlier process pinned
 	};
 	sources& made_sources() {
 		if (!sources_) { sources_ = std::make_unique<sources>(); }
 		return *sources_;
 	}
 	void trim_sources() {
-		if (sources_ && sources_->needed.empty() && sources_->pins.empty()) { sources_.reset(); }
+		if (sources_ && sources_->needed.empty() && sources_->pins.empty() && sources_->stale.empty()) { sources_.reset(); }
 	}
 	static std::string read_image(jn::ArtifactReader& r) {
 		std::string bytes(std::size_t(r.descriptor().length), '\0');
@@ -1166,10 +1174,27 @@ private:
 		if (!sources_) { return; }
 		if (auto it = sources_->pins.find(key.boundary.index); it != sources_->pins.end()) { it->second->flights.erase({peer, key.transfer}); }
 	}
-	// Releases each pin no flight holds whose bundle a later one superseded, then the set's
-	// retired files it held. strata's release commits: short of space it stalls as an apply
-	// does, the pin kept for the retry after resume().
+	// Releases the pins an earlier process left, then each pin no flight holds whose bundle a
+	// later one superseded, then the set's retired files it held. strata's release commits:
+	// short of space it stalls as an apply does, the pin kept for the retry after resume().
 	step release_superseded() {
+		for (;;) {
+			std::uint64_t generation = 0;
+			{
+				std::lock_guard lock(mu_);
+				if (!sources_ || sources_->stale.empty()) { break; }
+				generation = sources_->stale.back();
+			}
+			try {
+				ix_->release(generation);
+			} catch (const std::system_error& x) {
+				if (x.code() == std::errc::no_space_on_device) { return step::stall; }
+				throw;
+			}
+			std::lock_guard lock(mu_);
+			if (sources_ && !sources_->stale.empty()) { sources_->stale.pop_back(); }
+			trim_sources();
+		}
 		for (;;) {
 			std::shared_ptr<pinned> gone;
 			{
@@ -1228,17 +1253,22 @@ private:
 		}
 	};
 	// The close's, once its row closed: every pin released; one that fails stays in strata's
-	// manifest for the next recover's release_pins.
+	// manifest for the next open to release.
 	void release_pins_held() {
 		std::map<cs::Index, std::shared_ptr<pinned>> held;
+		std::vector<std::uint64_t> stale;
 		{
 			std::lock_guard lock(mu_);
-			if (sources_) { held.swap(sources_->pins); }
+			if (sources_) {
+				held.swap(sources_->pins);
+				stale.swap(sources_->stale);
+			}
 			trim_sources();
 		}
-		for (const auto& [at, p] : held) {
+		for (const auto& [at, p] : held) { stale.push_back(p->pin.generation); }
+		for (const auto g : stale) {
 			try {
-				release_pin(*ix_, p->pin);
+				ix_->release(g);
 			} catch (...) {}
 		}
 	}

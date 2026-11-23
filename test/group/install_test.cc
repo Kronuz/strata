@@ -501,6 +501,69 @@ void crash() {
 	std::cout << "crash: activation " << activation << " operations, each crashed and recovered\n";
 }
 
+// The crash case on a fresh learner, its index deferred (no manifest log until its first
+// commit), as group's grow and replace paths install: a crash at every mutating operation from
+// the stage through the activating recovery leaves the empty replica or the complete new one.
+void deferred() {
+	auto& l = leader();
+	const auto empty_digest = group_test::replay(the_log, 0);
+	const auto new_digest = group_test::replay(the_log, last);
+	std::uint64_t total = 0;
+	{
+		replica r;
+		r.recover(std::nullopt);
+		const auto before = r.fs.mutations();
+		(void)run(sg::stage(r.io, l.pin, source{}.fetch()));
+		r.recover(l.b);
+		total = r.fs.mutations() - before;
+	}
+	check(total > 20, "the deferred install mutates " + std::to_string(total) + " times");
+	std::uint64_t runs = 0, olds = 0, news = 0;
+	for (std::uint64_t n = 0; n <= total; ++n) {
+		for (const int power : {0, 1, 2, 3, 4}) {
+			for (const bool persists : {true, false}) {
+				replica r;
+				r.recover(std::nullopt);
+				check(!strata::index_detail::log_holding(r.io), "the fresh learner's index is deferred");
+				std::optional<sg::bundle> restored;
+				r.fs.power_off_after(n);
+				try {
+					(void)run(sg::stage(r.io, l.pin, source{}.fetch()));
+					if (persists) {
+						restored = l.b;
+						r.recover(restored);
+					}
+				} catch (...) {
+				}
+				r.stop();
+				if (power) {
+					r.fs.crash(n * 43 + std::uint64_t(power) * 2 + (persists ? 1 : 0));
+				} else {
+					r.fs.power_on();
+				}
+				const std::string what = "deferred crash at " + std::to_string(n) + (power ? " (power, seed " + std::to_string(power) + ")" : " (process)") + (persists ? "" : ", not persisted");
+				try {
+					r.recover(restored);
+					if (!restored) {
+						check(r.of() == empty_digest, what + ": the empty replica");
+						++olds;
+					} else {
+						r.apply(last);
+						check(r.of() == new_digest, what + ": the complete new one");
+						++news;
+					}
+					check(!restored || !sg::staged(r.io), what + ": no activation left pending");
+				} catch (const std::exception& e) {
+					check(false, what + ": recovery failed: " + e.what());
+				}
+				++runs;
+			}
+		}
+	}
+	check(olds > 0 && news > 0, "both outcomes reached: " + std::to_string(olds) + " empty, " + std::to_string(news) + " new of " + std::to_string(runs));
+	std::cout << "deferred: " << runs << " runs over " << total << " operations, " << olds << " empty, " << news << " new\n";
+}
+
 // Fetches answered on other threads, as the transport's loop answers them: the stage resumes on
 // its own scheduler. Run under TSan.
 void threads() {
@@ -564,7 +627,7 @@ void threads() {
 int main(int argc, char** argv) {
 	const std::string only = argc > 1 ? argv[1] : "";
 	const std::vector<std::pair<std::string, void (*)()>> cases = {
-		{"values", values}, {"retry", retry}, {"held", held}, {"damaged", damaged}, {"threads", threads}, {"crash", crash}};
+		{"values", values}, {"retry", retry}, {"held", held}, {"damaged", damaged}, {"threads", threads}, {"crash", crash}, {"deferred", deferred}};
 	try {
 		for (const auto& [name, fn] : cases) {
 			if (only.empty() || only == name) {

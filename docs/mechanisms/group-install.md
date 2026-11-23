@@ -39,7 +39,7 @@ The pin's bytes: magic and version, G, the bundle, the two lists (name, length, 
 CRC32C over all of it. `decode_pin` refuses a strata name that is not a manifest or segment
 name, a set name the bundle does not hold at that length and CRC32C, a duplicate, and a damaged
 pin. A strata pin lives in the manifest, so it survives the leader's process; no install does,
-and `release_pins` drops them all when the leader reopens.
+so a reopened leader releases every pin its manifest keeps (`held_pins`, see the binding).
 
 ## Serving
 
@@ -74,8 +74,11 @@ consensus persists the install (the bundle becomes the replica's checkpoint) onl
 stage completes; then `activate` makes the replica the pin's:
 
 1. strata installs generation G from the staged files (`index::install` through a view of the
-   `is.` names): the old content or the new across a crash. The staged strata files go next,
-   the manifest log first, so a repeat does not install again.
+   `is.` names): the old content or the new across a crash. A deferred index (a fresh learner's,
+   which never committed) commits its empty state first: install writes its segment copies
+   before its manifest, and a directory holding segments with no manifest log is damage to
+   strata's open, not an interrupted create. The staged strata files go next, the manifest log
+   first, so a repeat does not install again.
 2. Each staged set file replaces the replica's own.
 3. The marker goes, then every staging name.
 
@@ -113,8 +116,9 @@ answered by the leader's `group::serve`).
   leader. A checkpoint's `unlink_retired` stops below the lowest live pin, so the set's files a
   pin names stay until it goes: the latest bundle's pin keeps them one checkpoint longer. A
   close releases what is left on the chore once its consensus row is closed (the index is the
-  catalog's and stays open, D169); pins a crash or a fenced close left in strata's manifest go at
-  the next open (`release_pins`).
+  catalog's and stays open, D169); pins a crash or a fenced close left in strata's manifest go
+  after the next open: recovery reads them (`held_pins`) and queues their release on the chore,
+  where short of space it stalls as above, so a full disk never fails the open.
 - **`serve`** answers the fetch lane on any thread: a pin's own name or its files' chunks, nothing
   for a pin released or once closed. The directory is borrowed, so the teardown waits for every
   serve in flight before close returns it to the host.
@@ -163,7 +167,13 @@ and runs ctest's group tests, against a consensus checkout when CONSENSUS_DIR is
 pin: the release stalls the leader, unfenced, and it settles once resumed (mutant
 `release-fences` fences it instead). Mutant `pin-per-flight` releases a pin at its flight's end:
 `install_gap` does not settle. `test/group/mutants.py install-silent` drops `SnapshotNeeded`: the ungated schedules do not
-settle.
+settle. `reopen_short_of_space` restarts a leader holding its bundle's pin on a full disk: it
+opens, the pin's release stalls, and once resumed the pin goes and the cluster settles (mutant
+`release-at-open` releases at recovery and fails the open). `deferred_learner_crash` cuts the
+power of a learner whose index is deferred at every mutation of its directory from its rejoin
+through the settled install: each reboot settles with equal digests and no staging name (mutant
+`install-onto-deferred`, which installs without the first commit, leaves a directory strata
+refuses to open).
 
 `test/group/install_test.cc` (ctest's `group_install`; `group_install_test [case]`):
 `values` (the pin, the serve's bounds, a fresh learner fetching every byte once in
@@ -173,5 +183,6 @@ the bytes not staged), `held` (an old replica keeps its files and fetches the re
 flipped byte in a held sealed volume: that file fetched whole), `crash` (a process crash and a
 power loss at every mutating operation from the stage through the activating recovery, persisted
 or not, then the activating recovery crashed at each of its own: old replica or complete new
-one), `threads` (fetches answered on four threads; TSan). `test/group/install_mutants.py` holds
+one), `deferred` (the same crashes on a fresh learner whose index is deferred: the empty replica
+or the complete new one), `threads` (fetches answered on four threads; TSan). `test/group/install_mutants.py` holds
 one mutant per guard, each killed by the case it names.
