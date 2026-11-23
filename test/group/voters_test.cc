@@ -412,6 +412,45 @@ void install_gap(unsigned voters) {
 	same_digests(w);
 }
 
+// A learner's close while its stage waits on the pin fetch: the teardown waits for the stage
+// task, which touches the group until it answers, so the close ends only once the fetch does.
+// The learner is fenced first, so its close skips the checkpoint a learner below the base
+// cannot cover.
+void close_mid_install(unsigned voters) {
+	context = std::to_string(voters) + " voters, a learner closed mid-install";
+	world w(voters, 59);
+	if (!check(w.settle(), "the cluster settles")) { return; }
+	auto& l = *w.leader();
+	auto& behind = *w.nodes.at(l.id % voters + 1);
+	if (!leave_behind(w, l, behind)) { return; }
+	const auto pin_pending = [&] {
+		return std::any_of(w.fetches.begin(), w.fetches.end(), [&](const fetch_request& f) { return f.from == behind.id && f.name.ends_with("/pin"); });
+	};
+	for (int i = 0; i < 40000 && !pin_pending(); ++i) { w.step(); }
+	if (!check(pin_pending(), "the learner fetches the leader's pin")) { return; }
+	behind.p->g->fenced("the test fences the learner mid-install");
+	auto k = start(behind.p->loop_ref(), behind.p->g->close());
+	const auto pump = [&] {
+		for (int i = 0; i < 2000 && !k->done; ++i) {
+			while (behind.p->held.held()) {
+				behind.p->held.complete(behind.p->held.tickets().front());
+				behind.run();
+			}
+			behind.p->chore_s.run();
+			behind.p->loop_s.advance(ms);
+			behind.run();
+		}
+	};
+	pump();
+	check(!k->done, "the close waits for the stage, its pin fetch pending");
+	w.fail_fetches(behind.id);
+	pump();
+	check(k->done && k->error && what(k->error).find("closed fenced") != std::string::npos, "the close ends with the stage, fenced: " + what(k->error));
+	w.shut(behind, false);
+	if (!check(w.settle(), "the cluster settles once the learner restarts")) { return; }
+	same_digests(w);
+}
+
 // An install's pin stays with the leader's latest bundle; the leader's next checkpoint
 // supersedes it, and its disk fills before the release: the release stalls the chore, as an
 // apply short of space does, and never fences it; once the host frees space and resumes it,
@@ -834,6 +873,7 @@ int main(int argc, char** argv) {
 	install_gap(3);
 	install_gap(5);
 	release_short_of_space(3);
+	close_mid_install(3);
 	grow_and_heal(3);
 	grow_and_heal(5);
 	write_paths(3, 8);

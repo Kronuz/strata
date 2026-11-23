@@ -120,6 +120,11 @@ MUTANTS = {
     "witness-refuses-image": [(WITNESS,
         "\t\tloop_->driver().validated(id_, token);\n",
         "\t\tloop_->driver().validation_failed(id_, token);\n")],
+    # The teardown waits for the chore alone, not the learner's install tasks: a close returns
+    # while a stage still touches the group (--target=group_voters_test 0: close_mid_install).
+    "close-skips-install-tasks": [
+        (GROUP, "\t\t\treturn !self->running_ && !self->tasks_;\n", "\t\t\treturn !self->running_;\n"),
+        (GROUP, "\t\t\tif (!self->running_ && !self->tasks_) { return false; }\n", "\t\t\tif (!self->running_) { return false; }\n")],
     # A pin release short of space fences the leader instead of stalling its chore
     # (--target=group_voters_test 0: release_short_of_space).
     "release-fences": [(GROUP,

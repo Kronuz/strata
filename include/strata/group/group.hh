@@ -482,6 +482,7 @@ public:
 			loop_->driver().validation_failed(id_, token);
 			return;
 		}
+		started_task();
 		task::spawn(loop_->scheduler(), stage_image(std::move(*b), source, token));
 	}
 	// consensus persisted the install: the replica becomes its bundle, on the chore after what
@@ -495,6 +496,7 @@ public:
 			loop_->driver().activation_failed(id_, token, "strata::group: the install's image is not a bundle at its boundary");
 			return;
 		}
+		started_task();
 		task::spawn(loop_->scheduler(), activate_image(std::move(*b), token));
 	}
 
@@ -607,7 +609,8 @@ private:
 			if (raw->error) { std::rethrow_exception(raw->error); }
 		}
 	};
-	// Resumes once the chore is idle: no item running, none to come once the group refuses them.
+	// Resumes once the chore is idle: no item running, none to come once the group refuses them,
+	// and no install task of the group's in flight (they hold the chore and touch the directory).
 	struct idle_awaiter {
 		group* self;
 		std::coroutine_handle<> handle;
@@ -615,13 +618,13 @@ private:
 		idle_awaiter* next = nullptr;
 		bool await_ready() const {
 			std::lock_guard lock(self->mu_);
-			return !self->running_;
+			return !self->running_ && !self->tasks_;
 		}
 		bool await_suspend(std::coroutine_handle<> h) {
 			handle = h;
 			home = task::current();
 			std::lock_guard lock(self->mu_);
-			if (!self->running_) { return false; }
+			if (!self->running_ && !self->tasks_) { return false; }
 			next = std::exchange(self->idle_, this);
 			return true;
 		}
@@ -757,7 +760,7 @@ private:
 				if (fenced_.load() || closed_) { left = queue_.take(false); }
 				if (queue_.empty() || stalled_ || hold_.load() || installing_.load()) {
 					running_ = false;
-					idle = std::exchange(idle_, nullptr);
+					if (!tasks_) { idle = std::exchange(idle_, nullptr); }
 				} else {
 					w = queue_.front();
 				}
@@ -1196,6 +1199,26 @@ private:
 	void release_later() {
 		push(new notice_work([this] { return release_superseded(); }));
 	}
+	// A learner's install tasks (stage, activation), counted on the loop before each starts; the
+	// scope's end is the task's last touch of the group, so a teardown it wakes may destroy it.
+	void started_task() {
+		std::lock_guard lock(mu_);
+		++tasks_;
+	}
+	struct task_scope {
+		group* self;
+		~task_scope() {
+			idle_awaiter* idle = nullptr;
+			{
+				std::lock_guard lock(self->mu_);
+				if (!--self->tasks_ && !self->running_) { idle = std::exchange(self->idle_, nullptr); }
+			}
+			while (idle) {
+				auto* i = std::exchange(idle, idle->next);
+				i->home.post(i->handle);
+			}
+		}
+	};
 	// A serve in flight, counted while it may read the directory.
 	struct serve_scope {
 		std::atomic<unsigned>& n;
@@ -1228,6 +1251,7 @@ private:
 	// alone (apply waits behind it), then the answer on the loop. A failure answers
 	// validation_failed with what was staged kept, so the leader's retry fetches the rest.
 	task::task<void> stage_image(bundle image, cs::NodeId source, cs::Token token) {
+		const task_scope counted{this};
 		bool ok = false;
 		try {
 			fetcher fetch = [l = loop_, id = id_, source](std::string name, fetch_done done) { l->fetch(id, source, std::move(name), std::move(done)); };
@@ -1253,6 +1277,7 @@ private:
 	}
 	// Activation on the chore, then the answer on the loop; a failure fences the replica.
 	task::task<void> activate_image(bundle b, cs::Token token) {
+		const task_scope counted{this};
 		std::optional<std::string> failed;
 		try {
 			co_await on_chore([this, &b] {
@@ -1267,6 +1292,7 @@ private:
 			loop_->driver().activated(id_, token);
 			co_return;
 		}
+		if (torn_down()) { co_return; }  // a close refused it: the row is closed, the group not damaged
 		fence_local(*failed);
 		loop_->driver().activation_failed(id_, token, *failed);
 	}
@@ -1402,6 +1428,7 @@ private:
 	std::multiset<cs::Index> outstanding_;  // the `since` of each proposal not yet registered
 	std::unique_ptr<sources> sources_;
 	std::atomic<bool> installing_{false};                // a stage holds the chore
+	unsigned tasks_ = 0;                                  // install tasks in flight, under mu_
 	mutable std::atomic<unsigned> serving_{0};            // serves reading the directory
 	std::atomic<std::uint64_t> installs_{0};
 	std::atomic<cs::Index> applied_{0}, readable_at_{0}, published_{0}, installed_at_{0};  // published_: the last bundle's P_b

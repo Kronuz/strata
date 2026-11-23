@@ -127,6 +127,8 @@ answered by the leader's `group::serve`).
   the set and the state from the bundle; then `activated`, and consensus delivers past the
   boundary. A failure fences the replica (`activation_failed`). A crash between consensus's
   persist and `activated` recovers through the same `adopt`.
+- **A close** waits for the learner's stage and activation tasks as for the chore: its teardown
+  ends once neither runs, so the host may close the index and destroy the group on return.
 
 ## What it costs
 
