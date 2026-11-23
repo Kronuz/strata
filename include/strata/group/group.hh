@@ -425,11 +425,15 @@ public:
 		std::lock_guard lock(mu_);
 		return damage_reason_;
 	}
-	// Peers this leader's log no longer reaches, until their install ends (installed or caught
-	// up): each installs this leader's latest bundle from its pin.
+	// Peers this leader's log no longer reaches, while an install flight to each is in progress:
+	// each installs this leader's latest bundle from its pin.
 	std::set<cs::NodeId> installs_needed() const {
 		std::lock_guard lock(mu_);
-		return sources_ ? sources_->needed : std::set<cs::NodeId>{};
+		std::set<cs::NodeId> out;
+		if (sources_) {
+			for (const auto& [peer, transfer] : sources_->needed) { out.insert(peer); }
+		}
+		return out;
 	}
 	std::string fence_reason() const {
 		std::lock_guard lock(mu_);
@@ -481,17 +485,21 @@ public:
 	void install_needed(cs::NodeId peer, cs::SnapshotKey key) override {
 		{
 			std::lock_guard lock(mu_);
-			made_sources().needed.insert(peer);
+			made_sources().needed[peer] = key.transfer;
 		}
 		push(new notice_work([this, peer, key] {
 			pin_for(peer, key);
 			return step::done;
 		}));
 	}
-	void install_released(cs::NodeId peer, cs::SnapshotKey key, cs::SnapshotReleaseReason reason) override {
-		if (reason == cs::SnapshotReleaseReason::Installed || reason == cs::SnapshotReleaseReason::CaughtUp) {
+	void install_released(cs::NodeId peer, cs::SnapshotKey key, cs::SnapshotReleaseReason) override {
+		// Every flight ends in one release, whatever its reason (a lost leadership's too); a retry
+		// is a new flight, which names the peer again.
+		{
 			std::lock_guard lock(mu_);
-			if (sources_) { sources_->needed.erase(peer); }
+			if (sources_) {
+				if (auto it = sources_->needed.find(peer); it != sources_->needed.end() && it->second == key.transfer) { sources_->needed.erase(it); }
+			}
 			trim_sources();
 		}
 		push(new notice_work([this, peer, key, ended = false]() mutable {
@@ -1205,7 +1213,7 @@ private:
 	// A leader's install state, made at its first install notice and freed once it holds
 	// nothing, so an idle group carries one pointer for it. Under mu_.
 	struct sources {
-		std::set<cs::NodeId> needed;                         // peers below the base, until their install ends
+		std::map<cs::NodeId, cs::Token> needed;              // peers below the base, by their flight in progress
 		std::map<cs::Index, std::shared_ptr<pinned>> pins;  // by P_b
 		std::vector<std::uint64_t> stale;                    // generations an earlier process pinned
 	};

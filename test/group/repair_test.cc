@@ -4,7 +4,10 @@
 // leader's image through install's path (consensus's Driver::reinstall).
 //   segment, manifest, file: a stopped follower's segment, manifest log or sealed set file has a
 //     flipped byte; it reopens damaged (a damaged index quarantined, a deferred one in its
-//     place), reinstalls once at or past its own base, and its digest equals the replay.
+//     place), reinstalls once at or past its own base, and its digest equals the replay. A
+//     segment maps at its first read (cold-tier D2) unless eager_segments maps it at open
+//     (STRATA_EAGER_SEGMENTS=1, ctest's group_repair_eager): lazy, the first read or apply that
+//     maps it marks the replica damaged, and a read answers replica_damaged.
 //   apply, read: strata's damage met at apply or at a read on a running follower; the read
 //     answers replica_damaged, never the bytes.
 //   refusal: while damaged, with the third voter cut off so commits count the damaged replica's
@@ -15,9 +18,11 @@
 //   staged: a staged live set file flipped between the stage and the activation: the activation
 //     refuses it, and a later image repairs the replica.
 //   leader: a damaged replica made leader hands leadership off, then reinstalls.
+//   deposed: the leader installing a damaged replica loses its leadership mid-flight; it names
+//     no install from then on, and once the new leader repairs the replica no node names one.
 //   crash: a power cut at every mutation of the damaged follower's directory disk, then of its
-//     host disk, from its reboot through the settled repair, for a damaged segment (a deferred
-//     index) and a damaged set file: every reboot is damaged or repaired, never unfenced over
+//     host disk, from its reboot through the settled repair, for a damaged manifest log (a
+//     deferred index) and a damaged set file: every reboot is damaged or repaired, never unfenced over
 //     damaged bytes, and settles with equal digests.
 // `group_repair_test [case]` runs one case; none runs them all.
 #include "world.hh"
@@ -193,6 +198,18 @@ void repaired(world& w, node& x, cs::Index base) {
 	same_digests(w);
 }
 
+// A read of every key, present or not, through every segment that may hold it: each maps.
+bool read_all(blob::index_type& ix) {
+	bool any = false;
+	for (const auto& key : keys) {
+		if (ix.find_key(key)) {
+			any = true;
+			(void)ix.get(key);
+		}
+	}
+	return ix.find_key("~never-written").has_value() || any;
+}
+
 std::uint64_t cases = 0;
 
 void damaged_at_open(kind k, std::uint64_t seed) {
@@ -207,13 +224,20 @@ void damaged_at_open(kind k, std::uint64_t seed) {
 	if (!damage(x, k, sealed)) { return; }
 	w.boot(x);
 	if (!opened(w, x)) { return; }
+	// A lazy segment maps at its first read, unless the recovery's apply mapped it already.
+	const bool lazy = k == kind::segment && !strata::detail::eager_segments_default();
+	const bool at_read = lazy && !x.p->g->damaged();
+	if (at_read) {
+		auto r = run_until_done(w, x, x.p->g->read_applied(read_all));
+		check(r->done && damaged_error(r->error), "the first read of the damaged segment answers replica_damaged: " + what(r->error));
+	}
 	const auto reason = x.p->g->damage_reason();
 	const bool fresh = deferred(x);
-	check(x.p->g->damaged() && marked(x), "the replica reopens damaged");
-	check(fresh == (k != kind::file), "a damaged index is quarantined for a deferred one, a damaged set file keeps it");
+	check(x.p->g->damaged() && marked(x), at_read ? "the first read marks the replica damaged" : "the replica reopens damaged");
+	check(fresh == (k != kind::file && !lazy), "a damaged index at open is quarantined for a deferred one; one damaged at a read, or a damaged set file, keeps it");
 	check(!x.p->g->readable(), "a damaged replica is not readable");
 	repaired(w, x, base);
-	std::printf("repair: %s, seed %llu: reopened damaged (%s), %s index, one image at %llu (base %llu)\n", name_of(k), (unsigned long long)seed, reason.c_str(), fresh ? "deferred" : "its own",
+	std::printf("repair: %s%s, seed %llu: damaged (%s), %s index, one image at %llu (base %llu)\n", name_of(k), at_read ? " at its first read" : lazy ? " at the recovery's apply" : " at open", (unsigned long long)seed, reason.c_str(), fresh ? "deferred" : "its own",
 		(unsigned long long)x.p->g->installed_at(), (unsigned long long)base);
 	++cases;
 }
@@ -373,7 +397,7 @@ void damaged_leader(std::uint64_t seed) {
 	auto& x = follower(w);
 	const auto base = x.p->g->recovered().position;
 	w.shut(x, false);
-	if (!damage(x, kind::segment, {})) { return; }
+	if (!damage(x, kind::manifest, {})) { return; }
 	w.boot(x);
 	if (!opened(w, x) || !check(x.p->g->damaged(), "the replica reopens damaged")) { return; }
 	// Its fetches fail, so it is still damaged when it leads.
@@ -392,6 +416,51 @@ void damaged_leader(std::uint64_t seed) {
 	repaired(w, x, base);
 	const auto s = x.p->lp->driver().state(gid);
 	std::printf("repair: leader, seed %llu: the damaged replica led, handed off (leader now %llu), one image at %llu\n", (unsigned long long)seed, (unsigned long long)(s ? s->leader : 0),
+		(unsigned long long)x.p->g->installed_at());
+	++cases;
+}
+
+void deposed(std::uint64_t seed) {
+	context = "deposed, seed " + std::to_string(seed);
+	world w(3, seed, true);
+	std::mt19937_64 gen(seed);
+	if (!prepare(w, gen)) { return; }
+	auto& x = follower(w);
+	const auto base = x.p->g->recovered().position;
+	w.shut(x, false);
+	if (!damage(x, kind::manifest, {})) { return; }
+	w.boot(x);
+	if (!opened(w, x) || !check(x.p->g->damaged(), "the replica reopens damaged")) { return; }
+	// Its fetches fail, so the leader's flights to it stay unfinished.
+	auto* l = w.leader();
+	bool flying = false;
+	for (int i = 0; l && i < 40000 && !flying; ++i) {
+		w.step();
+		w.fail_fetches(x.id);
+		flying = l->p->g->installs_needed().count(x.id) > 0;
+	}
+	if (!check(flying, "the leader names the damaged replica's install")) { return; }
+	auto& y = third(w, *l, x);
+	auto t = start(l->p->loop_ref(), l->p->lp->driver().transfer_leadership(gid, y.id));
+	bool moved = false;
+	for (int i = 0; i < 40000 && !moved; ++i) {
+		w.step();
+		w.fail_fetches(x.id);
+		const auto s = l->p->lp->driver().state(gid);
+		moved = s && s->role != cs::Role::Leader;
+	}
+	if (!check(moved, "the leader loses its leadership mid-flight")) { return; }
+	bool forgot = false;
+	for (int i = 0; i < 1000 && !forgot; ++i) {
+		w.step();
+		w.fail_fetches(x.id);
+		forgot = l->p->g->installs_needed().empty();
+	}
+	check(forgot, "the deposed leader names no install");
+	const auto old = l->id;
+	repaired(w, x, base);
+	for (auto& [id, n] : w.nodes) { check(n->installs_needed().empty(), "node " + std::to_string(id) + " names no install once settled"); }
+	std::printf("repair: deposed, seed %llu: node %llu lost its leadership mid-flight and names no install; one image at %llu\n", (unsigned long long)seed, (unsigned long long)old,
 		(unsigned long long)x.p->g->installed_at());
 	++cases;
 }
@@ -476,9 +545,10 @@ int main(int argc, char** argv) {
 		if (wants("refusal")) { refusal(seed); }
 		if (wants("staged")) { staged_damage(seed); }
 		if (wants("leader")) { damaged_leader(seed); }
+		if (wants("deposed")) { deposed(seed); }
 	}
-	if (wants("crash") || only == "crash-segment-dir") { crash(kind::segment, false); }
-	if (wants("crash") || only == "crash-segment-host") { crash(kind::segment, true); }
+	if (wants("crash") || only == "crash-manifest-dir") { crash(kind::manifest, false); }
+	if (wants("crash") || only == "crash-manifest-host") { crash(kind::manifest, true); }
 	if (wants("crash") || only == "crash-file-dir") { crash(kind::file, false); }
 	if (wants("crash") || only == "crash-file-host") { crash(kind::file, true); }
 	std::printf("repair: %llu cases: %s\n", (unsigned long long)cases, failures ? "FAIL" : "ok");

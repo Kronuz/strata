@@ -23,16 +23,16 @@ TARGET = "group_repair_test"
 # name: (the case that kills it, [(file, old, new), ...])
 MUTANTS = {
     # A damaged index fails the open instead of making way for a deferred one.
-    "open-rethrows": ("segment", [(GROUP,
+    "open-rethrows": ("manifest", [(GROUP,
         "\t\t\tif (!damage(e)) { throw; }\n",
         "\t\t\tthrow;\n")]),
     # The damaged index's names go with no marker: the reopen holds a deferred index below the
     # bundle and nothing that says it is damaged.
-    "unmarked": ("segment", [(GROUP,
+    "unmarked": ("manifest", [(GROUP,
         "\t\t\tmark_damaged(directory, error_text(e));\n",
         "")]),
     # The names go before the marker is durable: a power cut between them reopens unmarked.
-    "quarantine-first": ("crash-segment-dir", [(GROUP,
+    "quarantine-first": ("crash-manifest-dir", [(GROUP,
         "\t\t\tmark_damaged(directory, error_text(e));\n\t\t\tquarantine_strata(directory);\n",
         "\t\t\tquarantine_strata(directory);\n\t\t\tmark_damaged(directory, error_text(e));\n")]),
     # A set file that fails its check at recovery fails the open instead of marking damage.
@@ -40,7 +40,7 @@ MUTANTS = {
         "\t\t\tmark_damaged(files_.io(), e.what());\n\t\t\treturn adopt_damaged(b);\n",
         "\t\t\tthrow;\n")]),
     # Delivered ranges are dropped, never acknowledged: consensus refuses the request (Busy).
-    "no-ack": ("segment", [(GROUP,
+    "no-ack": ("manifest", [(GROUP,
         "\t\tif (const auto through = w->delivered()) { notify_applied(through); }\n",
         "")]),
     # A damaged replica leaves its waiters and new calls unanswered.
@@ -66,7 +66,7 @@ MUTANTS = {
         "\tif (auto bad = d::staged_damage(dir, p, strata_staged)) {\n",
         "\tif (std::optional<std::string> bad; false) {\n")]),
     # The activation keeps the marker: the replica stays damaged after its image.
-    "marker-kept": ("segment", [(INSTALL,
+    "marker-kept": ("manifest", [(INSTALL,
         "\tclear_damaged(dir);  // the replica holds the pin's bytes now (repair.hh)\n",
         "")]),
     # A damaged leader keeps leading: it can neither serve nor be sent an image.
@@ -77,6 +77,14 @@ MUTANTS = {
     "no-retry": ("staged", [(GROUP,
         "\t\tself->hand_off();\n\t\tself->begin_repair();\n",
         "\t\tself->hand_off();\n")]),
+    # A flight's end names its peer still unless it installed or caught up: a leader deposed
+    # mid-flight names the peer, and keeps its install state, for good.
+    "needed-kept": ("deposed", [(GROUP,
+        "\tvoid install_released(cs::NodeId peer, cs::SnapshotKey key, cs::SnapshotReleaseReason) override {\n",
+        "\tvoid install_released(cs::NodeId peer, cs::SnapshotKey key, cs::SnapshotReleaseReason reason) override {\n"),
+        (GROUP,
+        "\t\t// is a new flight, which names the peer again.\n\t\t{\n",
+        "\t\t// is a new flight, which names the peer again.\n\t\tif (reason == cs::SnapshotReleaseReason::Installed || reason == cs::SnapshotReleaseReason::CaughtUp) {\n")]),
 }
 
 

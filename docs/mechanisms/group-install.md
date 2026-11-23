@@ -149,8 +149,10 @@ A replica whose bytes fail their checks reinstalls its leader's image through th
 
 - **Damage** is strata's `corrupt_index` or `corrupt_segment` and the set's `file_set_damage` (a
   missing, short or, sealed, CRC32C-failing file), met at the index's open (`group::open_index`),
-  at recovery's `files_.recover`, at apply or at a read. A live set file carries no CRC32C, so
-  its damage is not seen (F24: no scrubber).
+  at recovery's `files_.recover`, at apply or at a read. A segment maps at its first read
+  (cold-tier D2), so its footer and sections are checked there, at the read, apply or merge
+  that first touches it; a host that sets `eager_segments` finds it at the open. A live set file
+  carries no CRC32C, so its damage is not seen (F24: no scrubber).
 - **The marker** `rd` (its text the reason, through a temporary and a rename, the directory
   synced) goes first: a crash anywhere from here reopens the replica damaged. A damaged index's
   names then go (`quarantine_strata`) and a deferred index takes their place, which install's
@@ -221,15 +223,19 @@ refuses to open).
 
 `test/group/repair_test.cc` (ctest's `group_repair`; `group_repair_test [case]`): `segment`,
 `manifest`, `file` (a stopped follower's damaged segment footer, manifest log or sealed set file:
-it reopens damaged, a damaged index replaced by a deferred one, and reinstalls once), `apply`
+it reopens damaged, a damaged index replaced by a deferred one, and reinstalls once; a damaged
+segment is found by the first read that maps it, which answers `replica_damaged`, and at the
+open under `eager_segments`, ctest's `group_repair_eager`), `apply`
 and `read` (damage met while running; the read answers `replica_damaged`), `refusal` (while
 damaged, commits counting its log, it answers every read, checkpoint and write
 `replica_damaged`, serves no install and keeps its applied index while consensus's moves on;
 the only healthy replica that applied those commits is then lost and they survive), `staged` (a
 staged live set file flipped before the activation is refused, and a later image repairs),
-`leader` (a damaged leader hands off, then reinstalls), and `crash` (a power cut at every
+`leader` (a damaged leader hands off, then reinstalls), `deposed` (a leader that loses its
+leadership mid-flight names no install from then on, and none does once settled: every flight's
+release ends its peer's entry, review F3), and `crash` (a power cut at every
 mutation of the directory disk, then the host disk, from the damaged reboot through the settled
-repair, for a damaged segment on a deferred index and a damaged set file: each reboot is damaged
+repair, for a damaged manifest log on a deferred index and a damaged set file: each reboot is damaged
 or repaired, never unfenced over damaged bytes). `test/group/repair_mutants.py` holds one mutant
 per mechanism, each killed by the case it names; `test/group/repair_suite.sh` builds and runs
 the group tests.

@@ -132,6 +132,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(group_repair_test PRIVATE strata::group)
   add_test(NAME group_repair COMMAND group_repair_test)
   set_tests_properties(group_repair PROPERTIES TIMEOUT 1500)
+  # A damaged segment found at open: eager_segments maps every segment there.
+  add_test(NAME group_repair_eager COMMAND group_repair_test segment)
+  set_tests_properties(group_repair_eager PROPERTIES TIMEOUT 300 ENVIRONMENT STRATA_EAGER_SEGMENTS=1)
   # A learner installs a pinned pack and file set through the Driver's install surface (group-heal A1).
   add_executable(group_install_test test/group/install_test.cc)
   target_link_libraries(group_install_test PRIVATE strata::group)
