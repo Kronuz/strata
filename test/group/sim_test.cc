@@ -155,6 +155,7 @@ struct sim {
 	std::uint64_t next_client = 1, next_value = 1'000'000, next_upload = 100'000'000'000;
 	std::map<cs::NodeId, std::uint64_t> boots;
 	std::map<std::uint64_t, std::uint64_t> seen_version;  // the last version a client saw, by key
+	std::map<std::uint64_t, blob::app::seen_entry> retired_log;  // what retired members applied
 	totals t;
 	// Faults in force.
 	std::set<cs::NodeId> side;  // a partition's one side; empty: none
@@ -204,8 +205,16 @@ struct sim {
 		w.boot(x);
 		++boots[x.id];
 	}
+	// The member leaves the world; what it applied stays in the oracle's log, since the members
+	// that installed past it never applied those entries.
 	void retire(cs::NodeId id) {
-		if (auto* x = at(id); x && x->up()) { lost(id); }
+		if (auto* x = at(id)) {
+			for (const auto& [i, e] : x->log) {
+				auto [it, fresh] = retired_log.try_emplace(i, e);
+				check(fresh || it->second == e, "retired node " + std::to_string(id) + " differs from another at " + std::to_string(i));
+			}
+			if (x->up()) { lost(id); }
+		}
 		w.retire(id);
 		lost(id);
 	}
@@ -621,6 +630,27 @@ struct sim {
 		down = 0;
 		for (auto& [id, x] : w.nodes) { boot(*x); }
 	}
+	// The log through `through`: the live members' (merged_log) and the retired members' records,
+	// which must agree where both hold an index.
+	std::optional<std::map<std::uint64_t, blob::app::seen_entry>> merged(std::uint64_t through) {
+		std::map<std::uint64_t, blob::app::seen_entry> log;
+		for (auto& [id, x] : w.nodes) {
+			for (const auto& [i, e] : x->log) {
+				if (i > through) { break; }
+				auto [it, fresh] = log.try_emplace(i, e);
+				if (!check(fresh || it->second == e, "node " + std::to_string(id) + " differs from another at " + std::to_string(i))) { return std::nullopt; }
+			}
+		}
+		for (const auto& [i, e] : retired_log) {
+			if (i > through) { break; }
+			auto [it, fresh] = log.try_emplace(i, e);
+			if (!check(fresh || it->second == e, "a retired member differs from the live ones at " + std::to_string(i))) { return std::nullopt; }
+		}
+		for (std::uint64_t i = 1; i <= through; ++i) {
+			if (!check(log.count(i), "no node applied index " + std::to_string(i))) { return std::nullopt; }
+		}
+		return log;
+	}
 	// Heals, settles and checks: acknowledged commands in the log, digests equal to a replay,
 	// the history linearizable and every prefix read a consistent prefix.
 	void finish(std::uint64_t seed) {
@@ -636,9 +666,15 @@ struct sim {
 		}
 		if (!check(first, "a data member")) { return; }
 		const auto through = first->applied();
-		same_digests(w);
-		const auto log = merged_log(w, through);
+		const auto log = merged(through);
 		if (!log) { return; }
+		const auto reference = replay(*log, through);
+		for (auto& [id, x] : w.nodes) {
+			const auto who = "node " + std::to_string(id);
+			check(!x->fenced(), who + " is not fenced: " + x->fence_reason());
+			check(x->applied() == through, who + " applied what node " + std::to_string(first->id) + " did");
+			if (!x->witness) { check(of(*x->p->g, x->app) == reference, who + "'s digest equals the replay"); }
+		}
 		for (const auto& a : w.acks) {
 			auto it = log->find(a.placement.index);
 			check(a.placement.index <= through && it != log->end() && it->second.term == a.placement.term && it->second.command == a.command,
