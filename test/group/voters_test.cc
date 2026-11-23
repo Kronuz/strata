@@ -175,6 +175,7 @@ struct world {
 	std::deque<envelope> net;
 	std::deque<fetch_request> fetches;
 	std::set<cs::NodeId> isolated;  // their messages and fetches, both ways, are dropped
+	std::uint64_t uploads = 100;    // the next upload id: an app never reuses a retired name
 	struct acknowledged {
 		cs::Placement placement;
 		std::string command;
@@ -1072,7 +1073,7 @@ void write_and_compact(world& w, std::mt19937_64& gen, int writes) {
 			continue;
 		}
 		const auto key = group_test::keys[gen() % group_test::keys.size()];
-		const std::string c = k % 5 == 4 ? "U|" + std::to_string(100 + k) + "|0|" + text(gen, 40) : "P|" + key + "|" + text(gen, 1 + gen() % 20);
+		const std::string c = k % 5 == 4 ? "U|" + std::to_string(w.uploads++) + "|0|" + text(gen, 40) : "P|" + key + "|" + text(gen, 1 + gen() % 20);
 		auto s = start(l->p->loop_ref(), l->p->g->propose(c));
 		for (int i = 0; i < 40000 && !s->done; ++i) { w.step(); }
 	}
