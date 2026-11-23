@@ -5598,17 +5598,16 @@ private:
 	}
 
 	// A deferred index's first manifest, written before its first data file so that no segment is
-	// ever on disk without a log beside it: the empty state create() commits, with the join's
-	// attributes and nothing applied, so a crash before the next commit opens it empty.
+	// ever on disk without a log beside it: the empty state create() commits, nothing applied, so a
+	// crash before the next commit opens it empty. A logged index applies nothing before its first
+	// commit (D7's join), so the join's attributes are never owed here.
 	void commit_empty() {
 		files::log_state c = m_;
 		c.generation = std::max(next_generation_, m_.generation + 1);
 		c.next_segment = cur_.next_segment;
 		c.configured = c.mask = cur_.configured;
-		if (attributes_owed_) { c.attributes = *attributes_owed_; }
 		files::recount(c);
 		roll_over({}, std::move(c), true);
-		attributes_owed_.reset();
 		kept_files_[m_.generation] = names_of(m_, log_g_);
 	}
 
