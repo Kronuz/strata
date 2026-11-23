@@ -25,6 +25,7 @@
 #include <map>
 #include <random>
 #include <set>
+#include <thread>
 
 static const auto uuid_a = uuid_of("aaaaaaaaaaaaaaaa");
 static const auto uuid_b = uuid_of("bbbbbbbbbbbbbbbb");
@@ -808,6 +809,101 @@ int main() {
 			if (which == cut::first_refresh) { CHECK(empties > 0); }
 			if (which == cut::second_commit) { CHECK(previous > 0 && committed > 0); }
 		}
+	}
+	// A logged deferred index's first commit, cut at every mutation of its directory (the turn log
+	// on another disk the cut spares): an open that finds the index finds it in its group, with the
+	// transaction replayed, since the empty generation carries the join's attribute.
+	{
+		namespace jr = kronuz::journal;
+		jr::Identity id{};
+		id[0] = 'h';
+		jr::TurnLogOptions geometry;
+		geometry.segment_bytes = 256 << 10;
+		geometry.block_bytes = 4096;
+		struct host {
+			jr::Host table;
+			turn_sealer sealer;
+			std::thread loop;
+			host(fl::filesystem& fs, const jr::Identity& id, const jr::TurnLogOptions& g)
+				: table(std::make_shared<fl::io>(fs), id, jr::HostOptions{1, g}), sealer(table, 0, id, g, 32 << 10), loop([this] { sealer.serve(); }) {}
+			~host() {
+				sealer.stop();
+				loop.join();
+			}
+		};
+		auto logged = [&](turn_sealer& s) {
+			kv_index::options o = keyed;
+			o.log = &s;
+			o.log_group = 7;
+			o.command_bytes = 32 << 10;
+			return o;
+		};
+		operation qa;
+		qa.type = operation::replace_key;
+		qa.key = qa.doc.key = "Qa";
+		qa.doc.stored = "doc a";
+		std::uint64_t total = 0, after = 0;
+		{
+			fl::filesystem fs, hfs;
+			fl::io io(fs);
+			host h(hfs, id, geometry);
+			auto ix = kv_index::create_deferred(io, logged(h.sealer), uuid_a);
+			CHECK(ix.apply(tx_of(qa), {}).result == verdict::accepted);
+			const auto m0 = fs.mutations();
+			ix.commit();
+			total = fs.mutations() - m0;
+			after = ix.digest();
+			ix.close();
+		}
+		std::size_t uncreated = 0, replayed = 0, failed = 0;
+		for (std::uint64_t n = 0; n <= total; ++n) {
+			for (std::uint64_t power = 0; power <= 8; ++power) {
+				fl::filesystem fs, hfs;
+				fl::io io(fs);
+				{
+					host h(hfs, id, geometry);
+					std::optional<kv_index> ix;
+					ix.emplace(kv_index::create_deferred(io, logged(h.sealer), uuid_a));
+					CHECK(ix->apply(tx_of(qa), {}).result == verdict::accepted);
+					fs.power_off_after(n);
+					try {
+						ix->commit();
+					} catch (...) {
+					}
+					fs.power_off_after(0);
+					try {
+						ix.reset();
+					} catch (...) {
+					}
+				}
+				if (power) {
+					fs.crash(n * 7919 + power * 31 + 3);
+				} else {
+					fs.power_on();
+				}
+				host h(hfs, id, geometry);
+				try {
+					auto ix = kv_index::open(io, logged(h.sealer));
+					if (ix.digest() == after) {
+						++replayed;
+					} else {
+						++failed;
+						std::fprintf(stderr, "FAIL logged first commit cut at %llu/%llu (power %llu): opens another state\n", (unsigned long long)n,
+							(unsigned long long)total, (unsigned long long)power);
+					}
+					ix.close();
+				} catch (const index_not_created&) {
+					++uncreated;
+				} catch (const std::exception& e) {
+					++failed;
+					std::fprintf(stderr, "FAIL logged first commit cut at %llu/%llu (power %llu): refused: %s\n", (unsigned long long)n, (unsigned long long)total,
+						(unsigned long long)power, e.what());
+				}
+			}
+		}
+		std::printf("  logged first commit: %llu mutations, %llu cuts x 9: %zu not created, %zu replayed, %zu failed\n", (unsigned long long)total,
+			(unsigned long long)total + 1, uncreated, replayed, failed);
+		CHECK(failed == 0 && replayed > 0);
 	}
 	// T1: power loss at every mutation point of seeded workloads, with merges on the
 	// writer's thread, then with background merges on a stepping executor (condition 7):
