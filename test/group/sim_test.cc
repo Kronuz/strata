@@ -388,8 +388,8 @@ struct sim {
 		if (up.stage < 0) { return; }
 		if (up.s) {
 			if (!up.s->done) { return; }
-			const sg::answer* a = up.s->error || !up.s->value ? nullptr : &*up.s->value;
-			up.s.reset();
+			const auto done = std::move(up.s);  // holds the answer `a` points into
+			const sg::answer* a = done->error || !done->value ? nullptr : &*done->value;
 			if (up.stage == 3) {
 				record_final(a);
 				up.stage = -1;
@@ -571,7 +571,7 @@ struct sim {
 		const auto before = w.now;
 		w.step();
 		skew_clock(before);
-		if (faults && !w.isolated.empty() && clock >= isolated_until) { w.isolated.clear(); }
+		if (!w.isolated.empty() && clock >= isolated_until) { w.isolated.clear(); }  // a cut upload's too
 		++clock;
 		++t.events;
 	}
@@ -627,6 +627,7 @@ struct sim {
 		heal();
 		if (!check(w.settle(), "the cluster settles")) { return; }
 		drain();
+		heal();  // a cut upload answered in the drain isolated its leader
 		check(w.settle(), "the cluster settles once the clients are answered");
 		const node* first = nullptr;
 		for (auto& [id, x] : w.nodes) {
@@ -791,10 +792,14 @@ void barriers(unsigned voters) {
 
 // --- membership -----------------------------------------------------------------------------
 
-bool step_to(sim& s, unsigned voters, const std::function<void(cs::Membership&)>& edit, cs::NodeId heir, const std::string& what_for) {
+// One membership step, committed at the leader in force. A member it removes never learns that
+// commit, so the caller retires it before the cluster settles.
+bool commit_step(sim& s, unsigned voters, const std::function<void(cs::Membership&)>& edit, cs::NodeId heir, const std::string& what_for) {
 	s.drain();
-	const bool ok = check(change(s.w, voters, edit, heir), what_for);
-	return ok && check(s.w.settle(), "the cluster settles: " + what_for);
+	return check(change(s.w, voters, edit, heir), what_for);
+}
+bool step_to(sim& s, unsigned voters, const std::function<void(cs::Membership&)>& edit, cs::NodeId heir, const std::string& what_for) {
+	return commit_step(s, voters, edit, heir, what_for) && check(s.w.settle(), "the cluster settles: " + what_for);
 }
 cs::NodeId other_data(world& w, std::initializer_list<cs::NodeId> not_these) {
 	for (auto& [id, x] : w.nodes) {
@@ -812,25 +817,35 @@ bool join_learner(sim& s, unsigned voters, cs::NodeId id, bool witness, cs::Node
 		m.next_incarnation = j.id + 1;
 	}, heir, "node " + std::to_string(id) + " joins as a learner");
 }
-bool promote(sim& s, unsigned voters, cs::NodeId id, cs::MemberRole role, cs::NodeId leaving, cs::NodeId heir) {
+bool promote(sim& s, unsigned voters, cs::NodeId id, cs::MemberRole role, cs::NodeId heir) {
 	return step_to(s, voters, [&](cs::Membership& m) {
 		for (auto& x : m.members) {
 			if (x.incarnation == id) { x.role = role; }
 		}
-		if (leaving) { m.leaving = leaving; }
-	}, heir, "node " + std::to_string(id) + " is promoted" + (leaving ? " beside " + std::to_string(leaving) : ""));
+	}, heir, "node " + std::to_string(id) + " is promoted");
 }
 bool remove_member(sim& s, unsigned voters, cs::NodeId id, cs::NodeId heir) {
-	if (!step_to(s, voters, [&](cs::Membership& m) { std::erase_if(m.members, [&](const cs::Member& x) { return x.incarnation == id; }); }, heir, "node " + std::to_string(id) + " is removed")) { return false; }
+	if (!commit_step(s, voters, [&](cs::Membership& m) { std::erase_if(m.members, [&](const cs::Member& x) { return x.incarnation == id; }); }, heir, "node " + std::to_string(id) + " is removed")) {
+		return false;
+	}
 	s.retire(id);
 	return check(s.w.settle(), "the cluster settles without node " + std::to_string(id));
 }
-bool replace_member(sim& s, unsigned voters, cs::NodeId leaving, cs::NodeId joiner) {
-	if (!join_learner(s, voters, joiner, false, joiner)) { return false; }
-	if (!promote(s, voters, joiner, cs::MemberRole::Voter, leaving, joiner)) { return false; }
-	if (!check(removed_by_core(s.w, leaving), "the core removes the replaced voter " + std::to_string(leaving))) { return false; }
+// A joiner installs, is promoted to `role` beside `leaving`, and the core removes `leaving` (D3).
+bool replace_member(sim& s, unsigned voters, cs::NodeId leaving, cs::NodeId joiner, cs::MemberRole role = cs::MemberRole::Voter) {
+	const bool witness = role == cs::MemberRole::Witness;
+	if (!join_learner(s, voters, joiner, witness, joiner)) { return false; }
+	if (!commit_step(s, voters, [&](cs::Membership& m) {
+			for (auto& x : m.members) {
+				if (x.incarnation == joiner) { x.role = role; }
+			}
+			m.leaving = leaving;
+		}, joiner, "node " + std::to_string(joiner) + " is promoted beside " + std::to_string(leaving))) {
+		return false;
+	}
+	if (!check(removed_by_core(s.w, leaving), "the core removes the replaced member " + std::to_string(leaving))) { return false; }
 	s.retire(leaving);
-	return check(s.w.settle(), "the cluster settles without the replaced voter");
+	return check(s.w.settle(), "the cluster settles without the replaced member " + std::to_string(leaving));
 }
 
 void membership(unsigned voters) {
@@ -851,7 +866,7 @@ void membership(unsigned voters) {
 	// Add a voter, then remove a follower.
 	const auto added = next++;
 	l = w.leader();
-	if (!check(l, "a leader") || !join_learner(s, voters, added, false, l->id) || !promote(s, voters, added, cs::MemberRole::Voter, 0, l->id)) { return; }
+	if (!check(l, "a leader") || !join_learner(s, voters, added, false, l->id) || !promote(s, voters, added, cs::MemberRole::Voter, l->id)) { return; }
 	s.run(200, false);
 	l = w.leader();
 	if (!check(l, "a leader") || !remove_member(s, voters, other_data(w, {l->id, added}), l->id)) { return; }
@@ -864,8 +879,9 @@ void membership(unsigned voters) {
 // --- growth ---------------------------------------------------------------------------------
 
 // D7: 0 to 1 (a data learner installs and is promoted, two data voters for the window, then a
-// witness joins), 1 to 2 (a third data voter, then the witness leaves), 2 to 1 (a witness joins,
-// a data voter leaves) and 1 to 0 (the witness leaves, then a data voter).
+// witness joins), 1 to 2 (a third data voter promoted beside the witness, which the core removes:
+// D9's 3 + 1 window), 2 to 1 (a witness promoted beside a data voter, the same window) and 1 to 0
+// (the witness removed, then a data voter).
 void growth() {
 	totals row;
 	context = "growth from a lone voter";
@@ -873,13 +889,13 @@ void growth() {
 	sim s(w, 4, "growth");
 	if (!check(w.settle(), "the lone voter settles")) { return; }
 	s.run(300, false);
-	if (!join_learner(s, 1, 2, false, 1) || !promote(s, 1, 2, cs::MemberRole::Voter, 0, 1)) { return; }
+	if (!join_learner(s, 1, 2, false, 1) || !promote(s, 1, 2, cs::MemberRole::Voter, 1)) { return; }
 	s.run(150, false);
-	if (!join_learner(s, 1, 3, true, 1) || !promote(s, 1, 3, cs::MemberRole::Witness, 0, 1)) { return; }
+	if (!join_learner(s, 1, 3, true, 1) || !promote(s, 1, 3, cs::MemberRole::Witness, 1)) { return; }
 	s.run(150, false);
-	if (!join_learner(s, 1, 4, false, 1) || !promote(s, 1, 4, cs::MemberRole::Voter, 0, 1) || !remove_member(s, 1, 3, 1)) { return; }
+	if (!replace_member(s, 1, 3, 4)) { return; }
 	s.run(150, false);
-	if (!join_learner(s, 1, 5, true, 1) || !promote(s, 1, 5, cs::MemberRole::Witness, 0, 1) || !remove_member(s, 1, 4, 1)) { return; }
+	if (!replace_member(s, 1, 4, 5, cs::MemberRole::Witness)) { return; }
 	s.run(150, false);
 	if (!remove_member(s, 1, 5, 1) || !remove_member(s, 1, 2, 1)) { return; }
 	s.run(150, false);

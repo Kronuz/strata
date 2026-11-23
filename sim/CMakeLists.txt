@@ -47,6 +47,8 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR OR SIMULATION_TESTS)
   if(TARGET strata::group)
     add_executable(group_sim_test ${CMAKE_CURRENT_SOURCE_DIR}/../test/group/sim_test.cc)
     target_link_libraries(group_sim_test PRIVATE simulation strata::group faultlab::faultlab)
+    # Beside strata's other group tests, where test/group/mutants.py runs its target.
+    set_target_properties(group_sim_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
     foreach(row faults_3 faults_5 barriers_3 barriers_5 membership_3 membership_5 growth_1 device_3)
       string(REGEX MATCH "^[a-z]+" name ${row})
       string(REGEX MATCH "[0-9]+$" voters ${row})
