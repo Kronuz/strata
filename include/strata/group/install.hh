@@ -301,9 +301,10 @@ void release_pin(basic_index<Layout>& ix, const install_pin& p) {
 	ix.release(p.generation);
 }
 // A pin lives in strata's manifest, so it outlives its source's process; no install does. A
-// reopened source releases every pin its index keeps.
+// reopened source releases every pin its index keeps; a deferred one (no manifest yet) keeps none.
 template <class Layout>
 void release_pins(basic_index<Layout>& ix, kronuz::journal::IO& dir) {
+	if (!index_detail::log_holding(dir)) { return; }
 	for (const auto g : index_detail::read_state(dir).pins) { ix.release(g); }
 }
 

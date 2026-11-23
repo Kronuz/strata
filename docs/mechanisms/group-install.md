@@ -111,12 +111,13 @@ answered by the leader's `group::serve`).
   queues the release of superseded pins; strata's release commits, and short of space it stalls
   the chore as an apply does and repeats after `resume()`, so a full disk never fences the
   leader. A checkpoint's `unlink_retired` stops below the lowest live pin, so the set's files a
-  pin names stay until it goes: the latest bundle's pin keeps them one checkpoint longer. The
-  teardown releases what is left; pins a crash left in strata's manifest go at open
-  (`release_pins`).
+  pin names stay until it goes: the latest bundle's pin keeps them one checkpoint longer. A
+  close releases what is left on the chore once its consensus row is closed (the index is the
+  catalog's and stays open, D169); pins a crash or a fenced close left in strata's manifest go at
+  the next open (`release_pins`).
 - **`serve`** answers the fetch lane on any thread: a pin's own name or its files' chunks, nothing
-  for a pin released. A pin holds the replica's directory, so a serve racing the teardown reads
-  on.
+  for a pin released or once closed. The directory is borrowed, so the teardown waits for every
+  serve in flight before close returns it to the host.
 - **The learner** at `ValidateImage` decodes the image as a bundle at the boundary, fetches the
   pin from the source incarnation, then holds the chore for the stage (apply waits; the stage is
   the chore's only work), stages, and answers `validated`, or `validation_failed` with what it

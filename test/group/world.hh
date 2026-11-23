@@ -6,6 +6,7 @@
 #pragma once
 
 #include "blob_app.hh"
+#include "group_catalog_borrow.hh"
 #include "host_io.hh"
 #include "oracle.hh"
 
@@ -80,9 +81,6 @@ inline group_type::config config(cs::NodeId self, unsigned voters, strata::byte_
 	c.options.timing = cs::Timing{10, 40, 60, 120, 3600};
 	c.options.scheduling = cs::WorkerLimits{16, 128};
 	c.identity = j::Identity{'V', char('0' + self)};
-	c.uuid = {'g', 'r', 'o', 'u', 'p', char('0' + self)};
-	c.strata.keyed = true;
-	c.strata.storage = &storage;
 	return c;
 }
 
@@ -141,7 +139,7 @@ struct node {
 		j::InlineCompletion inline_io;
 		std::unique_ptr<j::Host> host;
 		std::unique_ptr<sg::loop> lp;
-		std::unique_ptr<group_type> g;  // a data member's
+		borrowed<group_type> g;  // a data member's
 		std::unique_ptr<sg::witness> w;  // a witness's
 		task::cancel_source stop;
 		bool turns_done = false, driver_done = false;
@@ -265,7 +263,7 @@ struct world {
 			p.w = std::make_unique<sg::witness>(*p.lp, sg::witness::config{c.id, std::move(c.options), c.identity, std::nullopt});
 			p.opening = start(p.loop_ref(), p.w->open());
 		} else {
-			p.g = std::make_unique<group_type>(*p.lp, std::move(c), std::make_unique<fl::io>(x.dir_disk), x.app, task::scheduler_ref::of(p.chore_s));
+			p.g.emplace(*p.lp, std::move(c), std::make_unique<fl::io>(x.dir_disk), x.storage, {'g', 'r', 'o', 'u', 'p', char('0' + x.id)}, x.app, task::scheduler_ref::of(p.chore_s));
 			p.opening = start(p.loop_ref(), p.g->open());
 		}
 		x.run();

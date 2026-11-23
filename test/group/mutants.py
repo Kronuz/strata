@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mutants for strata::group (quest group-core).
+"""Mutants for strata::group (quests group-core, group-heal, group-catalog).
 
 Each mutant breaks one rule of the design or a criterion (named beside it); its test must fail
 with it. Usage:
@@ -22,6 +22,7 @@ ANSWER = "include/strata/group/answer.hh"
 SUBMIT = "include/strata/group/submit.hh"
 BUNDLE = "include/strata/group/bundle.hh"
 INDEX = "include/strata/core/index.hh"
+CATALOG = "include/strata/core/catalog.hh"
 FOOTPRINT = "test/group/footprint_test.cc"
 WITNESS = "include/strata/group/witness.hh"
 
@@ -78,7 +79,7 @@ MUTANTS = {
         "\t\t\tif (false) {")],
     # The close leaves a waiter whose placement never applied here linked (journal group_closed).
     "close-keeps-waiters": [(GROUP,
-        "\t\t\tfail_waiters(std::make_exception_ptr(cs::closed{}));\n",
+        "\t\tfail_waiters(std::make_exception_ptr(cs::closed{}));\n",
         "")],
     # A checkpoint that can never get its admission waits for it (hunt: default limits).
     "admission-waits": [(GROUP,
@@ -137,10 +138,6 @@ MUTANTS = {
     "resubmit-invalid": [(ANSWER,
         "\tcase verdict::version_conflict:\n",
         "\tcase verdict::invalid: return placements < max_placements ? next_step::resubmit : next_step::unavailable;\n\tcase verdict::version_conflict:\n")],
-    # The close leaves its index open: a closed group keeps the index's descriptors (A6).
-    "close-keeps-index": [(GROUP,
-        "\t\t\tif (ix_) { ix_->close(); ix_.reset(); }\n",
-        "")],
     # The file set keeps its last written file open: an idle group holds a descriptor (A6).
     "files-keep-handle": [
         (FILES, "\t\tauto f = open(name, true);\n", "\t\tlast_ = open(name, true);\n\t\tauto& f = last_;\n"),
@@ -155,14 +152,42 @@ MUTANTS = {
     "first-commit-unsynced": [(INDEX,
         "\t\t\tfiles_[name] = bytes.size();\n\t\t\tsync_dir();\n\t\t});\n",
         "\t\t\tfiles_[name] = bytes.size();\n\t\t\tif (g != 1) { sync_dir(); }\n\t\t});\n")],
-    # The close keeps the group's directory open: a closed group holds a descriptor (A6, D111).
-    "close-keeps-directory": [(GROUP,
-        "\t\t\tfiles_.close();\n\t\t\tdir_.reset();\n",
-        "\t\t\tfiles_.close();\n")],
-    # A destroyed group stays in its loop's table: what it leaves is ours (A6; footprint).
-    "destroy-keeps-member": [(GROUP,
-        "\t\tloop_->detach(id_);\n\t}\n",
-        "\t}\n")],
+    # A closed group stays in its loop's table: what it leaves is ours (A6;
+    # --target=group_footprint_test).
+    "close-keeps-member": [(GROUP,
+        "\t\tloop_->detach(id_);\n\t\tattached_ = false;\n\t\tco_await tear_down();\n",
+        "\t\tattached_ = false;\n\t\tco_await tear_down();\n")],
+    # The constructor joins the loop's table, on the host's thread, racing the loop's lookups
+    # (group-catalog R2; --target=group_catalog_test attach, --target=group_lifetime_test failed-open).
+    "attach-at-construction": [
+        (GROUP, "\t\thandoff_.fire = &handoff_fired;\n\t}\n",
+                "\t\thandoff_.fire = &handoff_fired;\n\t\tloop_->attach(id_, *this);\n\t\tattached_ = true;\n\t}\n"),
+        (GROUP, "\t\tloop_->attach(id_, *this);  // another group with this id: refused, nothing begun\n\t\tattached_ = true;\n", "")],
+    # A failed open stays in the loop's table with its chore running: the host destroys it off
+    # the loop (group-catalog R1; --target=group_catalog_test failed-open).
+    "failed-open-stays": [(GROUP,
+        "\t\tco_await leave();\n\t\tstd::rethrow_exception(failed);\n",
+        "\t\tstd::rethrow_exception(failed);\n")],
+    # The sweep's, the bound's or the replace's close skips close_payload: the index closes
+    # under a live group (group-catalog R3; --target=group_catalog_test sweep, bound, replace).
+    "sweep-skips-payload": [(CATALOG,
+        "\t\tclose_payload(s, down);\n",
+        "\t\tif (mode != close_mode::sweep) { close_payload(s, down); }\n")],
+    "bound-skips-payload": [(CATALOG,
+        "\t\tclose_payload(s, down);\n",
+        "\t\tif (mode != close_mode::bound) { close_payload(s, down); }\n")],
+    # The sweep never closes a slot at the wake bound (D5; --target=group_catalog_test bound).
+    "sweep-skips-bound": [(CATALOG,
+        "\t\t\t\tif (st == slot_state::owed && posts < lim.transitions && begin_bound_close(i)) {\n",
+        "\t\t\t\tif (st == slot_state::owed && posts < lim.transitions && false) {\n")],
+    "replace-skips-payload": [(CATALOG,
+        "\t\tclose_payload(s, false);\n",
+        "")],
+    # The group's chore runs its items unmarked: its own pinless applies are reported (N4; a
+    # Debug build, --target=group_catalog_test pin-check, replace or bare-commit-crash).
+    "payload-unmarked": [(GROUP,
+        "\t\t\t\tconst payload_work mark;  // the slot payload's own call (D169; catalog CT-R15)\n",
+        "")],
     # The footprint's schedulers start cold: the chore queue's first deque blocks land in the
     # groups' window and read as a destroyed group's (A6; --target=group_footprint_test).
     "cold-schedulers": [(FOOTPRINT,
@@ -191,7 +216,7 @@ MUTANTS = {
     # The close's teardown leaves no closed mark: a checkpoint or read after it runs against
     # the index and file set it destroyed (C2; --target=group_lifetime_test points).
     "no-closed-mark": [(GROUP,
-        "\t\t\t{\n\t\t\t\tstd::lock_guard lock(mu_);\n\t\t\t\tclosed_ = true;\n\t\t\t}\n",
+        "\t\t\tclosed_ = true;\n",
         "")],
     # The close stops after one checkpoint, whatever committed since (A5).
     "close-uncovered": [(GROUP,
@@ -200,7 +225,7 @@ MUTANTS = {
     # A failed open leaves its consensus row: the same process cannot open the id again
     # (--target=group_lifetime_test failed-open).
     "failed-open-keeps-row": [(GROUP,
-        "\t\ttry {\n\t\t\tco_await driver.close(id_);\n\t\t} catch (...) {}\n",
+        "\t\t\ttry {\n\t\t\t\tco_await driver.close(id_);\n\t\t\t} catch (...) {}\n",
         "")],
     # The index's sealer hands a record on the driver's repeat calls in one turn, past D4's
     # window (--target=standalone_turn_log_test; its `lag` case).

@@ -200,7 +200,8 @@ void default_limits() {
 	// turn-log segment (D132).
 	c.options.limits.log_bytes = cs::Limits{}.log_bytes;
 	c.options.limits.log_entries = cs::Limits{}.log_entries;
-	group_type g(lp, c, std::make_unique<fl::io>(x.dir_disk), x.app, task::scheduler_ref::of(chore_s));
+	group_test::borrowed<group_type> held;
+	auto& g = held.emplace(lp, c, std::make_unique<fl::io>(x.dir_disk), x.storage, {'g', 'r', 'o', 'u', 'p', '1'}, x.app, task::scheduler_ref::of(chore_s));
 	auto run_all = [&] {
 		for (int i = 0; i < 100000; ++i) {
 			if (!loop_s.run() && !chore_s.run()) { return; }

@@ -8,6 +8,7 @@
 // state) equals a replay from empty of the recovered log on a fresh index and an in-memory file
 // set. `lone_voter_test [first [stride]]` limits the crash points (ctest runs them all).
 #include "blob_app.hh"
+#include "group_catalog_borrow.hh"
 #include "host_io.hh"
 #include "oracle.hh"
 
@@ -74,9 +75,6 @@ group_type::config config(strata::byte_budget& storage) {
 	c.options.timing = cs::Timing{20, 40, 100, 200, 60000};
 	c.options.scheduling = cs::WorkerLimits{16, 128};
 	c.identity = j::Identity{'L', 'V'};
-	c.uuid = {'g', 'r', 'o', 'u', 'p'};
-	c.strata.keyed = true;
-	c.strata.storage = &storage;
 	return c;
 }
 
@@ -97,7 +95,7 @@ struct process {
 	j::InlineCompletion inline_io;
 	std::unique_ptr<j::Host> host;
 	std::unique_ptr<sg::loop> lp;
-	std::unique_ptr<group_type> g;
+	group_test::borrowed<group_type> g;
 	task::cancel_source stop;
 	bool turns_done = false, driver_done = false;
 
@@ -111,7 +109,7 @@ struct process {
 	}
 	// A new group object over the same directory, as a host does after a close.
 	void attach(blob::app& app) {
-		g = std::make_unique<group_type>(*lp, config(d.storage), std::make_unique<fl::io>(d.dir), app, task::scheduler_ref::of(chore_s));
+		g.emplace(*lp, config(d.storage), std::make_unique<fl::io>(d.dir), d.storage, {'g', 'r', 'o', 'u', 'p'}, app, task::scheduler_ref::of(chore_s));
 	}
 	task::scheduler_ref loop_ref() { return task::scheduler_ref::of(loop_s); }
 
