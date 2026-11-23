@@ -671,10 +671,6 @@ damaged block holds records of three groups: C (its head is past them), U (its b
 head) and W (no manifest, no later record). C opens with every record, and U and W fail `log_lost`.
 The mutant that opens every damaged group fails U, and today's rule fails C.
 
-Limit (owner, 2026-11-23): the bound survives only an open that completes. A power cut after the
-first open writes its open record but before the host stores the bound forgets the damage (journal
-`docs/mechanisms/lost-bound.md`, Limits). Quest `journal-bound-first-open` closes it.
-
 **A3. Large transactions.** A logged transaction must fit one record today (`command_bytes`,
 `index.hh:785`; `kv_strata` sets 1 MiB and applies a batch before it would pass it,
 `kv_strata.hh:252-254`). The transaction streams instead:
