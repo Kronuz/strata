@@ -145,6 +145,29 @@ again with a new group object.
 
 A crash inside recovery repeats it: truncation and deletion converge.
 
+## A damaged turn log
+
+When a block of the turn log is damaged, `Host::open` keeps a group whose records after the damage
+are contiguous, with its bound (the highest sequence the damage could hold): `GroupStatus::bounded`,
+stored in the group's table entry (journal's `lost-bound.md`). Strata follows it in two places:
+
+- **An index on the log** (`attach_log`) continues a bounded group only when its head is past the
+  bound, and replays the records after it. A head at or below the bound may lack records the damage
+  took, or the rest of the bound's own batch: the index calls `lose(g)` and the open throws
+  `log_lost`.
+- **A replicated group** (`group::open`, the witness's too) opens a bounded group through
+  `driver.recover`. Journal's Store holds a group through its latest checkpoint record, none of
+  which follows the bound, so it loses the group durably and throws `Corruption`; the failed open
+  fences the group and closes its row, and a restarted host holds it lost. `driver.create` would
+  refuse the table's entry and leave the group bounded.
+
+The journal changes between the pins (9e11713, 9c7e31c) that strata follows: `Host::delete_group`
+and `GroupState::deleted` (reported as `none`); `GroupStatus::bounded` with `Host::bound` and
+`Host::lose`; `create_group`/`reopen_group` commit with the loop's next turn with records, so each
+is durable before the group's first record (`turn_sealer`'s join order holds); a group's table
+calls run on its loop, which `turn_sealer` adopts under its turn mutex (`host-ranges.md`). Renamed
+or removed names (`park` to `evict`, the table shards' file names) are not called or read by strata.
+
 ## What it relies on
 
 - **A witness's compaction** (consensus, not exposed): a witness checkpoints only through what
