@@ -81,20 +81,20 @@ private:
 namespace strata {
 // Reads the accounting a public call does not show.
 struct index_test_access {
-	static std::uint64_t on_disk(const kv_index& ix) { return ix.on_disk_; }
-	static std::uint64_t inflight(const kv_index& ix) { return ix.inflight_; }
+	static std::uint64_t on_disk(const kv_index& ix) { return ix.ledger_.on_disk(); }
+	static std::uint64_t inflight(const kv_index& ix) { return ix.ledger_.in_flight(); }
 	static std::uint64_t sum_files(const kv_index& ix) {
 		std::uint64_t n = 0;
-		for (const auto& [name, size] : ix.files_) { n += size; }
+		for (const auto& [name, size] : ix.ledger_.files()) { n += size; }
 		return n;
 	}
 	static std::uint64_t sum_posted(const kv_index& ix) {
 		std::uint64_t n = 0;
-		for (const auto& [name, size] : ix.posted_) { n += size; }
+		for (const auto& [name, size] : ix.ledger_.posted()) { n += size; }
 		return n;
 	}
 	static bool drain(kv_index& ix) { return ix.drain(); }
-	static std::uint64_t unlinked(const kv_index& ix) { return ix.unlinked_; }
+	static std::uint64_t unlinked(const kv_index& ix) { return ix.ledger_.unlinked(); }
 };
 }  // namespace strata
 using peek = strata::index_test_access;
