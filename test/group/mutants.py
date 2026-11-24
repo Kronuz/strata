@@ -282,8 +282,8 @@ MUTANTS = {
     # An index opens a bounded group as a stored one: a head below the bound replays the records after it
     # and misses the damaged batches (--target=standalone_turn_log_test t5b).
     "bounded-as-stored": [(INDEX,
-        "status == kronuz::journal::GroupStatus::bounded && cur_.applied.index <= opts_.log->bound(g)",
-        "false && cur_.applied.index <= opts_.log->bound(g)")],
+        "status == kronuz::journal::GroupStatus::bounded && cur_.applied.index < opts_.log->bound(g)",
+        "false && cur_.applied.index < opts_.log->bound(g)")],
     # A head at the bound loses the group, though it holds that record's whole batch
     # (--target=standalone_turn_log_test t5b).
     "bounded-at-bound": [(INDEX,
