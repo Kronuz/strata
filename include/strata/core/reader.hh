@@ -777,6 +777,14 @@ public:
 	void verify_all() const {
 		(..., verify_all_of<Entries>());
 	}
+	// Every field id a plugin's reader holds lies in a table of `size` fields and none is the key
+	// field (fields-and-keys D7); throws corrupt_segment at the first that does not. A plugin with
+	// no field ids has no check_fields, and costs nothing here.
+	void check_fields(std::uint64_t size, std::optional<std::uint32_t> key) const {
+		(..., [&] {
+			if constexpr (requires { get<Entries>().check_fields(size, key); }) { get<Entries>().check_fields(size, key); }
+		}());
+	}
 	// The plugins' length statistics (L9, the manifest's): the segment's total and a document's;
 	// 0 for a layout whose plugins keep none.
 	std::uint64_t total_length() const {

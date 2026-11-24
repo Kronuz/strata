@@ -514,11 +514,9 @@ auto basic_index<Layout>::open_body_of(kronuz::journal::IO& io, const files::seg
 	if (std::memcmp(view.data() + format::identity_offset, r.identity.data(), 16) != 0) { throw corrupt_index("segment identity differs from its manifest entry"); }
 	auto b = mapped ? std::make_unique<segment_body>(std::move(mapped)) : std::make_unique<segment_body>(std::move(bytes));
 	if (b->seg.core().doc_count() != r.doc_count) { throw corrupt_index("segment document count"); }
-	// The manifest vouches for its segments: one outside its mask or version range is damage.
-	const std::uint32_t ver = b->seg.core().version();
-	if ((b->seg.core().structures() & ~v.mask) || ver < v.min_version || ver > v.max_version) {
-		throw corrupt_segment("segment outside its manifest's structures or versions");
-	}
+	// The manifest vouches for its segments: one outside its claim is damage. Every map runs it:
+	// an eager open, a lazy first read, a merge's input, a wake, a heal, an install.
+	v.check(b->seg);
 	if (whole) { b->seg.verify_all(); }
 	return b;
 }

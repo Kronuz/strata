@@ -1672,10 +1672,23 @@ private:
 		std::atomic<std::uint64_t> lost{0};     // maps whose body lost the install race and was destroyed
 	};
 	// The manifest's claim a mapped file must meet (F2, F20): its structures within `mask`, its
-	// version within the range. Copied from the manifest the record was made under.
+	// version within the range, its field ids within a table of `fields` and none `key_field`
+	// (docs/mechanisms/field-check.md). Copied from the manifest the record was made under; a
+	// segment this process wrote holds ids stage 1 checked, so its vouch bounds no field.
 	struct vouch {
+		static constexpr std::uint64_t any_fields = ~std::uint64_t(0);
 		format::structure_bits mask = ~format::structure_bits(0);
 		std::uint32_t min_version = 0, max_version = ~std::uint32_t(0);
+		std::uint64_t fields = any_fields;
+		std::optional<std::uint32_t> key_field;
+		// Throws corrupt_segment when the decoded segment breaks the claim: run at every map.
+		void check(const segment& sg) const {
+			const std::uint32_t ver = sg.core().version();
+			if ((sg.core().structures() & ~mask) || ver < min_version || ver > max_version) {
+				throw corrupt_segment("segment outside its manifest's structures or versions");
+			}
+			if (fields != any_fields) { sg.check_fields(fields, key_field); }
+		}
 	};
 	// A segment file mapped (or its bytes, when the backend cannot map) and decoded. Immutable,
 	// installed on a record once and never replaced or cleared before the record dies (I1). It
@@ -2819,7 +2832,9 @@ private:
 	// Refuses configured bits no flush could write, as damage (CR5): each bit's owner set
 	// (F4), and the keys bit set exactly when the index is keyed (F8).
 	static void check_readable(std::uint64_t configured);
-	static vouch vouch_of(const files::log_state& m) noexcept { return {m.mask, std::uint32_t(m.min_version), std::uint32_t(m.max_version)}; }
+	static vouch vouch_of(const files::log_state& m) noexcept {
+		return {m.mask, std::uint32_t(m.min_version), std::uint32_t(m.max_version), m.fields.size(), m.fields.key_field()};
+	}
 	static files::segment_ref ref_of(const files::log_segment& s);
 	// The segments a state names, checked against its entries: each segment's size, footer
 	// checksum, and document count (and every byte, when `whole`), its deleted set converted to the
@@ -2838,8 +2853,9 @@ private:
 		const std::shared_ptr<load_context>& load);
 	static std::unique_ptr<segment_body> open_body(kronuz::journal::IO& io, const files::segment_ref& r, const vouch& v, bool whole);
 	// Opens, maps and checks a segment file against its manifest entry: size, footer, identity,
-	// document count, and structures and versions against `v`; every byte when `whole`. A map that
-	// fails for a reason of the host throws unchanged; the caller tells it from damage.
+	// document count, and the claim `v` (structures, versions, field ids); every byte when
+	// `whole`. A map that fails for a reason of the host throws unchanged; the caller tells it
+	// from damage.
 	static std::unique_ptr<segment_body> open_body_of(kronuz::journal::IO& io, const files::segment_ref& r, const vouch& v, bool whole);
 
 	// Shared with every record: the IO and the counters their maps write.
