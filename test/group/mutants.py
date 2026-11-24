@@ -284,13 +284,18 @@ MUTANTS = {
     "bounded-as-stored": [(INDEX,
         "status == kronuz::journal::GroupStatus::bounded && cur_.applied.index <= opts_.log->bound(g)",
         "false && cur_.applied.index <= opts_.log->bound(g)")],
-    # A head at the bound counts as past it (--target=standalone_turn_log_test t5b).
+    # A head at the bound loses the group, though it holds that record's whole batch
+    # (--target=standalone_turn_log_test t5b).
     "bounded-at-bound": [(INDEX,
-        "cur_.applied.index <= opts_.log->bound(g)",
-        "cur_.applied.index < opts_.log->bound(g)")],
+        "cur_.applied.index < opts_.log->bound(g)",
+        "cur_.applied.index <= opts_.log->bound(g)")],
     # A bounded group opens through create, not recover: the table's entry stays bounded and the open
     # fails on it, not as the Store's loss (--target=group_lifetime_test bounded).
     "bounded-created": [(GROUP,
+        "status == jn::GroupStatus::closed || status == jn::GroupStatus::bounded) {",
+        "status == jn::GroupStatus::closed) {")],
+    # A witness opens a bounded group through create, not recover (--target=group_lifetime_test bounded-witness).
+    "bounded-witness-created": [(WITNESS,
         "status == jn::GroupStatus::closed || status == jn::GroupStatus::bounded) {",
         "status == jn::GroupStatus::closed) {")],
 }

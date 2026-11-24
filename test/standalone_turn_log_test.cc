@@ -907,7 +907,7 @@ void t5d() {
 // --- T5b: a bounded group -----------------------------------------------------------------------
 
 // Damage to one block of the log leaves the group bounded (journal's lost-bound.md): the bound is the
-// highest sequence the block holds of it, and the index continues only when its head is past it.
+// highest sequence the block holds of it, and the index continues when its head holds the group through it.
 
 // A log of k0 (committed, with its checkpoint record) and `writes` more batches, each acknowledged by
 // its turn, with no checkpoint after them. The head is committed after write `commit_after` (-1:
@@ -1002,11 +1002,17 @@ void t5b() {
 		host h(io);
 		CHECK(h.table.status(group) == jr::GroupStatus::lost);  // durably
 	}
-	// The head at the bound's own write: it may lack the rest of that batch's record: lost.
+	// The head at the bound's own write holds that record's whole batch (a commit seals it): kept.
 	{
 		fl::filesystem fs;
 		const bounded_log log = bounded_build(fs, writes, straddle);
-		CHECK(bounded_open(fs, log, block, true) == outcome::lost);
+		CHECK(bounded_open(fs, log, block, true) == outcome::kept);
+	}
+	// The head one write past the bound: kept, with the record after the bound replayed or skipped.
+	{
+		fl::filesystem fs;
+		const bounded_log log = bounded_build(fs, writes, straddle + 1);
+		CHECK(bounded_open(fs, log, block, true) == outcome::kept);
 	}
 	// The head past the bound: every acknowledged write is there.
 	{

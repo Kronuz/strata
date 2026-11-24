@@ -105,7 +105,7 @@ public:
 		return host_.status(group);
 	}
 	// A bounded group's bound (GroupStatus::bounded): the highest sequence damage to its log could
-	// hold. An index whose head does not pass it loses the group: lose(), durable when it returns.
+	// hold. An index whose head ends below it loses the group: lose(), durable when it returns.
 	std::uint64_t bound(std::uint64_t group) {
 		const auto turn = hold_loop();
 		return host_.bound(group);

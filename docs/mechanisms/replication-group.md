@@ -151,10 +151,10 @@ When a block of the turn log is damaged, `Host::open` keeps a group whose record
 are contiguous, with its bound (the highest sequence the damage could hold): `GroupStatus::bounded`,
 stored in the group's table entry (journal's `lost-bound.md`). Strata follows it in two places:
 
-- **An index on the log** (`attach_log`) continues a bounded group only when its head is past the
-  bound, and replays the records after it. A head at or below the bound may lack records the damage
-  took, or the rest of the bound's own batch: the index calls `lose(g)` and the open throws
-  `log_lost`.
+- **An index on the log** (`attach_log`) continues a bounded group when its head holds it through
+  the bound (a head at the bound holds that record's whole batch), and replays the records after it.
+  A head below the bound may lack records the damage took: the index calls `lose(g)` and the open
+  throws `log_lost`.
 - **A replicated group** (`group::open`, the witness's too) opens a bounded group through
   `driver.recover`. Journal's Store holds a group through its latest checkpoint record, none of
   which follows the bound, so it loses the group durably and throws `Corruption`; the failed open

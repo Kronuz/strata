@@ -26,13 +26,14 @@
 // the loop's table; the same process then reopens the group over its directory and reads every
 // acknowledged entry.
 // bounded: a damaged turn log leaves the group bounded; its open loses it and fails closed.
-// `group_lifetime_test [held|points|reopen|reopen-turn|failed-open|bounded]`.
+// `group_lifetime_test [held|points|reopen|reopen-turn|failed-open|bounded|bounded-witness]`.
 #include "blob_app.hh"
 #include "group_catalog_borrow.hh"
 #include "host_io.hh"
 #include "oracle.hh"
 
 #include "faultlab/faultfs.h"
+#include "strata/group/witness.hh"
 
 #include <atomic>
 #include <chrono>
@@ -673,9 +674,10 @@ void failed_open() {
 
 // A group whose turn log took damage is bounded (journal's lost-bound.md): a consensus group holds
 // its state through a checkpoint record, none of which follows the bound, so its open loses the
-// group durably and fails closed, as a lost group's, and the next host still holds it lost.
-void bounded() {
-	context = "bounded";
+// group durably and fails closed, as a lost group's, and the next host still holds it lost. The
+// witness opens the same way (`as_witness`: the restarted process opens the id as a witness).
+void bounded(bool as_witness) {
+	context = as_witness ? "bounded witness" : "bounded";
 	disks d;
 	std::map<std::uint64_t, blob::app::seen_entry> seen;
 	blob::app app;
@@ -708,14 +710,17 @@ void bounded() {
 	}
 	p = std::make_unique<process>(d, app);
 	check(p->host->status(gid) == j::GroupStatus::bounded, "the damaged log leaves the group bounded");
-	auto o = start(p->ref(), p->g->open());
+	std::unique_ptr<sg::witness> w;
+	if (as_witness) { w = std::make_unique<sg::witness>(*p->lp, sg::witness::config{gid, config(gid, d.storage).options, config(gid, d.storage).identity, std::nullopt}); }
+	auto o = as_witness ? start(p->ref(), w->open()) : start(p->ref(), p->g->open());
 	settle(o);
 	check(o->error != nullptr, "the open of a bounded group fails");
 	check(what(o->error).find("the turn log lost this group") != std::string::npos, "it fails as a lost group: " + what(o->error));
 	check(p->host->status(gid) == j::GroupStatus::lost, "the host loses the group durably");
-	check(p->g->fenced(), "the failed group is fenced");
-	check(!p->lp->find(gid), "the failed open left the loop's table");
+	check(as_witness ? w->fenced() : p->g->fenced(), "the failed group is fenced");
+	if (!as_witness) { check(!p->lp->find(gid), "the failed open left the loop's table"); }
 	check(p->lp->driver().groups() == 0, "the failed open closed its row: " + std::to_string(p->lp->driver().groups()) + " rows");
+	w.reset();
 	p->shut();
 	p = std::make_unique<process>(d, app);
 	check(p->host->status(gid) == j::GroupStatus::lost, "a restarted host still holds the group lost");
@@ -731,7 +736,8 @@ int main(int argc, char** argv) {
 	if (only.empty() || only == "reopen") { reopen(false); }
 	if (only == "reopen-turn") { reopen(true); }
 	if (only.empty() || only == "failed-open") { failed_open(); }
-	if (only.empty() || only == "bounded") { bounded(); }
+	if (only.empty() || only == "bounded") { bounded(false); }
+	if (only.empty() || only == "bounded-witness") { bounded(true); }
 	std::printf("lifetime: %s\n", failures ? "FAIL" : "ok");
 	return failures ? 1 : 0;
 }
