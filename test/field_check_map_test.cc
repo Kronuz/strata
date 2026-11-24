@@ -213,7 +213,7 @@ static void lazy_first_read(const std::function<void(fl::io&)>& damage, const ch
 }
 
 // A merge maps its inputs: the damaged one is refused and left out, the others merge.
-static void merge_input(const std::function<void(fl::io&)>& damage, const char* field) {
+static void merge_inputs(const std::function<void(fl::io&)>& damage, const char* field) {
 	fl::filesystem fs;
 	fl::io io{fs};
 	build(io, shape);
@@ -246,7 +246,7 @@ int main() {
 	for (const auto& [damage, field] : damages) {
 		eager_open(damage, field);
 		lazy_first_read(damage, field);
-		merge_input(damage, field);
+		merge_inputs(damage, field);
 	}
 	std::printf("field_check_map: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
