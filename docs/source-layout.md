@@ -27,6 +27,7 @@ and compiles alone. `docs/mechanisms/index-layout.md` says why each mechanism is
 | `index_merge.hh` | background merges: scheduling, the merge job, publication, abandonment |
 | `index_read.hh` | lookups, scans, reads at a position, the shared segment reads, digest and check |
 | `index_publish.hh` | shared readers: the views published, retired and freed |
+| `index_ledger.hh` | `index_detail::file_ledger`, basic_index's subobject for each file's bytes until freed; included by `index.hh` before the class |
 
 `index.hh` is about 2,970 lines, 2,100 of them `basic_index`'s body: about 1,100 lines of nested
 types and the declarations with their comments. Step 2 of the restructure decides which state

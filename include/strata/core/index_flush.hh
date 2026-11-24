@@ -53,7 +53,7 @@ std::unique_ptr<kronuz::journal::File> basic_index<Layout>::write_unsynced(const
 		sync_dir();  // the partial file's space returns once its removal is durable
 		throw space_error(e.code(), e.what());
 	}
-	track(name, bytes.size());
+	ledger_.track(name, bytes.size());
 	return f;
 }
 
@@ -194,7 +194,7 @@ void basic_index<Layout>::flush_active(const buffer& b) {
 		sync_dir();
 		throw space_error(e.code(), e.what());
 	}
-	track(name, sink.size());
+	ledger_.track(name, sink.size());
 	files::segment_ref ref;
 	ref.id = id;
 	ref.identity = header;
@@ -302,7 +302,7 @@ void basic_index<Layout>::flush_documents(buffer& b) {
 				throw space_error(e.code(), e.what());
 			}
 		}
-		for (std::size_t k = 0; k < runs; ++k) { track(names[k], sizes[k]); }
+		for (std::size_t k = 0; k < runs; ++k) { ledger_.track(names[k], sizes[k]); }
 		for (std::size_t k = 0; k < runs; ++k) {
 			files::segment_ref ref;
 			ref.id = ids[k];

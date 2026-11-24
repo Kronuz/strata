@@ -14,6 +14,7 @@
 #include "strata/core/files.hh"
 #include "strata/core/manifest_log.hh"
 #include "strata/core/hazard.hh"
+#include "strata/core/index_ledger.hh"
 #include "strata/core/merge.hh"
 #include "strata/core/merge_policy.hh"
 #include "strata/core/owner.hh"
@@ -1030,7 +1031,7 @@ public:
 	// there is nothing to wait for.
 	void wait_deletes();
 	// Files posted for deletion whose outcome the owner has not yet collected.
-	std::size_t deletes_pending() const noexcept { return posted_.size(); }
+	std::size_t deletes_pending() const noexcept { return ledger_.posted().size(); }
 
 	// The kept manifest (a pin or a retained predecessor) whose read failed in the last
 	// retention round, which then removed nothing; retention resumes once it reads or the
@@ -2473,7 +2474,7 @@ private:
 	// channel. A file already gone counts as removed; any other failure reports the size left.
 	static void run_delete(kronuz::journal::IO& io, delete_chan& ch, const std::string& name, std::uint64_t size, std::uint64_t step, const task::cancel_token& stop);
 
-	// Takes the posted deletes' outcomes: a removed file's bytes wait in `unlinked_` for a
+	// Takes the posted deletes' outcomes: a removed file's bytes wait as unlinked for a
 	// directory sync; a failed one returns to the files on record at the size left, and to
 	// the queue's front, its bytes owed again.
 	void collect_deletes();
@@ -2510,11 +2511,9 @@ private:
 		}
 	};
 
-	void track(const std::string& name, std::uint64_t size);
-	void remove_file(const std::string& name);
 	// A removed file's bytes stay counted until a directory sync makes its removal durable:
 	// filesystems release the blocks then, not at the unlink.
-	void forget_file(const std::string& name);
+	void remove_file(const std::string& name);
 	// While the open's head is owed its sync, every directory sync is that sync, so no
 	// writeback error is taken outside it (sync-at-first-commit D4).
 	void sync_dir();
@@ -2897,7 +2896,7 @@ private:
 	std::vector<undo_step> undo_;
 	byte_budget::permit permit_;
 	byte_budget::permit storage_permit_;
-	std::map<std::string, std::uint64_t> files_;  // the index's files and their sizes
+	index_detail::file_ledger ledger_;  // the index's files and their sizes, until each is freed
 	std::map<std::uint64_t, std::vector<std::string>> kept_files_;  // a kept generation's files, its log included
 	bool retain_owed_ = false;  // an open's: retention waits for the first commit, reclaim() or a drain (D6.6)
 	bool inherited_owed_ = false;  // the open's head awaits its sync (sync-at-first-commit D1)
@@ -2908,10 +2907,7 @@ private:
 	std::optional<fallback_report> fallback_;
 	std::optional<strata::filesystem_warning> fs_warning_;
 	std::optional<strata::directory_trust_warning> trust_warning_;
-	std::uint64_t on_disk_ = 0, reserved_ = 0;
-	std::uint64_t unlinked_ = 0;  // removed, awaiting a directory sync to be freed
-	std::uint64_t inflight_ = 0;  // posted for deletion, not yet removed: counted as on disk
-	std::map<std::string, std::uint64_t> posted_;  // those files and their sizes
+	std::uint64_t reserved_ = 0;
 	std::uint64_t obsoleted_ = 0;  // bytes the merges published in this call made obsolete
 	std::uint64_t debt_ = 0;       // obsoleted bytes not yet reclaimed: publishes and commits pay it
 	std::uint64_t truncated_ = 0;  // truncated in this reclaim step, awaiting the file's sync

@@ -234,7 +234,7 @@ void basic_index<Layout>::publish_merges(bool wait, bool space_throws) {
 		if (job->error) {
 			job->storage.settle();
 			job->memory.settle();
-			unlinked_ += job->removed;
+			ledger_.add_unlinked(job->removed);
 			try {
 				std::rethrow_exception(job->error);
 			} catch (const space_error& e) {
@@ -294,7 +294,7 @@ void basic_index<Layout>::install_merge(merge_job& job) {
 	const std::string name = index_detail::segment_name(job.id);
 	auto reclaim_output = [&] {
 		if (!job.output) { return; }
-		track(name, job.output->ref.size);
+		ledger_.track(name, job.output->ref.size);
 		obsoleted_ += job.output->ref.size;
 		job.output.reset();
 		reclaim_.push_back(name);
@@ -340,7 +340,7 @@ void basic_index<Layout>::install_merge(merge_job& job) {
 		if (job.output) {
 			// Its id was taken at scheduling, below any flushed since: it goes in id order,
 			// which the manifest requires.
-			track(name, job.output->ref.size);
+			ledger_.track(name, job.output->ref.size);
 			const auto at_id = std::lower_bound(segs_.begin(), segs_.end(), job.id, [](const auto& s, std::uint64_t id) { return s->ref.id < id; });
 			segs_.emplace(at_id, std::move(job.output));
 		}
@@ -387,7 +387,7 @@ void basic_index<Layout>::abandon_merges() {
 		const job_drop drop{*job};
 		if (job->done.load(std::memory_order_acquire) && job->output) {
 			const std::string name = index_detail::segment_name(job->id);
-			track(name, job->output->ref.size);
+			ledger_.track(name, job->output->ref.size);
 			job->output.reset();
 			reclaim_.push_back(name);
 			queued_.insert(name);

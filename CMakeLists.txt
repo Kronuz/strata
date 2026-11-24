@@ -439,6 +439,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
       target_link_options(fuzz_${target} PRIVATE -fsanitize=fuzzer,address,undefined)
     endif()
   endforeach()
+  # basic_index's subobjects' tests: one CMake file per subobject (test/index/*.cmake).
+  file(GLOB index_tests CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test/index/*.cmake")
+  foreach(index_test ${index_tests})
+    include("${index_test}")
+  endforeach()
   # strata::placement's tests: one CMake file per part (test/placement/*.cmake).
   file(GLOB placement_tests CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test/placement/*.cmake")
   foreach(placement_test ${placement_tests})

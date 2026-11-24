@@ -2,7 +2,7 @@
 
 > Status: step 1 of quest index-restructure: member definitions out of the class body, one header
 > per mechanism, moved by cpp-libraries' `tools/outline.py` and proved by `split_check.py --members`.
-> Step 2 (subobjects) has not started; its candidates are below.
+> Step 2 extracts subobjects where one wins: the file ledger so far (below).
 
 ## The shape
 
@@ -50,24 +50,52 @@ The nested types stay in the class body (about 1,100 lines: open_segment, record
 reading, reader_handle, snapshot, and the merge job's file, output, spill and scratch classes),
 because the data members and the declarations name them.
 
-Step 2's candidates, where state and invariants stand apart from the rest:
+## Subobjects (step 2)
 
-1. The storage ledger: on_disk_, reserved_, unlinked_, inflight_, posted_, obsoleted_, debt_,
-   truncated_, held_, allowance_, files_, reclaim_, queued_ and the delete channel. Its invariant
-   (every file's bytes counted once, as on disk, posted, unlinked or freed) is stated across
-   index_storage.hh today.
-2. The turn log's state: logged_, visible_, join_owed_, attributes_owed_, replaying_, the group
-   attachment. Its invariants (V never passes the synced sequence, the join waits for its
-   attribute's edit) belong to standalone-turn-log alone.
-3. The manifest log writer: log_, appender_, log_g_, log_end_, log_edits_, rollover_owed_,
-   next_generation_, deleted_since_, meta_since_ (the change list since the head).
-4. The retention window: kept_files_, pending_pin_, pending_unpin_, retain_owed_,
-   retention_blocked_, inherited_owed_, inherited_below_.
-5. The undo log: undo_ and mark_, with rollback's order.
-6. The defer_io owed turns: drain_asked_, drain_ran_, promote_owed_, map_asked_ (cold-tier
-   CT-R22's one answer per transaction).
-7. The merge job's classes (merge_file, merge_output, merge_spill, merge_scratch), which only
-   run_merge uses, can leave the class body for index_merge.hh.
+### The file ledger (`index_ledger.hh`)
 
-Each is judged on maintenance when step 2 runs: fewer members a reader must hold in mind, and the
+`index_detail::file_ledger`, basic_index's `ledger_`, holds each of the index's files and its
+size until the filesystem frees its bytes. A file is in one of three states: on disk (on record,
+`files()`), in flight (its delete posted to the executor, `posted()`), or unlinked (removed, its
+blocks held until a directory sync makes the removal durable). Each transition is one call:
+`track` (a file written, grown or truncated), `rename` (commit's temporary log to its manifest
+name), `forget` (removed in place), `post` (a delete posted), `removed` (a posted delete's
+removal), `unpost` (a failed or dropped delete, tracked again at the size left), `add_unlinked`
+(a failed merge's removed output, never on record) and `synced` (a directory sync). Its invariant,
+stated once in the class: `on_disk()` is the sum of the files' sizes, `in_flight()` the sum of the
+posted ones', and no name is in both, so `counted()` holds each file's bytes once. That figure is
+what `settle_storage` asks the storage permit for, with the reservations beside it.
+
+It leaves basic_index because five members (files_, on_disk_, posted_, inflight_, unlinked_) and
+their arithmetic were spread over eleven sites in five headers, each keeping the invariant by
+hand; the transitions now name what happens to a file and the reader holds one member. Its tests
+are `test/index/ledger_test.cc` (each transition, and a random sequence against a model of each
+file's state) with four mutants in `test/index/ledger_mutants.py`, each killed by a named case.
+
+What stays in basic_index: the reclaim queue (reclaim_, queued_) and the pacing figures (debt_,
+obsoleted_, truncated_), and the reservations (reserved_, held_, allowance_). These are not a
+file's state: they decide when and how much reclaim runs and what the permit holds for writes in
+progress, and each is read beside the index's other state (merges, commits, the buffer).
+
+## Candidates not extracted
+
+The other places where state stands apart, and why each stays for now:
+
+1. The turn log's state: its group state is already one object (`logged_`, a `log_state`); the
+   flags beside it (join_owed_, attributes_owed_, replaying_) are each read at one or two sites
+   in apply, commit and replay, so a class would add a layer without removing a member to track.
+2. The manifest log writer (log_, appender_, log_g_, log_end_, log_edits_, rollover_owed_,
+   next_generation_, deleted_since_, meta_since_): not attempted. Its state is commit's, written
+   inside `durable()` and read by open's recovery and retention, so a cut needs its own design.
+3. The retention window (kept_files_, pending_pin_, pending_unpin_, retain_owed_,
+   retention_blocked_, inherited_owed_, inherited_below_): not attempted; it reads the ledger's
+   files and the views, so it would follow the ledger, not stand beside it.
+4. The undo log (undo_, mark_): rollback restores the buffer, the segments, the field table and
+   the metadata, so its body is basic_index's whatever holds the vector.
+5. The defer_io owed turns (drain_asked_, drain_ran_, promote_owed_, map_asked_): four flags of
+   one protocol (cold-tier CT-R22), each set and read at one site.
+6. The merge job's classes (merge_file, merge_output, merge_spill, merge_scratch) can leave the
+   class body for index_merge.hh: a move, not a subobject, left for a later restructure.
+
+Each later extraction is judged the same way: fewer members a reader must hold in mind, and the
 invariant stated in one place.

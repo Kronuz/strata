@@ -70,23 +70,14 @@ void basic_index<Layout>::collect_deletes() {
 		failed.swap(del_chan_->failed);
 		del_chan_->ready.store(0, std::memory_order_relaxed);
 	}
-	for (const auto& name : done) {
-		if (auto it = posted_.find(name); it != posted_.end()) {
-			inflight_ -= it->second;
-			unlinked_ += it->second;
-			posted_.erase(it);
-		}
-	}
+	for (const auto& name : done) { ledger_.removed(name); }
 	for (auto it = failed.rbegin(); it != failed.rend(); ++it) { requeue_delete(it->name, it->left); }
 }
 
 template <class Layout>
 void basic_index<Layout>::requeue_delete(const std::string& name, std::uint64_t left) {
-	const auto it = posted_.find(name);
-	if (it == posted_.end()) { return; }
-	inflight_ -= it->second;
-	posted_.erase(it);
-	track(name, left);
+	if (!ledger_.unpost(name)) { return; }
+	ledger_.track(name, left);
 	reclaim_.push_front(name);
 	queued_.insert(name);
 	debt_ += left;
@@ -97,7 +88,7 @@ void basic_index<Layout>::finish_deletes() {
 	if (!del_group_) { return; }
 	del_group_->wait();
 	collect_deletes();
-	const std::vector<std::pair<std::string, std::uint64_t>> dropped(posted_.begin(), posted_.end());
+	const std::vector<std::pair<std::string, std::uint64_t>> dropped(ledger_.posted().begin(), ledger_.posted().end());
 	for (const auto& [name, size] : dropped) { requeue_delete(name, size); }
 }
 
@@ -120,14 +111,7 @@ std::uint64_t basic_index<Layout>::reclaim_posted(std::uint64_t bytes) {
 		const std::string name = std::move(reclaim_.front());
 		reclaim_.pop_front();
 		queued_.erase(name);
-		std::uint64_t size = 0;
-		if (auto it = files_.find(name); it != files_.end()) {
-			size = it->second;
-			on_disk_ -= size;
-			files_.erase(it);
-		}
-		inflight_ += size;
-		posted_[name] = size;
+		const std::uint64_t size = ledger_.post(name);
 		freed += size;
 		try {
 			del_group_->post([chan = del_chan_, io = io_, name, size, step = opts_.reclaim_step](const task::cancel_token& stop) { run_delete(*io, *chan, name, size, step, stop); });
@@ -149,8 +133,7 @@ std::uint64_t basic_index<Layout>::reclaim_files(std::uint64_t bytes) {
 	std::uint64_t freed = 0;
 	while (!reclaim_.empty() && freed < bytes) {
 		const std::string name = reclaim_.front();
-		auto it = files_.find(name);
-		std::uint64_t size = it == files_.end() ? 0 : it->second;
+		std::uint64_t size = ledger_.size_of(name);
 		std::unique_ptr<kronuz::journal::File> f;
 		std::uint64_t cut = 0;
 		try {
@@ -160,7 +143,7 @@ std::uint64_t basic_index<Layout>::reclaim_files(std::uint64_t bytes) {
 				while (size > opts_.reclaim_step && freed + cut < bytes) {
 					size -= opts_.reclaim_step;
 					f->truncate(size);
-					track(name, size);
+					ledger_.track(name, size);
 					truncated_ += opts_.reclaim_step;
 					cut += opts_.reclaim_step;
 				}
@@ -176,13 +159,13 @@ std::uint64_t basic_index<Layout>::reclaim_files(std::uint64_t bytes) {
 			if (cut) {
 				truncated_ -= cut;
 				try {
-					track(name, f->size());
+					ledger_.track(name, f->size());
 				} catch (const std::system_error&) {
 				}
 			}
 			// The commits stand; the file stays queued for a later round, unless it is gone.
 			if (e.code().value() != ENOENT) { break; }
-			forget_file(name);
+			ledger_.forget(name);
 		}
 		freed += size;
 		queued_.erase(name);
@@ -195,32 +178,16 @@ std::uint64_t basic_index<Layout>::reclaim_files(std::uint64_t bytes) {
 }
 
 template <class Layout>
-void basic_index<Layout>::track(const std::string& name, std::uint64_t size) {
-	auto& at = files_[name];
-	on_disk_ += size - at;
-	at = size;
-}
-
-template <class Layout>
 void basic_index<Layout>::remove_file(const std::string& name) {
 	io_->remove(name);
-	forget_file(name);
-}
-
-template <class Layout>
-void basic_index<Layout>::forget_file(const std::string& name) {
-	if (auto it = files_.find(name); it != files_.end()) {
-		on_disk_ -= it->second;
-		unlinked_ += it->second;
-		files_.erase(it);
-	}
+	ledger_.forget(name);
 }
 
 template <class Layout>
 void basic_index<Layout>::sync_dir() {
 	if (inherited_owed_) { return sync_inherited(); }
 	io_->sync_directory();
-	unlinked_ = 0;
+	ledger_.synced();
 }
 
 template <class Layout>
@@ -231,7 +198,7 @@ void basic_index<Layout>::sync_inherited() {
 		if (!f) { f = (opened = io_->open_existing(index_detail::manifest_name(log_g_))).get(); }
 		io_->sync_files_and_directory({&f, 1});
 	});
-	unlinked_ = 0;
+	ledger_.synced();
 	inherited_owed_ = false;
 }
 
@@ -260,17 +227,17 @@ std::uint64_t basic_index<Layout>::commit_allowance() const {
 template <class Layout>
 bool basic_index<Layout>::drain_pending() {
 	collect_deletes();
-	return retain_owed_ || !reclaim_.empty() || unlinked_ || inflight_;  // an open's retention runs in the drain
+	return retain_owed_ || !reclaim_.empty() || ledger_.unlinked() || ledger_.in_flight();  // an open's retention runs in the drain
 }
 
 template <class Layout>
 bool basic_index<Layout>::drain() {
 	collect_deletes();
 	if (retain_owed_) { retain(); }
-	if (reclaim_.empty() && !unlinked_ && !inflight_) { return false; }
+	if (reclaim_.empty() && !ledger_.unlinked() && !ledger_.in_flight()) { return false; }
 	reclaim();
 	finish_deletes();
-	if (unlinked_) {
+	if (ledger_.unlinked()) {
 		try {
 			sync_dir();
 		} catch (const std::system_error&) {
@@ -285,7 +252,7 @@ template <class Layout>
 void basic_index<Layout>::settle_storage() {
 	if (!storage_permit_) { return; }
 	allowance_ = commit_allowance();
-	const std::uint64_t want = on_disk_ + unlinked_ + inflight_ + truncated_ + reserved_ + allowance_ + held_;
+	const std::uint64_t want = ledger_.counted() + truncated_ + reserved_ + allowance_ + held_;
 	if (want > storage_permit_.bytes()) {
 		storage_permit_.grow(want - storage_permit_.bytes());
 	} else {

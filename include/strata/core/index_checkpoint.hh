@@ -133,7 +133,7 @@ void basic_index<Layout>::retain(bool) {
 		for (const auto& sv : v.views_) { referenced.insert(index_detail::segment_name(sv.id)); }
 	});
 	std::vector<std::string> out;
-	for (const auto& [n, size] : files_) {
+	for (const auto& [n, size] : ledger_.files()) {
 		if (!referenced.count(n) && !queued_.count(n)) { out.push_back(n); }
 	}
 	// A file the open's head dropped leaves only once that head is durable (D4).
@@ -148,7 +148,7 @@ template <class Layout>
 const std::vector<std::string>* basic_index<Layout>::kept_files(std::uint64_t g, bool pinned, bool& blocked) {
 	if (auto it = kept_files_.find(g); it != kept_files_.end()) { return &it->second; }
 	std::optional<std::uint64_t> holder;
-	for (const auto& [n, size] : files_) {
+	for (const auto& [n, size] : ledger_.files()) {
 		if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest && p->a <= g && (!holder || p->a > *holder)) { holder = p->a; }
 	}
 	if (!holder) { return nullptr; }

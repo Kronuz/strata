@@ -212,7 +212,7 @@ bool basic_index<Layout>::close_ready() {
 	live();
 	if (!warm_quiescent() || applied_since_commit_ != 0) { return false; }
 	collect_deletes();
-	return posted_.empty() && reclaim_.empty() && debt_ == 0;
+	return ledger_.posted().empty() && reclaim_.empty() && debt_ == 0;
 }
 
 template <class Layout>
@@ -312,7 +312,7 @@ void basic_index<Layout>::recover(std::optional<std::uint64_t> to) {
 	for (const auto& n : names) {
 		auto p = index_detail::parse_name(n);
 		if (!p) { continue; }
-		track(n, read_checked([&] { return io_->open_existing(n)->size(); }, &load_->retries));  // an EIO twice is damage
+		ledger_.track(n, read_checked([&] { return io_->open_existing(n)->size(); }, &load_->retries));  // an EIO twice is damage
 		switch (p->type) {
 		case index_detail::parsed_name::manifest:
 			logs.push_back(p->a);
@@ -342,7 +342,7 @@ void basic_index<Layout>::recover(std::optional<std::uint64_t> to) {
 	m_ = std::move(lr.state);
 	check_readable(m_.configured);
 	// Lazy: the names and sizes the scan recorded stand for the segment files (cold-tier D11).
-	segs_ = load_files(*io_, m_, false, load_, opts_.eager_segments ? nullptr : &files_);
+	segs_ = load_files(*io_, m_, false, load_, opts_.eager_segments ? nullptr : &ledger_.files());
 	meta_ = m_.metadata;
 	fields_ = m_.fields;
 	cur_ = {m_.uuid, m_.last_docid, std::max(m_.next_segment, max_segment + 1), m_.schema_version, m_.configured, {m_.applied_index, m_.applied_count}};
@@ -353,13 +353,13 @@ void basic_index<Layout>::recover(std::optional<std::uint64_t> to) {
 	// A log that does not end at its last whole record replayed (a torn tail, or records past
 	// `to`) is never appended to: the next commit rolls over (D6.4, D7), skipping the torn
 	// record's generation (D6.7). Counters start above every name on disk (D3).
-	rollover_owed_ = lr.dirty || lr.end != files_[index_detail::manifest_name(chosen)];
+	rollover_owed_ = lr.dirty || lr.end != ledger_.size_of(index_detail::manifest_name(chosen));
 	next_generation_ = std::max(m_.generation + 1 + (rollover_owed_ ? 1 : 0), top + 1);
 	std::optional<std::uint64_t> newest;
 	if (to) {
 		// The newest generation the logs hold whole, read again when `to` is below it.
 		try {
-			newest = chosen == logs.back() && lr.end == files_[index_detail::manifest_name(chosen)] ? m_.generation : read(logs.back(), std::nullopt).state.generation;
+			newest = chosen == logs.back() && lr.end == ledger_.size_of(index_detail::manifest_name(chosen)) ? m_.generation : read(logs.back(), std::nullopt).state.generation;
 		} catch (const files::log_damage& e) {
 			newest = e.generation;  // the damaged edit was a commit, now lost (Q2: "damage at generation x")
 		} catch (const std::exception&) {

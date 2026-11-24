@@ -271,8 +271,7 @@ bool basic_index<Layout>::roll_over(std::vector<kronuz::journal::File*> files, f
 	durable([&] {
 		io_->order_files_and_directory(files);
 		io_->replace(tmp, name);
-		files_.erase(tmp);
-		files_[name] = bytes.size();
+		ledger_.rename(tmp, name);
 		sync_dir();
 	});
 	// Durable: the new log is the head's.
@@ -319,7 +318,7 @@ void basic_index<Layout>::append_edit(std::vector<kronuz::journal::File*>& files
 	inherited_owed_ = false;  // ordered ahead of the edit, durable with it
 	try {
 		log_end_ = appender_->end();
-		track(index_detail::manifest_name(log_g_), log_end_);
+		ledger_.track(index_detail::manifest_name(log_g_), log_end_);
 		files::apply(m_, e);
 	} catch (...) {
 		fenced_ = true;
