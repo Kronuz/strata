@@ -456,7 +456,10 @@ void begin_phase(Engine& e, const char* name, durability d) {
 #else
 		clock_gettime(CLOCK_MONOTONIC, &ts);  // FreeBSD has no RAW clock
 #endif
-		std::fprintf(stderr, "phase %s %llu\n", name, (unsigned long long)ts.tv_sec * 1000000000ull + (unsigned long long)ts.tv_nsec);
+		char line[96];
+		const int n = std::snprintf(line, sizeof line, "phase %s %llu\n", name, (unsigned long long)ts.tv_sec * 1000000000ull + (unsigned long long)ts.tv_nsec);
+		// One write(2), not stdio: a write interposer (probes/rocksdb-parity/wbytes.c) sees the mark.
+		if (n > 0) { (void)!::write(2, line, std::size_t(std::min(n, int(sizeof line) - 1))); }
 	}
 	if constexpr (requires { e.on_phase(name, d); }) { e.on_phase(name, d); }
 }

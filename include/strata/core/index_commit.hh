@@ -288,6 +288,17 @@ bool basic_index<Layout>::roll_over(std::vector<kronuz::journal::File*> files, f
 }
 
 template <class Layout>
+void basic_index<Layout>::commit_empty() {
+	files::log_state c = m_;
+	c.generation = std::max(next_generation_, m_.generation + 1);
+	c.next_segment = cur_.next_segment;
+	c.configured = c.mask = cur_.configured;
+	files::recount(c);
+	roll_over({}, std::move(c), true);
+	kept_files_[m_.generation] = names_of(m_, log_g_);
+}
+
+template <class Layout>
 void basic_index<Layout>::append_edit(std::vector<kronuz::journal::File*>& files, const files::log_edit& e, const std::string& record) {
 	// The inherited tail and names go ahead of the edit: one record in flight (D3).
 	if (inherited_owed_) { files.push_back(log_.get()); }

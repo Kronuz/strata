@@ -5,16 +5,14 @@
 // checkpoints, and cuts one node's power at a seeded event (unsynced sectors and directory
 // entries lost), restarting it later. Storage schedules make one replica's budget refuse its
 // strata writes and another's file-set push fail partway with ENOSPC, then free both.
+// A replica behind the leader's checkpoint installs it (group-install): transfer frames and
+// fetches ride the same seeded network, and a node cut off or down answers neither.
 // Oracle, after the cluster settles: every `quorum`-acknowledged command is at its placement in
-// every node's log, every node applied the same entries, and every node's digest equals the
-// others' and a replay from empty of the log.
+// the log, every node applied the same entries (an installed one those past its install), and
+// every node's digest equals the others' and a replay from empty of the log.
 // `group_voters_test [schedules [first]]`; a failure names its voters, seed and crash point;
 // `0` schedules runs the named cases alone.
-#include "blob_app.hh"
-#include "host_io.hh"
-#include "oracle.hh"
-
-#include "faultlab/faultfs.h"
+#include "world.hh"
 
 #include <algorithm>
 #include <cstdio>
@@ -30,355 +28,11 @@
 
 namespace {
 
-namespace cs = kronuz::consensus;
-namespace j = kronuz::journal;
-namespace fl = kronuz::faultlab;
-namespace sg = strata::group;
-using group_test::digest;
-using group_test::group_type;
-using group_test::of;
-using group_test::replay;
+using namespace group_test;
 
-int failures = 0;
 std::uint64_t checkpoints_started = 0;  // by the gated schedules
-std::string context;
-bool check(bool ok, const std::string& what) {
-	if (!ok && ++failures <= 30) { std::cerr << "FAIL [" << context << "]: " << what << '\n'; }
-	if (failures > 300) { std::exit(1); }
-	return ok;
-}
-std::string what(std::exception_ptr e) {
-	if (!e) { return "no error"; }
-	try {
-		std::rethrow_exception(e);
-	} catch (const kronuz::consensus::rejected& x) {
-		return std::string(x.what()) + " (reason " + std::to_string(int(x.reason)) + ")";
-	} catch (const std::exception& x) {
-		return x.what();
-	} catch (...) {}
-	return "unknown";
-}
-
-constexpr std::uint64_t ms = 1'000'000;
-constexpr cs::GroupId gid = 5;
-const j::TurnLogOptions turn_options{16 * 1024, 1024, 1, 4, 4096};
-const j::AdmissionLimits admission{{256u << 20, 8192}, {256 * 1024, 3}, {64u << 20, 4}, 32, 3};
-
-group_type::config config(cs::NodeId self, unsigned voters, strata::byte_budget& storage) {
-	group_type::config c;
-	c.id = gid;
-	c.options.configuration.local = self;
-	for (cs::NodeId v = 1; v <= voters; ++v) { c.options.configuration.voters.push_back(v); }
-	c.options.configuration.cluster[0] = 'C';
-	c.options.configuration.configuration[0] = 'G';
-	c.options.admission = admission;
-	c.options.limits.command_bytes = 4096;
-	c.options.limits.rpc_bytes = 8192;  // a batch fits one 16 KiB turn-log segment (DRIVER.md)
-	c.options.limits.log_bytes = 64 * 1024;
-	c.options.limits.log_entries = 64;
-	c.options.limits.control_entries = 4;
-	c.options.limits.rpc_entries = 8;
-	c.options.timing = cs::Timing{10, 40, 60, 120, 60000};
-	c.options.scheduling = cs::WorkerLimits{16, 128};
-	c.identity = j::Identity{'V', char('0' + self)};
-	c.uuid = {'g', 'r', 'o', 'u', 'p', char('0' + self)};
-	c.strata.keyed = true;
-	c.strata.storage = &storage;
-	return c;
-}
-
-template <class T>
-struct started {
-	bool done = false;
-	std::exception_ptr error;
-	std::optional<T> value;
-};
-template <class T>
-std::shared_ptr<started<T>> start(task::scheduler_ref on, task::task<T> work) {
-	auto s = std::make_shared<started<T>>();
-	task::spawn(on, std::move(work), [s](std::exception_ptr e, std::optional<T> v) {
-		s->done = true;
-		s->error = e;
-		s->value = std::move(v);
-	});
-	return s;
-}
-std::shared_ptr<started<bool>> start(task::scheduler_ref on, task::task<void> work) {
-	auto wrap = [](task::task<void> w) -> task::task<bool> {
-		co_await std::move(w);
-		co_return true;
-	};
-	return start(on, wrap(std::move(work)));
-}
-
-struct envelope {
-	cs::NodeId from, to;
-	cs::Message message;
-};
-
-// One node: what survives its power cut (disks, the app's record of what it applied), and the
-// process that runs while it is up.
-struct node {
-	cs::NodeId id = 0;
-	fl::filesystem host_disk, dir_disk;  // dir_disk: the group's, strata's names and the file set's under its prefix
-	strata::byte_budget storage{std::uint64_t(1) << 30};
-	std::map<std::uint64_t, blob::app::seen_entry> log;
-	blob::app app;
-
-	struct process {
-		task::inline_scheduler loop_s, chore_s;
-		j::HeldCompletion held;
-		j::InlineCompletion inline_io;
-		std::unique_ptr<j::Host> host;
-		std::unique_ptr<sg::loop> lp;
-		std::unique_ptr<group_type> g;
-		task::cancel_source stop;
-		bool turns_done = false, driver_done = false;
-		std::shared_ptr<started<bool>> opening;
-		task::scheduler_ref loop_ref() { return task::scheduler_ref::of(loop_s); }
-	};
-	std::unique_ptr<process> p;
-
-	bool up() const { return p != nullptr; }
-	bool open() const { return p && p->opening->done && !p->opening->error; }
-	void run() {
-		if (p) { p->loop_s.run(); }
-	}
-};
-
-struct request {
-	std::string command;
-	std::shared_ptr<started<sg::answer>> s;
-};
-
-struct world {
-	unsigned voters;
-	std::uint64_t seed;
-	std::mt19937_64 rng;
-	std::uint64_t now = 0;  // ms
-	std::map<cs::NodeId, std::unique_ptr<node>> nodes;
-	std::deque<envelope> net;
-	std::set<cs::NodeId> isolated;  // their messages, both ways, are dropped
-	struct acknowledged {
-		cs::Placement placement;
-		std::string command;
-	};
-	std::vector<acknowledged> acks;
-	std::uint64_t stalls = 0, crashes = 0;
-	bool hand_off;  // the hosts know their peers' applied positions: a stalled leader hands off
-
-	world(unsigned n, std::uint64_t s, bool handing_off = false) : voters(n), seed(s), rng(s), hand_off(handing_off) {
-		for (cs::NodeId id = 1; id <= n; ++id) {
-			auto x = std::make_unique<node>();
-			x->id = id;
-			x->app.seen = &x->log;
-			nodes.emplace(id, std::move(x));
-		}
-		for (auto& [id, x] : nodes) { boot(*x); }
-	}
-	~world() {
-		for (auto& [id, x] : nodes) {
-			if (x->up()) { shut(*x, false); }
-		}
-	}
-	std::uint64_t pick(std::uint64_t n) { return n ? rng() % n : 0; }
-
-	void boot(node& x) {
-		auto p = std::make_unique<node::process>();
-		p->loop_s.advance(now * ms);
-		p->host = std::make_unique<j::Host>(std::make_shared<group_test::host_io>(x.host_disk), j::Identity{'N', char('0' + x.id)}, j::HostOptions{1, turn_options});
-		p->lp = std::make_unique<sg::loop>(p->loop_ref(), j::completion_ref::of(p->inline_io), *p->host, 0, seed * 31 + x.id);
-		const auto from = x.id;
-		p->lp->send = [this, from](cs::GroupId, cs::Send s) { net.push_back({from, s.peer, std::move(s.message)}); };
-		if (hand_off) {
-			p->lp->applied_past = [this, from](cs::GroupId, cs::Index index) -> std::optional<cs::NodeId> {
-				for (auto& [id, y] : nodes) {
-					if (id != from && y->open() && !y->p->g->stalled() && y->p->g->applied() >= index) { return id; }
-				}
-				return std::nullopt;
-			};
-		}
-		auto* raw = p.get();
-		task::spawn(p->loop_ref(), p->host->driver(0).run(j::completion_ref::of(p->held), p->stop.token()), [raw](std::exception_ptr) { raw->turns_done = true; });
-		task::spawn(p->loop_ref(), p->lp->run(p->stop.token()), [raw](std::exception_ptr) { raw->driver_done = true; });
-		x.p = std::move(p);
-		attach(x);
-	}
-	// A new group object on the node's loop, opened: at boot, or after a close.
-	void attach(node& x) {
-		auto& p = *x.p;
-		p.g = std::make_unique<group_type>(*p.lp, config(x.id, voters, x.storage), std::make_unique<fl::io>(x.dir_disk), x.app, task::scheduler_ref::of(p.chore_s));
-		p.opening = start(p.loop_ref(), p.g->open());
-		x.run();
-	}
-	void deliver(envelope e) {
-		auto& to = *nodes.at(e.to);
-		if (!to.up() || isolated.count(e.from) || isolated.count(e.to)) { return; }
-		to.p->lp->driver().receive(gid, cs::Receive{e.from, std::move(e.message)});
-		to.run();
-	}
-	// Stops the node; a power cut fails its IO from here and loses what was not synced.
-	void shut(node& x, bool power_cut) {
-		auto& p = *x.p;
-		if (power_cut) {
-			x.host_disk.power_off_after(0);
-			x.dir_disk.power_off_after(0);
-		}
-		p.stop.request(task::cancel_reason::shutdown);
-		for (int round = 0; round < 100000 && !(p.turns_done && p.driver_done); ++round) {
-			p.loop_s.run();
-			p.chore_s.run();
-			if (p.held.held()) {
-				const auto t = p.held.tickets().front();
-				if (power_cut) {
-					p.held.fail(t, std::make_exception_ptr(std::system_error(EIO, std::generic_category(), "power cut")));
-				} else {
-					p.held.complete(t);
-				}
-			}
-		}
-		check(p.turns_done && p.driver_done, "node " + std::to_string(x.id) + "'s loop stops");
-		p.g->fenced("the process stopped");
-		for (int round = 0; round < 100000; ++round) {
-			if (!p.loop_s.run() && !p.chore_s.run() && !p.held.held()) { break; }
-			if (p.held.held()) { p.held.fail(p.held.tickets().front(), std::make_exception_ptr(std::system_error(EIO, std::generic_category(), "stopped"))); }
-		}
-		p.g.reset();
-		p.lp.reset();
-		p.host.reset();
-		x.p.reset();
-		if (power_cut) {
-			const auto s = seed * 7 + x.id + crashes * 1000;
-			x.host_disk.crash(s);
-			x.dir_disk.crash(s * 3 + 1);
-		}
-	}
-
-	node* leader() {
-		for (auto& [id, x] : nodes) {
-			if (!x->open()) { continue; }
-			auto s = x->p->lp->driver().state(gid);
-			if (s && s->role == cs::Role::Leader) { return x.get(); }
-		}
-		return nullptr;
-	}
-
-	// One step: deliver a message, complete an IO, run a chore item, or let time pass.
-	void step() {
-		const auto k = pick(10);
-		if (k < 4 && !net.empty()) {
-			const auto at = pick(std::min<std::size_t>(net.size(), 4));  // reordered among the first few
-			auto e = std::move(net[at]);
-			net.erase(net.begin() + std::ptrdiff_t(at));
-			deliver(std::move(e));
-			return;
-		}
-		auto& x = *nodes.at(cs::NodeId(1 + pick(voters)));
-		if (!x.up()) { return; }
-		if (k < 7 && x.p->held.held()) {
-			auto t = x.p->held.tickets();
-			x.p->held.complete(t[pick(t.size())]);
-			x.run();
-			return;
-		}
-		if (k < 9) {
-			std::size_t n = 0;
-			x.p->chore_s.run_until([&] { return n++ == 1; });
-			x.run();
-			if (x.p->g->stalled()) { ++stalls; }
-			return;
-		}
-		advance(1 + pick(5));
-	}
-	void advance(std::uint64_t dt) {
-		now += dt;
-		for (auto& [id, x] : nodes) {
-			if (!x->up()) { continue; }
-			x->p->loop_s.advance(dt * ms);
-			x->run();
-		}
-	}
-	// D109, until group-install: a checkpoint at `x` leaves no log behind when every node is up,
-	// none stalled or short of space, and x's commit is at or below every node's (each log's end).
-	bool leaves_none_behind(node& x, const std::set<cs::NodeId>& short_of_space) {
-		auto mine = x.p->lp->driver().state(gid);
-		if (!mine) { return false; }
-		for (auto& [id, y] : nodes) {
-			if (!y->open() || y->p->g->stalled() || short_of_space.count(id)) { return false; }
-			auto st = y->p->lp->driver().state(gid);
-			if (!st || st->committed < mine->committed) { return false; }
-		}
-		return true;
-	}
-	// Runs x's loop and chore alone, IO held and no message in, so its capture lands at or below
-	// the commit `leaves_none_behind` saw.
-	void capture(node& x) {
-		for (int round = 0; round < 100000; ++round) {
-			if (!x.p->loop_s.run() && !x.p->chore_s.run()) { return; }
-		}
-	}
-	// Every node up, every message and IO through, every chore idle, every node applied the
-	// commit index: false if it does not settle (`report`: the nodes' state on stderr).
-	bool settle(bool report = true) {
-		for (auto& [id, x] : nodes) {
-			if (!x->up()) { boot(*x); }
-		}
-		int calm = 0;
-		for (int round = 0; round < 4000; ++round) {
-			advance(5);
-			// Everything the tick started, through: messages, IO, chores, until none is left.
-			for (int quiet = 0; quiet < 1000; ++quiet) {
-				bool any = !net.empty();
-				while (!net.empty()) {
-					auto e = std::move(net.front());
-					net.pop_front();
-					deliver(std::move(e));
-				}
-				for (auto& [id, x] : nodes) {
-					while (x->p->held.held()) {
-						any = true;
-						x->p->held.complete(x->p->held.tickets().front());
-						x->run();
-					}
-					any = x->p->chore_s.run() > 0 || any;
-					x->run();
-				}
-				if (!any) { break; }
-			}
-			cs::Index committed = 0;
-			bool same = true;
-			for (auto& [id, x] : nodes) {
-				if (!x->open()) {
-					same = false;
-					continue;
-				}
-				if (auto s = x->p->lp->driver().state(gid)) { committed = std::max(committed, s->committed); }
-			}
-			for (auto& [id, x] : nodes) { same = same && x->p->g->applied() == committed && !x->p->g->stalled(); }
-			calm = same && leader() ? calm + 1 : 0;
-			if (calm >= 30) { return true; }
-		}
-		for (auto& [id, x] : nodes) {
-			if (!report) { break; }
-			auto st = x->p->lp->driver().state(gid);
-			std::string installs;
-			for (auto peer : x->p->g->installs_needed()) { installs += " " + std::to_string(peer); }
-			if (!installs.empty()) { std::cerr << "  node " << id << " has no log for peers" << installs << ": they need an install (group-install)\n"; }
-			std::cerr << "  node " << id << (x->open() ? "" : " not open: " + what(x->p->opening->error)) << " applied " << x->p->g->applied() << (x->p->g->stalled() ? " stalled" : "")
-					  << (x->p->g->fenced() ? " fenced: " + x->p->g->fence_reason() : "") << ", role " << (st ? int(st->role) : -1) << " term " << (st ? st->term : 0) << " committed " << (st ? st->committed : 0) << '\n';
-		}
-		return false;
-	}
-};
-
-std::string text(std::mt19937_64& rng, std::size_t n) {
-	std::string s;
-	for (std::size_t i = 0; i < n; ++i) { s.push_back(char('a' + rng() % 26)); }
-	return s;
-}
-
 struct outcome {
-	std::uint64_t acked = 0, applied = 0, stalls = 0, crashes = 0;
+	std::uint64_t acked = 0, applied = 0, stalls = 0, crashes = 0, installs = 0;
 };
 
 // One schedule. `storage`: a replica's budget refuses its strata writes and another's
@@ -489,26 +143,6 @@ outcome schedule(unsigned voters, std::uint64_t seed, bool storage, bool gated =
 		f.dir_disk.set_capacity(~std::uint64_t(0));
 		f.dir_disk.short_writes(0);
 	}
-	if (!gated) {
-		const bool settled = w.settle(false);
-		cs::Index committed = 0;
-		for (auto& [id, x] : w.nodes) {
-			if (auto st = x->p->lp->driver().state(gid)) { committed = std::max(committed, st->committed); }
-		}
-		std::set<cs::NodeId> behind, named;
-		for (auto& [id, x] : w.nodes) {
-			if (x->p->g->applied() < committed) { behind.insert(id); }
-			named.merge(x->p->g->installs_needed());
-		}
-		auto list = [](const std::set<cs::NodeId>& s) {
-			std::string out;
-			for (auto id : s) { out += " " + std::to_string(id); }
-			return out;
-		};
-		check(!settled && !behind.empty() && std::includes(named.begin(), named.end(), behind.begin(), behind.end()),
-			"a replica behind the leader's checkpoint is named in installs_needed: behind" + list(behind) + ", named" + list(named));
-		return out;
-	}
 	if (!check(w.settle(), "the cluster settles")) { return out; }
 	for (auto& [id, x] : w.nodes) {
 		if (x->p->g->stalled()) { x->p->g->resume(); }
@@ -523,27 +157,22 @@ outcome schedule(unsigned voters, std::uint64_t seed, bool storage, bool gated =
 	out.applied = through;
 	out.stalls = w.stalls;
 	out.crashes = w.crashes;
-	std::optional<digest> reference;
+	const auto log = merged_log(w, through);
+	if (!log) { return out; }
+	for (const auto& a : w.acks) {
+		auto it = log->find(a.placement.index);
+		check(a.placement.index <= through && it != log->end() && it->second.term == a.placement.term && it->second.command == a.command,
+			"acknowledged " + a.command + " at " + std::to_string(a.placement.index) + " is in the log");
+	}
+	const auto reference = replay(*log, through);
 	for (auto& [id, x] : w.nodes) {
 		const auto who = "node " + std::to_string(id);
+		out.installs += x->installs + x->p->g->installs();
 		check(!x->app.diverged, who + " applied an index twice with different entries");
 		check(!x->p->g->fenced(), who + " is not fenced: " + x->p->g->fence_reason());
 		check(x->p->g->applied() == through, who + " applied " + std::to_string(x->p->g->applied()) + ", node 1 " + std::to_string(through));
-		for (std::uint64_t i = 1; i <= through; ++i) {
-			if (!check(x->log.count(i), who + "'s log has a hole at " + std::to_string(i))) { return out; }
-			if (!check(x->log.at(i) == first.log.at(i), who + " and node 1 differ at " + std::to_string(i))) { return out; }
-		}
-		for (const auto& a : w.acks) {
-			auto it = x->log.find(a.placement.index);
-			check(a.placement.index <= through && it != x->log.end() && it->second.term == a.placement.term && it->second.command == a.command,
-				"acknowledged " + a.command + " at " + std::to_string(a.placement.index) + " is in " + who + "'s log");
-		}
 		try {
-			auto d = of(*x->p->g, x->app);
-			if (!reference) {
-				reference = replay(x->log, through);
-			}
-			check(d == *reference, who + "'s digest equals a replay from empty through " + std::to_string(through));
+			check(of(*x->p->g, x->app) == reference, who + "'s digest equals a replay from empty through " + std::to_string(through));
 		} catch (const std::exception& e) {
 			check(false, who + "'s digest reads: " + e.what());
 		}
@@ -571,7 +200,8 @@ void default_limits() {
 	// turn-log segment (D132).
 	c.options.limits.log_bytes = cs::Limits{}.log_bytes;
 	c.options.limits.log_entries = cs::Limits{}.log_entries;
-	group_type g(lp, c, std::make_unique<fl::io>(x.dir_disk), x.app, task::scheduler_ref::of(chore_s));
+	group_test::borrowed<group_type> held;
+	auto& g = held.emplace(lp, c, std::make_unique<fl::io>(x.dir_disk), x.storage, {'g', 'r', 'o', 'u', 'p', '1'}, x.app, task::scheduler_ref::of(chore_s));
 	auto run_all = [&] {
 		for (int i = 0; i < 100000; ++i) {
 			if (!loop_s.run() && !chore_s.run()) { return; }
@@ -592,6 +222,29 @@ void default_limits() {
 	g.fenced("the process stopped");
 	run_all();
 	check(turns_done && driver_done, "the default-limits loop stops");
+}
+
+// A settle heals what is still cut off: the leader is isolated (as a cut upload in a fault-free
+// stretch isolates it), the others elect and commit a write without it, and the settle brings
+// it back to their commit.
+void settle_heals(unsigned voters) {
+	context = std::to_string(voters) + " voters, a settle with the leader cut off";
+	world w(voters, 79);
+	if (!check(w.settle(), "the cluster settles")) { return; }
+	auto& l = *w.leader();
+	const auto term = l.p->lp->driver().state(gid)->term;
+	w.isolated.insert(l.id);
+	node* next = nullptr;
+	for (int i = 0; i < 40000 && !next; ++i) {
+		w.step();
+		next = leader_above(w, term, &l);
+	}
+	if (!check(next != nullptr, "another replica leads")) { return; }
+	auto s = start(next->p->loop_ref(), next->p->g->propose("P|a|without"));
+	for (int i = 0; i < 20000 && !s->done; ++i) { w.step(); }
+	if (!check(s->done && !s->error, "the write commits without the cut-off leader: " + what(s->error))) { return; }
+	check(w.settle(), "the settle heals the cut-off leader");
+	check(l.p->g->applied() == next->p->g->applied(), "the old leader applied the write");
 }
 
 // A `quorum` waiter across a close and a reopen (journal group_closed): a leader cut off from
@@ -734,37 +387,223 @@ void deposed_read(unsigned voters) {
 	check(!r->done || r->error || (r->value && *r->value >= 2), "the healed read answers the second write's state or fails");
 }
 
-// A replica behind the leader's checkpoint catches up only by install, which group-install
-// serves: until then the leader names it in `installs_needed` and it stays behind, never silent.
-void install_gap(unsigned voters) {
-	context = std::to_string(voters) + " voters, a replica behind the leader's checkpoint";
-	world w(voters, 55);
-	if (!check(w.settle(), "the cluster settles")) { return; }
-	auto& l = *w.leader();
-	auto& behind = *w.nodes.at(l.id % voters + 1);
+// Every node applied the same entries, and its digest equals a replay from empty of the log.
+// A replica behind the leader's checkpoint catches up only by install: the leader names it in
+// `installs_needed` until the install ends, and it installs the bundle and applies past it.
+// `behind` cut off while the others commit two writes and each checkpoints past it: whichever
+// leads has no log for it. The lowest checkpoint, or 0 if a step failed.
+cs::Index leave_behind(world& w, node& l, node& behind) {
 	w.isolated.insert(behind.id);
 	auto write = [&](const std::string& c) {
 		auto s = start(l.p->loop_ref(), l.p->g->propose(c));
 		for (int i = 0; i < 40000 && !s->done; ++i) { w.step(); }
 		return s->done && !s->error;
 	};
-	check(write("P|a|one") && write("P|b|two"), "the others commit without it");
-	// Every other replica checkpoints past it, so whichever leads has no log for it.
+	if (!check(write("P|a|one") && write("P|b|two"), "the others commit without it")) { return 0; }
 	cs::Index base = ~cs::Index(0);
 	for (auto& [id, x] : w.nodes) {
 		if (x.get() == &behind) { continue; }
 		auto k = start(x->p->loop_ref(), x->p->g->checkpoint());
 		for (int i = 0; i < 40000 && !k->done; ++i) { w.step(); }
-		if (!check(k->done && !k->error && k->value, "node " + std::to_string(id) + "'s checkpoint: " + what(k->error))) { return; }
+		if (!check(k->done && !k->error && k->value, "node " + std::to_string(id) + "'s checkpoint: " + what(k->error))) { return 0; }
 		base = std::min(base, k->value->through);
 	}
-	if (!check(behind.p->g->applied() < base, "the checkpoints pass the isolated replica")) { return; }
+	if (!check(behind.p->g->applied() < base, "the checkpoints pass the isolated replica")) { return 0; }
 	w.isolated.clear();
-	for (int i = 0; i < 20000; ++i) { w.step(); }
+	return base;
+}
+
+void install_gap(unsigned voters) {
+	context = std::to_string(voters) + " voters, a replica behind the leader's checkpoint";
+	world w(voters, 55);
+	if (!check(w.settle(), "the cluster settles")) { return; }
+	auto& l = *w.leader();
+	auto& behind = *w.nodes.at(l.id % voters + 1);
+	const auto base = leave_behind(w, l, behind);
+	if (!base) { return; }
 	std::set<cs::NodeId> named;
-	for (auto& [id, x] : w.nodes) { named.merge(x->p->g->installs_needed()); }
+	for (int i = 0; i < 20000 && named.empty(); ++i) {
+		w.step();
+		for (auto& [id, x] : w.nodes) {
+			if (x->open()) { named.merge(x->p->g->installs_needed()); }
+		}
+	}
 	check(named == std::set<cs::NodeId>{behind.id}, "the leader names the replica behind its checkpoint");
-	check(behind.p->g->applied() < base, "the replica stays behind the checkpoints: no install yet");
+	if (!check(w.settle(), "the cluster settles by the install")) { return; }
+	check(behind.p->g->installs() == 1 && behind.p->g->installed_at() >= base, "the replica installs a bundle at or past the checkpoints: " + std::to_string(behind.p->g->installs()) + " at " + std::to_string(behind.p->g->installed_at()));
+	for (auto& [id, x] : w.nodes) { check(x->p->g->installs_needed().empty(), "node " + std::to_string(id) + " names no install once it ended"); }
+	same_digests(w);
+}
+
+// A learner's close while its stage waits on the pin fetch: the teardown waits for the stage
+// task, which touches the group until it answers, so the close ends only once the fetch does.
+// The learner is fenced first, so its close skips the checkpoint a learner below the base
+// cannot cover.
+void close_mid_install(unsigned voters) {
+	context = std::to_string(voters) + " voters, a learner closed mid-install";
+	world w(voters, 59);
+	if (!check(w.settle(), "the cluster settles")) { return; }
+	auto& l = *w.leader();
+	auto& behind = *w.nodes.at(l.id % voters + 1);
+	if (!leave_behind(w, l, behind)) { return; }
+	const auto pin_pending = [&] {
+		return std::any_of(w.fetches.begin(), w.fetches.end(), [&](const fetch_request& f) { return f.from == behind.id && f.name.ends_with("/pin"); });
+	};
+	for (int i = 0; i < 40000 && !pin_pending(); ++i) { w.step(); }
+	if (!check(pin_pending(), "the learner fetches the leader's pin")) { return; }
+	behind.p->g->fenced("the test fences the learner mid-install");
+	auto k = start(behind.p->loop_ref(), behind.p->g->close());
+	const auto pump = [&] {
+		for (int i = 0; i < 2000 && !k->done; ++i) {
+			while (behind.p->held.held()) {
+				behind.p->held.complete(behind.p->held.tickets().front());
+				behind.run();
+			}
+			behind.p->chore_s.run();
+			behind.p->loop_s.advance(ms);
+			behind.run();
+		}
+	};
+	pump();
+	check(!k->done, "the close waits for the stage, its pin fetch pending");
+	w.fail_fetches(behind.id);
+	pump();
+	check(k->done && k->error && what(k->error).find("closed fenced") != std::string::npos, "the close ends with the stage, fenced: " + what(k->error));
+	w.shut(behind, false);
+	if (!check(w.settle(), "the cluster settles once the learner restarts")) { return; }
+	same_digests(w);
+}
+
+// An install's pin stays with the leader's latest bundle; the leader's next checkpoint
+// supersedes it, and its disk fills before the release: the release stalls the chore, as an
+// apply short of space does, and never fences it; once the host frees space and resumes it,
+// the release commits and the cluster settles.
+void release_short_of_space(unsigned voters) {
+	context = std::to_string(voters) + " voters, the leader's pin release short of space";
+	world w(voters, 57);
+	if (!check(w.settle(), "the cluster settles")) { return; }
+	auto& l = *w.leader();
+	auto& behind = *w.nodes.at(l.id % voters + 1);
+	if (!leave_behind(w, l, behind)) { return; }
+	if (!check(w.settle() && behind.p->g->installs() == 1, "the cluster settles by the install")) { return; }
+	auto s = start(l.p->loop_ref(), l.p->g->propose("P|c|three"));
+	for (int i = 0; i < 40000 && !s->done; ++i) { w.step(); }
+	const auto before = l.p->g->recovered().position;
+	auto k = start(l.p->loop_ref(), l.p->g->checkpoint());
+	for (int i = 0; i < 40000 && l.p->g->recovered().position == before && !k->done; ++i) { w.step(); }
+	if (!check(l.p->g->recovered().position > before, "the leader publishes a later bundle")) { return; }
+	l.dir_disk.set_capacity(l.dir_disk.used());
+	for (int i = 0; i < 200000 && !l.p->g->stalled() && !l.p->g->fenced(); ++i) { w.step(); }
+	check(l.p->g->stalled() && !l.p->g->fenced(), "the leader's release stalls on space, unfenced: " + l.p->g->fence_reason());
+	l.dir_disk.set_capacity(~std::uint64_t(0));
+	l.p->g->resume();
+	if (!check(w.settle(), "the cluster settles once the leader resumes")) { return; }
+	check(!l.p->g->stalled(), "the leader released the superseded pin");
+	same_digests(w);
+}
+
+// The strata pins a node's manifest keeps.
+std::size_t pins_of(node& x) {
+	fl::io io(x.dir_disk);
+	return strata::index_detail::log_holding(io) ? strata::index_detail::read_state(io).pins.size() : 0;
+}
+
+// A leader that served an install keeps its bundle's pin in strata's manifest and restarts on a
+// full disk: it opens, since recovery releases nothing; the release waits on the chore and
+// stalls there unfenced, as an apply short of space does; once the host frees space and resumes
+// it, the pin goes and the cluster settles.
+void reopen_short_of_space(unsigned voters) {
+	context = std::to_string(voters) + " voters, a leader holding a pin reopens on a full disk";
+	world w(voters, 57);
+	if (!check(w.settle(), "the cluster settles")) { return; }
+	auto& l = *w.leader();
+	auto& behind = *w.nodes.at(l.id % voters + 1);
+	if (!leave_behind(w, l, behind)) { return; }
+	if (!check(w.settle() && behind.p->g->installs() == 1, "the cluster settles by the install")) { return; }
+	auto* x = w.leader();
+	if (!check(x && pins_of(*x) == 1, "the leader holds its bundle's pin")) { return; }
+	x->dir_disk.set_capacity(x->dir_disk.used());
+	w.shut(*x, false);
+	w.boot(*x);
+	for (int i = 0; i < 400000 && !x->p->opening->done; ++i) { w.step(); }
+	if (!check(x->open(), "the node opens on a full disk: " + what(x->p->opening->error))) {
+		x->dir_disk.set_capacity(~std::uint64_t(0));
+		return;
+	}
+	for (int i = 0; i < 200000 && !x->p->g->stalled() && !x->p->g->fenced(); ++i) { w.step(); }
+	check(x->p->g->stalled() && !x->p->g->fenced(), "the pin's release stalls on space, unfenced: " + x->p->g->fence_reason());
+	check(pins_of(*x) == 1, "the pin stays while space is short");
+	x->dir_disk.set_capacity(~std::uint64_t(0));
+	x->p->g->resume();
+	if (!check(w.settle(), "the cluster settles once space is freed")) { return; }
+	check(pins_of(*x) == 0, "the pin is released once resumed: " + std::to_string(pins_of(*x)));
+	same_digests(w);
+}
+
+// The install's staging names left in a node's directory.
+std::string staging_names(node& x) {
+	std::string out;
+	fl::io io(x.dir_disk);
+	for (auto c = io.scan_directory(); auto n = c->next();) {
+		if (n->starts_with("is.") || n->starts_with("ia.") || *n == "ip" || *n == "ip.tmp") { out += " " + *n; }
+	}
+	return out;
+}
+
+// A power cut on the learner's directory disk after `k` mutations from its rejoin, its strata
+// index still deferred (it never checkpointed); ~0 is the dry run, which returns the mutations
+// of the whole install in `used`. False once the install settles before the cut.
+bool deferred_cut_at(unsigned voters, std::uint64_t k, std::uint64_t* used) {
+	context = std::to_string(voters) + " voters, a deferred learner's power cut after " + std::to_string(k) + " mutations";
+	world w(voters, 55);
+	if (!check(w.settle(), "the cluster settles")) { return false; }
+	auto& l = *w.leader();
+	auto& behind = *w.nodes.at(l.id % voters + 1);
+	if (!leave_behind(w, l, behind)) { return false; }
+	{
+		fl::io io(behind.dir_disk);
+		if (!check(!strata::index_detail::log_holding(io), "the learner's index is deferred")) { return false; }
+	}
+	auto& fs = behind.dir_disk;
+	const auto m0 = fs.mutations();
+	if (k == ~std::uint64_t(0)) {
+		check(w.settle() && behind.p->g->installs() == 1, "the dry run settles by the install");
+		*used = fs.mutations() - m0;
+		return false;
+	}
+	fs.power_off_after(k);
+	bool cut = false;
+	for (int i = 0; i < 400000 && !cut; ++i) {
+		w.step();
+		cut = fs.powered_off();
+		if (!cut && i % 1000 == 999 && behind.up() && behind.p->g->installs() >= 1 && fs.mutations() - m0 < k && w.settle(false)) { break; }
+	}
+	if (!cut) {
+		fs.power_on();
+		return false;
+	}
+	++w.crashes;
+	w.shut(behind, true);
+	try {
+		if (!check(w.settle(), "the cluster settles after the learner's power cut")) { return true; }
+	} catch (const std::exception& e) {
+		// A reboot that throws leaves a node the world cannot shut down.
+		check(false, std::string("the learner's reboot throws: ") + e.what());
+		std::fflush(stdout);
+		std::_Exit(1);
+	}
+	same_digests(w);
+	const auto left = staging_names(*w.nodes.at(behind.id));
+	check(left.empty(), "no staging name stays once settled:" + left);
+	return true;
+}
+void deferred_learner_crash(unsigned voters) {
+	std::uint64_t used = 0, cut = 0;
+	deferred_cut_at(voters, ~std::uint64_t(0), &used);
+	for (std::uint64_t k = 0; k <= used; ++k) { cut += deferred_cut_at(voters, k, nullptr); }
+	context = std::to_string(voters) + " voters, a deferred learner's power cuts";
+	check(used > 20 && 2 * cut >= used, "the cuts fall inside the install's " + std::to_string(used) + " mutations: " + std::to_string(cut));
+	std::printf("voters: deferred learner, %llu power cuts over %llu mutations\n", (unsigned long long)cut, (unsigned long long)used);
 }
 
 // --- A3: the write path (Q10 (b), PLAN.md D106) --------------------------------------------
@@ -886,13 +725,6 @@ void write_path(unsigned voters, std::uint64_t seed, bool stale, a3_totals& tota
 }
 
 // The leader of a term above `term`, other than `not_this`, if one is elected.
-node* leader_above(world& w, cs::Term term, const node* not_this) {
-	for (auto& [id, x] : w.nodes) {
-		if (x.get() == not_this || !x->open()) { continue; }
-		if (auto st = x->p->lp->driver().state(gid); st && st->role == cs::Role::Leader && st->term > term) { return x.get(); }
-	}
-	return nullptr;
-}
 bool is_superseded(std::exception_ptr e) {
 	try {
 		if (e) { std::rethrow_exception(e); }
@@ -901,17 +733,59 @@ bool is_superseded(std::exception_ptr e) {
 	} catch (...) {}
 	return false;
 }
-// Every node applied the same entries, and its digest equals a replay from empty of the log.
-void same_digests(world& w) {
-	const auto& first = *w.nodes.begin()->second;
-	const auto through = first.p->g->applied();
-	const auto reference = replay(first.log, through);
-	for (auto& [id, x] : w.nodes) {
-		const auto who = "node " + std::to_string(id);
-		check(!x->p->g->fenced(), who + " is not fenced: " + x->p->g->fence_reason());
-		check(x->p->g->applied() == through, who + " applied what node 1 did");
-		check(of(*x->p->g, x->app) == reference, who + "'s digest equals the replay");
+
+// --- A1: growth and healing by install (group-heal) ---------------------------------------
+
+// A joiner added as a learner past every replica's checkpoint installs the leader's bundle,
+// catches up, and is promoted to replace a voter, which the core then removes (D3); a leader
+// change falls between each step. The removed voter never learns its removal's commit, so it
+// leaves the world before the cluster settles. The second round replaces the leader itself.
+void grow_and_heal(unsigned voters) {
+	context = std::to_string(voters) + " voters, a learner installs, is promoted and replaces a voter";
+	world w(voters, 77);
+	std::mt19937_64 gen(77);
+	if (!check(w.settle(), "the cluster settles")) { return; }
+	cs::NodeId next_id = voters + 1;
+	for (int round = 0; round < 2; ++round) {
+		write_and_compact(w, gen, 12);
+		auto* l = w.leader();
+		if (!check(l, "a leader")) { return; }
+		// Round 0 replaces a follower; round 1 the leader.
+		cs::NodeId leaving = l->id;
+		if (round == 0) {
+			for (auto& [id, x] : w.nodes) {
+				if (id != l->id && !x->joiner) { leaving = id; }
+			}
+		}
+		auto& j = w.add_joiner(next_id++);
+		if (!check(change(w, voters, [&](cs::Membership& m) {
+				m.members.push_back({j.id, j.id, cs::MemberRole::Learner});
+				m.next_incarnation = j.id + 1;
+			}, j.id), "the learner joins")) { return; }
+		if (!check(w.settle(), "the cluster settles with the learner installed")) { return; }
+		check(j.p->g->installs() >= 1, "node " + std::to_string(j.id) + " installs as a learner: " + std::to_string(j.p->g->installs()));
+		same_digests(w);
+		depose(w);
+		write_and_compact(w, gen, 6);
+		if (!check(change(w, voters, [&](cs::Membership& m) {
+				for (auto& x : m.members) {
+					if (x.incarnation == j.id) { x.role = cs::MemberRole::Voter; }
+				}
+				m.leaving = leaving;
+			}, j.id), "the learner is promoted beside the voter it replaces")) { return; }
+		cut_leader(w);
+		if (!check(removed_by_core(w, leaving), "the core removes the replaced voter " + std::to_string(leaving))) { return; }
+		w.retire(leaving);
+		if (!check(w.settle(), "the cluster settles without the removed voter")) { return; }
+		for (auto& [id, x] : w.nodes) {
+			const auto m = x->p->lp->driver().state(gid)->membership;
+			check(!holds(m, leaving) && holds(m, j.id) && !m.leaving, "node " + std::to_string(id) + " holds the replacement's membership");
+		}
+		same_digests(w);
 	}
+	// The group still writes and settles with both newcomers voting.
+	write_and_compact(w, gen, 6);
+	same_digests(w);
 }
 
 // An election replaces an uncommitted entry: the leader prepares a request, is cut off as it
@@ -1117,6 +991,7 @@ void write_paths(unsigned voters, std::uint64_t schedules) {
 int main(int argc, char** argv) {
 	const std::uint64_t schedules = argc > 1 ? std::stoull(argv[1]) : 12, first = argc > 2 ? std::stoull(argv[2]) : 1;
 	default_limits();
+	settle_heals(3);
 	close_with_uncommitted(3);
 	close_with_uncommitted(5);
 	levels(3);
@@ -1125,6 +1000,12 @@ int main(int argc, char** argv) {
 	deposed_read(5);
 	install_gap(3);
 	install_gap(5);
+	release_short_of_space(3);
+	close_mid_install(3);
+	reopen_short_of_space(3);
+	deferred_learner_crash(3);
+	grow_and_heal(3);
+	grow_and_heal(5);
 	write_paths(3, 8);
 	write_paths(5, 8);
 	superseded_entry(3);
@@ -1135,8 +1016,18 @@ int main(int argc, char** argv) {
 	stalled_leader(5);
 	stalled_follower_elected(3);
 	stalled_follower_elected(5);
-	// D109: the schedules whose ungated checkpoints left a replica behind (group-install's A8).
-	for (std::uint64_t seed : {8, 12, 16, 18, 23, 24, 27}) { schedule(3, seed, seed % 2 == 0, false); }
+	// D109: the schedules whose ungated checkpoints left a replica behind settle by install,
+	// and 40 more ungated ones at 3 voters (group-heal A2).
+	std::uint64_t installed = 0;
+	for (std::uint64_t seed : {8, 12, 16, 18, 23, 24, 27}) {
+		const auto o = schedule(3, seed, seed % 2 == 0, false);
+		check(o.installs > 0, "seed " + std::to_string(seed) + " settles by an install");
+		installed += o.installs;
+	}
+	if (schedules) {
+		for (std::uint64_t seed = 101; seed <= 140; ++seed) { installed += schedule(3, seed, seed % 2 == 0, false).installs; }
+	}
+	std::printf("voters: ungated schedules settled with %llu installs\n", (unsigned long long)installed);
 	std::uint64_t acked = 0, applied = 0, stalls = 0, crashes = 0, runs = 0, short_of_space = 0;
 	for (unsigned voters : {3u, 5u}) {
 		for (std::uint64_t seed = first; seed < first + schedules; ++seed) {

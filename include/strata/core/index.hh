@@ -475,6 +475,7 @@ struct log_state {
 	// joined since it (D5's second trigger).
 	files::position checkpointed;
 	std::uint64_t logged_bytes = 0;
+	bool writing = false;  // counted in the sealer's writers (D2 item 2)
 	// The newest checkpoint record staged or recovered, which a leave hands to the table (D7).
 	std::uint64_t last_checkpoint = 0;
 	std::string checkpoint_payload;
@@ -507,6 +508,27 @@ struct log_state {
 		assert(at > applied);  // the applied position never moves back
 		applied = at;
 		return {opened, 0};
+	}
+	// A chunk of a transaction past the command size (rocksdb-parity A3): a record of its own,
+	// after the open batch closes, with the same turn bound. Only the last moves `applied`, and
+	// `v` is the V its durability gives, so V passes the transaction once every chunk is durable.
+	joined join_chunk(std::string_view bytes, command::chunk_place p, std::uint64_t v, files::position& applied) {
+		const std::lock_guard lock(mu);
+		if (count) {
+			if (closed.size() + 1 >= turn_records) { return {false, open}; }
+			closed.push_back({open, through, command::batch_payload(count, body)});
+			body.clear();
+			count = 0;
+		}
+		if (closed.size() >= turn_records) { return {false, closed.back().sequence}; }
+		const std::uint64_t s = next++;
+		closed.push_back({s, v, command::chunk_payload(p, bytes)});
+		logged_bytes += bytes.size();
+		if (p == command::chunk_place::last) {
+			assert((files::position{s, 1} > applied));
+			applied = {s, 1};
+		}
+		return {true, 0};
 	}
 	// The sealer (D3), called by the driver each turn: the next whole record, oldest first, if it
 	// frames within `room` (turn_framed_bytes bounds the driver's record_cost), and none while the
@@ -783,11 +805,13 @@ struct basic_index_options {
 	// codec's hook cannot set it.
 	std::conditional_t<command::loggable<Layout>, turn_sealer*, std::nullptr_t> log = nullptr;
 	std::uint64_t log_group = 0;
-	// A logged index refuses as invalid a transaction whose command passes this many bytes (D3).
+	// A logged record's payload cap (D3): a transaction whose command passes it streams as chunk
+	// records of at most this many bytes, all or nothing across a crash (rocksdb-parity A3).
 	std::uint64_t command_bytes = command::max_bytes;
 	// A logged index checkpoints (commit()) when the commands logged since its last checkpoint
-	// pass this many bytes (D5's second trigger; not under defer_io, whose host owns its flushes).
-	std::uint64_t checkpoint_log_bytes = command::max_bytes;
+	// pass its share of the log's window, turn_sealer::window_bytes() over its writers, and at
+	// least this floor (D5's second trigger, rocksdb-parity D2 item 2; not under defer_io).
+	std::uint64_t checkpoint_floor_bytes = 1 << 20;
 	// Tests: runs between a logged apply's stage 1 and its append (T12).
 	std::function<void()> log_seam;
 };
@@ -881,8 +905,8 @@ public:
 	// that fails, an allocation), is rolled back through the undo log: its slots, pending deletes,
 	// records, metadata and storage reservation. The exception is rethrown with the position unmoved.
 	// A logged index (options::log) given no position logs an accepted transaction (standalone-turn-log
-	// D2, D3): its command, refused as invalid past options::command_bytes before stage 1, joins
-	// the group's open record, and the position it takes there becomes the applied one.
+	// D2, D3): its command joins the group's open record, or past options::command_bytes streams as
+	// chunk records (rocksdb-parity A3), and the position it takes there becomes the applied one.
 	verdict apply(const transaction& t, files::position at);
 
 	// A logged index's V (D4): what its log made durable, and its group's last durable sequence.
@@ -943,7 +967,8 @@ public:
 	void guard_calls(const std::atomic<std::uint64_t>* word, call_guard held) noexcept { guard_word_ = word, guard_held_ = held; }
 
 	// Writes the buffer as a segment (searchable, not yet durable). ENOSPC leaves the
-	// buffer in place to retry once space returns; other failures fence.
+	// buffer in place to retry once space returns; other failures fence. A deferred index's first
+	// refresh with documents syncs: it commits the empty first generation (commit_empty()).
 	void refresh();
 
 	// Merges the given segments into one (searchable, not yet durable), waiting for it: their
@@ -2104,9 +2129,12 @@ private:
 	// group, and an index with one opens only on its host (log_mismatch). By the table's status:
 	// lost is log_lost; none joins (the group created, the attribute's edit, then the first record,
 	// a checkpoint at the head); closed reopens and stages the table's record again as base + 1;
-	// stored replays the log's records. A head applied past the log's last durable record, or older
-	// than its checkpoint record, names records the log lost (D6.4); a checkpoint record of another
-	// UUID is another index's group. `created`: create_deferred's, whose first commit joins.
+	// stored replays the log's records; bounded (damage to the log, journal's lost-bound.md) replays
+	// the records after the bound when the head holds the group through it (a commit seals the
+	// head's whole batch record), and otherwise loses the group. A head applied past the log's last durable
+	// record, or older than its checkpoint record, names records the log lost (D6.4); a checkpoint
+	// record of another UUID is another index's group. `created`: create_deferred's, whose first
+	// commit joins.
 	void attach_log(bool created = false);
 	// Registers the group's sealer and watcher; records follow the group's last staged one, and
 	// the log is durable through it, or through `durable` when a staged record is not yet.
@@ -2122,16 +2150,26 @@ private:
 	// then the table takes it as the group's base and the log forgets the group.
 	void leave();
 	// Replays the group's recovered records (D6.5): each logged transaction applies at its position
-	// {s, i}, skipped at or below the head's. An owed verdict runs its chore and applies again;
-	// no_space fails the open; any other verdict throws replay_diverged, naming the position. No
-	// flush is a checkpoint until the group is released.
+	// {s, i}, skipped at or below the head's. A chunk run (rocksdb-parity A3) applies whole at its
+	// last chunk; one that a later record or the log's end interrupts was never acknowledged, and
+	// is dropped, moving the applied position past it so a checkpoint can cover it. A middle or
+	// last chunk with no run before it is log_lost above the head and skipped at or below it,
+	// where the head holds its run (a bound may fall inside one). An owed verdict runs its chore
+	// and applies again; no_space fails the open; any other verdict throws replay_diverged, naming
+	// the position. No flush is a checkpoint until the group is released.
 	void replay_log(const std::vector<kronuz::journal::TurnRecord>& records)
+		requires(command::loggable<Layout>);
+	void replay_one(const transaction& t, files::position at)
 		requires(command::loggable<Layout>);
 	// A write-buffer flush (D5's first trigger): a logged index's is a checkpoint, except during
 	// replay, whose flushes publish segments and stage nothing (D6.5).
 	void flush_point();
-	// D5's second trigger: the commands logged since the last checkpoint pass its byte bound.
-	bool log_due() const noexcept { return logged_ && !replaying_ && logged_->logged_bytes >= opts_.checkpoint_log_bytes; }
+	// D5's second trigger (rocksdb-parity D2 item 2): the commands logged since the last checkpoint
+	// pass the group's share of the log's window, and the floor.
+	bool log_due() const noexcept;
+	// The group's count in the sealer's writers: in at its first join after a checkpoint, out at the
+	// next checkpoint or its detach.
+	void count_writing(bool on) noexcept;
 	// D5's step 4, after commit_files() made the edit durable: the checkpoint record {UUID, g, X},
 	// unless nothing was logged since the last one and no join or leave owes one (`force`).
 	void stage_checkpoint(bool force = false);
@@ -2139,6 +2177,14 @@ private:
 	// The logged append (D3): the test seam, then the critical section. A failure there leaves an
 	// accepted transaction the log lacks, so the index fences.
 	void join_log(std::string_view cmd);
+	// A command past the record cap (rocksdb-parity A3), as chunks of at most command_bytes each,
+	// joined in order under the lease that stage 1 took: no checkpoint lands inside the run, and
+	// only the last chunk's record moves the applied position and V.
+	void join_chunks(std::string_view cmd)
+		requires(command::loggable<Layout>);
+	// Until the loop hands record `s` to a turn: the unsealed records then leave room.
+	void await_sealed(std::uint64_t s)
+		requires(command::loggable<Layout>);
 	// No flush publishes above V (D4, F5): a logged index's flush, and its pending deletes' move
 	// into segment bits, wait first until the log is durable through the applied position.
 	void await_log();
@@ -2698,6 +2744,12 @@ private:
 	// its new segments, renamed, and the directory synced; the old log stays for retention (D8).
 	// False when an unforced rollover's temporary meets ENOSPC: the next commit owes it.
 	bool roll_over(std::vector<kronuz::journal::File*> files, files::log_state c, bool forced);
+
+	// A deferred index's first manifest, written before its first data file so that no segment is
+	// ever on disk without a log beside it: the empty state create() commits, nothing applied, so a
+	// crash before the next commit opens it empty. A logged index applies nothing before its first
+	// commit (D7's join), so the join's attributes are never owed here.
+	void commit_empty();
 
 	// D4: the edit appended at the log's end in one write and synced, after the commit's new
 	// segment files and the directory are ordered. A failed write is truncated back first, so

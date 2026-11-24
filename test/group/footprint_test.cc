@@ -18,6 +18,7 @@
 // current directory, removed at the end). GROUP_FOOTPRINT_SIZES=1 prints live blocks by size, the
 // groups' window against the rows'; GROUP_FOOTPRINT_TRACE=SIZE the stacks of live blocks of SIZE.
 #include "blob_app.hh"
+#include "group_catalog_borrow.hh"
 
 #include "completion/posix.h"
 
@@ -238,9 +239,6 @@ group_type::config config(cs::GroupId id, strata::byte_budget& storage) {
 	c.options.scheduling = cs::WorkerLimits{16, 128};
 	for (unsigned b = 0; b < 8; ++b) { c.identity[b] = char(id >> (8 * b)); }
 	c.identity[15] = 'F';
-	c.uuid = {'f', 'o', 'o', 't'};
-	c.strata.keyed = true;
-	c.strata.storage = &storage;
 	return c;
 }
 
@@ -272,7 +270,11 @@ struct row final : sg::member {
 		task::spawn(lp->scheduler(), report(lp, id, applied));
 	}
 	void fenced(std::string) override {}
-	void install_needed(cs::NodeId) override {}
+	// A row opens without `snapshots`: the Driver sends it no install notice.
+	void install_needed(cs::NodeId, cs::SnapshotKey) override {}
+	void install_released(cs::NodeId, cs::SnapshotKey, cs::SnapshotReleaseReason) override {}
+	void validate(cs::Token, cs::LogBoundary, cs::NodeId, j::ArtifactReader&) override {}
+	void activate(cs::Token, cs::LogBoundary, j::ArtifactReader&) override {}
 };
 task::task<void> open_row(sg::loop& lp, cs::GroupId id, cs::GroupOptions options, j::Identity identity) {
 	lp.driver().open(id, std::move(options));
@@ -462,7 +464,7 @@ int main(int argc, char** argv) {
 	}
 
 	// COUNT groups, open and idle after one `quorum` write each, in waves that share turns.
-	std::vector<std::unique_ptr<group_type>> members(count);
+	std::vector<group_test::borrowed<group_type>> members(count);
 	phase("before");
 	const meter before;
 	const auto timers_before = loop_s.armed_timers();
@@ -472,7 +474,7 @@ int main(int argc, char** argv) {
 		const std::size_t last = std::min(count, first + wave);
 		std::size_t opened = 0, written = 0;
 		for (std::size_t i = first; i < last; ++i) {
-			members[i] = std::make_unique<group_type>(*lp, config(cs::GroupId(i + 1), storage), directory(root / "groups" / std::to_string(i)), app, chore_ref);
+			members[i].emplace(*lp, config(cs::GroupId(i + 1), storage), directory(root / "groups" / std::to_string(i)), storage, {'f', 'o', 'o', 't'}, app, chore_ref);
 			task::spawn(loop_ref, members[i]->open(), [&](std::exception_ptr e) {
 				check(!e, "open: " + why(e));
 				++opened;
@@ -496,7 +498,7 @@ int main(int argc, char** argv) {
 	std::printf("open and first write: %.3f ms per group, %.2f syncs per group (%s)\n", open_ms / double(count), double(syncs.load() - synced_open) / double(count), nosync ? "skipped" : "issued");
 	std::printf("timers: loop %zu (consensus's rows %zu), IO and turn watches in flight %zu\n", loop_s.armed_timers() - timers_before, group_timers, lp->driver().in_flight());
 	const std::int64_t group_heap = (idle.heap - before.heap) / std::int64_t(count), own = group_heap - index_heap - row_heap;
-	std::printf("heap per idle group: %lld B = index %lld + consensus row and journal %lld + the group's own %lld (sizeof group %zu, of it the index %zu)\n", (long long)group_heap,
+	std::printf("heap per idle group: %lld B = index %lld + consensus row and journal %lld + the group's own %lld (sizeof group %zu, the borrowed index %zu beside it)\n", (long long)group_heap,
 		(long long)index_heap, (long long)row_heap, (long long)own, sizeof(group_type), sizeof(std::optional<blob::index_type>));
 
 	// The group's own: no thread, no timer past consensus's rows, no frame past its index's, no
@@ -524,8 +526,8 @@ int main(int argc, char** argv) {
 		check(resumes == 0, "an idle minute resumes nothing: " + std::to_string(resumes));
 	}
 
-	// Closes: each checkpoints once (nothing past the write is applied), closes its index, and
-	// lets its directory go.
+	// Closes: each checkpoints once (nothing past the write is applied); the host then closes the
+	// index the group borrowed and lets its directory go.
 	{
 		const auto synced = syncs.load();
 		const auto t0 = std::chrono::steady_clock::now();
@@ -536,6 +538,7 @@ int main(int argc, char** argv) {
 				closed = true;
 			});
 			wait([&] { return closed; }, "close");
+			members[i].close_index();  // the host's, after the group's (D169)
 		}
 		const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 		if (closes) { std::printf("close: %.2f syncs, %.3f ms per group (%zu closed)\n", double(syncs.load() - synced) / double(closes), ms / double(closes), closes); }

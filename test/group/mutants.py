@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mutants for strata::group (quest group-core).
+"""Mutants for strata::group (quests group-core, group-heal, group-catalog).
 
 Each mutant breaks one rule of the design or a criterion (named beside it); its test must fail
 with it. Usage:
@@ -22,10 +22,18 @@ ANSWER = "include/strata/group/answer.hh"
 SUBMIT = "include/strata/group/submit.hh"
 BUNDLE = "include/strata/group/bundle.hh"
 INDEX = "include/strata/core/index.hh"
+CATALOG = "include/strata/core/catalog.hh"
 FOOTPRINT = "test/group/footprint_test.cc"
+WITNESS = "include/strata/group/witness.hh"
 
 # name: [(file, old, new), ...]
 MUTANTS = {
+    # A settle runs with an isolated node still cut off: a cut upload's isolation in a
+    # fault-free stretch outlives the stretch (corruption row, file seed 3). voters_test's
+    # settle_heals fails.
+    "settle-keeps-isolation": [("test/group/world.hh",
+        "\t\tisolated.clear();\n\t\tfor (auto& [id, x] : nodes) {\n\t\t\tif (!x->up()) { boot(*x); }\n",
+        "\t\tfor (auto& [id, x] : nodes) {\n\t\t\tif (!x->up()) { boot(*x); }\n")],
     # Recovery replays the file set only above P_H, as strata does (D16's a1-literal).
     "replay-from-ph": [(GROUP,
         "\t\tif (phase_ == phase::effects) {\n",
@@ -38,8 +46,8 @@ MUTANTS = {
     # The bundle publishes before the files it names are synced (D16 steps 2 and 4).
     "publish-before-sync": [
         (GROUP, "\t\tfiles_.sync(b.files);\n\t\tix_->commit();\n", "\t\tix_->commit();\n"),
-        (GROUP, "co_await on_chore([&] { files_.unlink_retired(b.position); });",
-                "co_await on_chore([&] { files_.sync(b.files); files_.unlink_retired(b.position); });")],
+        (GROUP, "\t\t\tfiles_.unlink_retired(unlink_through(b.position));\n",
+                "\t\t\tfiles_.sync(b.files);\n\t\t\tfiles_.unlink_retired(unlink_through(b.position));\n")],
     # The capture runs inside an entry's apply, between its file effects and its strata write.
     "capture-mid-entry": [
         (GROUP, "\t\t\tphase_ = phase::strata;\n\t\t}\n", "\t\t\tphase_ = phase::strata;\n\t\t\treturn step::more;\n\t\t}\n"),
@@ -60,8 +68,8 @@ MUTANTS = {
     # strata commits after the bundle publishes, so a crash between leaves P_b > P_H (D16 step 3).
     "commit-after-publish": [
         (GROUP, "\t\tfiles_.sync(b.files);\n\t\tix_->commit();\n", "\t\tfiles_.sync(b.files);\n"),
-        (GROUP, "co_await on_chore([&] { files_.unlink_retired(b.position); });",
-                "co_await on_chore([&] { ix_->commit(); files_.unlink_retired(b.position); });")],
+        (GROUP, "\t\t\tfiles_.unlink_retired(unlink_through(b.position));\n",
+                "\t\t\tix_->commit();\n\t\t\tfiles_.unlink_retired(unlink_through(b.position));\n")],
     # A file effect appends at the file's size: a retry after a partial push writes past it (D3).
     "append-on-retry": [(FILES,
         "\t\tfor (std::size_t done = 0; done < bytes.size();) { done += f->write_at(offset + done, bytes.substr(done)); }\n",
@@ -77,7 +85,7 @@ MUTANTS = {
         "\t\t\tif (false) {")],
     # The close leaves a waiter whose placement never applied here linked (journal group_closed).
     "close-keeps-waiters": [(GROUP,
-        "\t\t\tfail_waiters(std::make_exception_ptr(cs::closed{}));\n",
+        "\t\tfail_waiters(std::make_exception_ptr(cs::closed{}));\n",
         "")],
     # A checkpoint that can never get its admission waits for it (hunt: default limits).
     "admission-waits": [(GROUP,
@@ -103,14 +111,41 @@ MUTANTS = {
     "lift-the-bound": [(ANSWER,
         "return placements < max_placements ? next_step::resubmit : next_step::unavailable;",
         "return next_step::resubmit;")],
-    # The group drops consensus's SnapshotNeeded: a replica left behind goes unnamed (D109).
+    # The group drops consensus's SnapshotNeeded: no pin, so a replica behind the leader's
+    # checkpoint never installs and the ungated schedules do not settle (group-heal A2).
     "install-silent": [(GROUP,
-        "\tif (auto* m = owner->find(id)) { m->install_needed(s.peer); }\n",
+        "\tif (auto* m = owner->find(id)) { m->install_needed(s.peer, s.key); }\n",
         "\t(void)id;\n\t(void)s;\n")],
-    # A2's checkpoints ungated: one compacts past a replica cut off (D109; run with 14 schedules).
-    "checkpoint-ungated": [("test/group/voters_test.cc",
-        "(!gated || w.leaves_none_behind(",
-        "(true || w.leaves_none_behind(")],
+    # A witness's Sink holds a range below its promotion: the learner it joins as never applies
+    # it, and its promotion never commits (group-heal A4; group_witness_test join).
+    "witness-holds-range": [(WITNESS,
+        "\t\tloop_->driver().applied(id_, cs::Applied{range.entries.back().index});\n",
+        "")],
+    # A witness refuses the image it joins by: it never catches up past the leader's checkpoint
+    # (group-heal A4; group_witness_test join).
+    "witness-refuses-image": [(WITNESS,
+        "\t\tloop_->driver().validated(id_, token);\n",
+        "\t\tloop_->driver().validation_failed(id_, token);\n")],
+    # The teardown waits for the chore alone, not the learner's install tasks: a close returns
+    # while a stage still touches the group (--target=group_voters_test 0: close_mid_install).
+    "close-skips-install-tasks": [
+        (GROUP, "\t\t\treturn !self->running_ && !self->tasks_;\n", "\t\t\treturn !self->running_;\n"),
+        (GROUP, "\t\t\tif (!self->running_ && !self->tasks_) { return false; }\n", "\t\t\tif (!self->running_) { return false; }\n")],
+    # A pin release short of space fences the leader instead of stalling its chore
+    # (--target=group_voters_test 0: release_short_of_space).
+    "release-fences": [(GROUP,
+        "\t\t\t\trelease_pin(*ix_, gone->pin);\n\t\t\t} catch (const std::system_error& x) {\n\t\t\t\tif (x.code() == std::errc::no_space_on_device) { return step::stall; }\n",
+        "\t\t\t\trelease_pin(*ix_, gone->pin);\n\t\t\t} catch (const std::system_error& x) {\n")],
+    # Recovery releases the pins an earlier process left, committing strata: a full disk fails
+    # the open (--target=group_voters_test 0: reopen_short_of_space).
+    "release-at-open": [(GROUP,
+        "\t\tauto stale = held_pins(files_.io());\n",
+        "\t\tfor (const auto g : held_pins(files_.io())) { ix_->release(g); }\n\t\tstd::vector<std::uint64_t> stale;\n")],
+    # The pin goes with its flight's end, not when a later bundle supersedes it: the learner's
+    # fetch outruns the leader's chore at every flight (--target=group_voters_test 0: install_gap).
+    "pin-per-flight": [(GROUP,
+        "if (at != recovered_.position && p->flights.empty()) {",
+        "if (p->flights.empty()) {")],
     # A deposed proposer answers 503 instead of forwarding to the leader (A3).
     "no-forward": [(SUBMIT,
         "\t\t\t\tif (forwarded) {",
@@ -119,10 +154,6 @@ MUTANTS = {
     "resubmit-invalid": [(ANSWER,
         "\tcase verdict::version_conflict:\n",
         "\tcase verdict::invalid: return placements < max_placements ? next_step::resubmit : next_step::unavailable;\n\tcase verdict::version_conflict:\n")],
-    # The close leaves its index open: a closed group keeps the index's descriptors (A6).
-    "close-keeps-index": [(GROUP,
-        "\t\t\tif (ix_) { ix_->close(); ix_.reset(); }\n",
-        "")],
     # The file set keeps its last written file open: an idle group holds a descriptor (A6).
     "files-keep-handle": [
         (FILES, "\t\tauto f = open(name, true);\n", "\t\tlast_ = open(name, true);\n\t\tauto& f = last_;\n"),
@@ -137,14 +168,42 @@ MUTANTS = {
     "first-commit-unsynced": [(INDEX,
         "\t\t\tfiles_[name] = bytes.size();\n\t\t\tsync_dir();\n\t\t});\n",
         "\t\t\tfiles_[name] = bytes.size();\n\t\t\tif (g != 1) { sync_dir(); }\n\t\t});\n")],
-    # The close keeps the group's directory open: a closed group holds a descriptor (A6, D111).
-    "close-keeps-directory": [(GROUP,
-        "\t\t\tfiles_.close();\n\t\t\tdir_.reset();\n",
-        "\t\t\tfiles_.close();\n")],
-    # A destroyed group stays in its loop's table: what it leaves is ours (A6; footprint).
-    "destroy-keeps-member": [(GROUP,
-        "\t~group() override { loop_->detach(id_); }\n",
-        "\t~group() override {}\n")],
+    # A closed group stays in its loop's table: what it leaves is ours (A6;
+    # --target=group_footprint_test).
+    "close-keeps-member": [(GROUP,
+        "\t\tloop_->detach(id_);\n\t\tattached_ = false;\n\t\tco_await tear_down();\n",
+        "\t\tattached_ = false;\n\t\tco_await tear_down();\n")],
+    # The constructor joins the loop's table, on the host's thread, racing the loop's lookups
+    # (group-catalog R2; --target=group_catalog_test attach, --target=group_lifetime_test failed-open).
+    "attach-at-construction": [
+        (GROUP, "\t\thandoff_.fire = &handoff_fired;\n\t}\n",
+                "\t\thandoff_.fire = &handoff_fired;\n\t\tloop_->attach(id_, *this);\n\t\tattached_ = true;\n\t}\n"),
+        (GROUP, "\t\tloop_->attach(id_, *this);  // another group with this id: refused, nothing begun\n\t\tattached_ = true;\n", "")],
+    # A failed open stays in the loop's table with its chore running: the host destroys it off
+    # the loop (group-catalog R1; --target=group_catalog_test failed-open).
+    "failed-open-stays": [(GROUP,
+        "\t\tco_await leave();\n\t\tstd::rethrow_exception(failed);\n",
+        "\t\tstd::rethrow_exception(failed);\n")],
+    # The sweep's, the bound's or the replace's close skips close_payload: the index closes
+    # under a live group (group-catalog R3; --target=group_catalog_test sweep, bound, replace).
+    "sweep-skips-payload": [(CATALOG,
+        "\t\tclose_payload(s, down);\n",
+        "\t\tif (mode != close_mode::sweep) { close_payload(s, down); }\n")],
+    "bound-skips-payload": [(CATALOG,
+        "\t\tclose_payload(s, down);\n",
+        "\t\tif (mode != close_mode::bound) { close_payload(s, down); }\n")],
+    # The sweep never closes a slot at the wake bound (D5; --target=group_catalog_test bound).
+    "sweep-skips-bound": [(CATALOG,
+        "\t\t\t\tif (st == slot_state::owed && posts < lim.transitions && begin_bound_close(i)) {\n",
+        "\t\t\t\tif (st == slot_state::owed && posts < lim.transitions && false) {\n")],
+    "replace-skips-payload": [(CATALOG,
+        "\t\tclose_payload(s, false);\n",
+        "")],
+    # The group's chore runs its items unmarked: its own pinless applies are reported (N4; a
+    # Debug build, --target=group_catalog_test pin-check, replace or bare-commit-crash).
+    "payload-unmarked": [(GROUP,
+        "\t\t\t\tconst payload_work mark;  // the slot payload's own call (D169; catalog CT-R15)\n",
+        "")],
     # The footprint's schedulers start cold: the chore queue's first deque blocks land in the
     # groups' window and read as a destroyed group's (A6; --target=group_footprint_test).
     "cold-schedulers": [(FOOTPRINT,
@@ -173,7 +232,7 @@ MUTANTS = {
     # The close's teardown leaves no closed mark: a checkpoint or read after it runs against
     # the index and file set it destroyed (C2; --target=group_lifetime_test points).
     "no-closed-mark": [(GROUP,
-        "\t\t\t{\n\t\t\t\tstd::lock_guard lock(mu_);\n\t\t\t\tclosed_ = true;\n\t\t\t}\n",
+        "\t\t\tclosed_ = true;\n",
         "")],
     # The close stops after one checkpoint, whatever committed since (A5).
     "close-uncovered": [(GROUP,
@@ -182,7 +241,7 @@ MUTANTS = {
     # A failed open leaves its consensus row: the same process cannot open the id again
     # (--target=group_lifetime_test failed-open).
     "failed-open-keeps-row": [(GROUP,
-        "\t\ttry {\n\t\t\tco_await driver.close(id_);\n\t\t} catch (...) {}\n",
+        "\t\t\ttry {\n\t\t\t\tco_await driver.close(id_);\n\t\t\t} catch (...) {}\n",
         "")],
     # The index's sealer hands a record on the driver's repeat calls in one turn, past D4's
     # window (--target=standalone_turn_log_test; its `lag` case).
@@ -220,6 +279,25 @@ MUTANTS = {
     "read-skips-probe": [(GROUP,
         "\t\tconst auto ready = co_await loop_->driver().read(id_, std::move(token));\n\t\tco_await applied_at(ready.index);\n",
         "\t\t(void)token;\n")],
+    # An index opens a bounded group as a stored one: a head below the bound replays the records after it
+    # and misses the damaged batches (--target=standalone_turn_log_test t5b).
+    "bounded-as-stored": [(INDEX,
+        "status == kronuz::journal::GroupStatus::bounded && cur_.applied.index < opts_.log->bound(g)",
+        "false && cur_.applied.index < opts_.log->bound(g)")],
+    # A head at the bound loses the group, though it holds that record's whole batch
+    # (--target=standalone_turn_log_test t5b).
+    "bounded-at-bound": [(INDEX,
+        "cur_.applied.index < opts_.log->bound(g)",
+        "cur_.applied.index <= opts_.log->bound(g)")],
+    # A bounded group opens through create, not recover: the table's entry stays bounded and the open
+    # fails on it, not as the Store's loss (--target=group_lifetime_test bounded).
+    "bounded-created": [(GROUP,
+        "status == jn::GroupStatus::closed || status == jn::GroupStatus::bounded) {",
+        "status == jn::GroupStatus::closed) {")],
+    # A witness opens a bounded group through create, not recover (--target=group_lifetime_test bounded-witness).
+    "bounded-witness-created": [(WITNESS,
+        "status == jn::GroupStatus::closed || status == jn::GroupStatus::bounded) {",
+        "status == jn::GroupStatus::closed) {")],
 }
 
 

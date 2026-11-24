@@ -661,6 +661,230 @@ int main() {
 		}
 		std::printf("  create: %llu crash points under %zu crashes, %zu created again\n", (unsigned long long)total + 1, crashes, reran);
 	}
+	// A deferred index's first commit, and its first refresh, cut at every mutation as a process
+	// crash and as power loss under 8 seeds: the reopen finds no index, the empty one, or (a
+	// commit) the committed state, never a refusal or part of the transaction; then the commit
+	// runs again and reopens committed. The control cuts a second commit: the previous state or the
+	// committed one. create() writes one generation; a first commit with documents writes the
+	// empty one first, in the same log.
+	{
+		auto put = [](const std::string& key, int n) {
+			operation o;
+			o.type = operation::replace_key;
+			o.key = o.doc.key = key;
+			o.doc.stored = "doc " + std::to_string(n) + std::string(std::size_t(n % 40), 'x');
+			return o;
+		};
+		auto first_tx = [&] {
+			operation m;
+			m.type = operation::set_meta;
+			m.meta_key = "m";
+			m.meta_value = "v";
+			transaction t{{put("Qa", 1), put("Qb", 2), m}};
+			t.set_schema = 2;
+			return t;
+		};
+		auto head_of = [](fl::io& io) { return files::read_log(index_detail::read_all(*io.open_existing("manifest-1")), 1); };
+		std::uint64_t empty;
+		{
+			fl::filesystem fs;
+			fl::io io(fs);
+			auto ix = kv_index::create(io, keyed, uuid_a);
+			empty = ix.digest();
+			const auto lr = head_of(io);
+			CHECK(lr.state.generation == 1 && lr.edits == 0);  // nothing buffered: no empty generation first
+		}
+		enum class cut { first_commit, first_refresh, second_commit };
+		for (const cut which : {cut::first_commit, cut::first_refresh, cut::second_commit}) {
+			const char* name = which == cut::first_commit ? "first commit" : which == cut::first_refresh ? "first refresh" : "second commit";
+			const files::position at1{1, 1}, at2{2, 1};
+			auto prepare = [&](fl::io& io, std::optional<kv_index>& ix, std::uint64_t* first = nullptr) {
+				ix.emplace(kv_index::create_deferred(io, keyed, uuid_a));
+				CHECK(ix->apply(first_tx(), at1).result == verdict::accepted);
+				if (which == cut::second_commit) {
+					ix->commit();
+					if (first) { *first = ix->digest(); }
+					CHECK(ix->apply(transaction{{put("Qc", 3), put("Qa", 4)}}, at2).result == verdict::accepted);
+				}
+			};
+			auto step_of = [&](kv_index& ix) { which == cut::first_refresh ? ix.refresh() : ix.commit(); };
+			std::uint64_t total = 0, syncs = 0, before = 0, after = 0;
+			{
+				fl::filesystem fs;
+				fl::io io(fs);
+				std::optional<kv_index> ix;
+				prepare(io, ix, &before);
+				const auto m0 = fs.mutations(), s0 = fs.syncs();
+				ix->commit();
+				total = fs.mutations() - m0;
+				syncs = fs.syncs() - s0;
+				after = ix->digest();
+				if (which == cut::first_commit) {
+					const auto lr = head_of(io);
+					CHECK(lr.state.generation == 2 && lr.edits == 1);  // the empty generation, then the commit's edit
+				}
+				ix->close();
+			}
+			if (which == cut::first_refresh) {
+				fl::filesystem fs;
+				fl::io io(fs);
+				std::optional<kv_index> ix;
+				prepare(io, ix);
+				const auto m0 = fs.mutations();
+				ix->refresh();
+				total = fs.mutations() - m0;
+			}
+			std::size_t uncreated = 0, empties = 0, previous = 0, committed = 0, failed = 0;
+			for (std::uint64_t n = 0; n <= total; ++n) {
+				for (std::uint64_t power = 0; power <= 8; ++power) {
+					fl::filesystem fs;
+					fl::io io(fs);
+					{
+						std::optional<kv_index> ix;
+						prepare(io, ix);
+						fs.power_off_after(n);
+						try {
+							step_of(*ix);
+						} catch (...) {
+						}
+						fs.power_off_after(0);  // the process dies here: the destructor writes nothing
+						try {
+							ix.reset();
+						} catch (...) {
+						}
+					}
+					if (power) {
+						fs.crash(n * 7919 + power * 31 + std::uint64_t(which));
+					} else {
+						fs.power_on();
+					}
+					std::string listing;
+					for (const auto& f : fs.list()) { listing += " " + f; }
+					const std::string how = power ? "power loss seed " + std::to_string(power) : std::string("process crash");
+					std::string verdict_of;
+					std::optional<kv_index> ix;
+					try {
+						ix.emplace(kv_index::open(io, keyed));
+						const auto d = ix->digest();
+						const auto a = ix->applied();
+						if (which != cut::second_commit && d == empty && a == files::position{}) {
+							++empties;
+							CHECK(ix->apply(first_tx(), at1).result == verdict::accepted);
+						} else if (which == cut::second_commit && d == before && a == at1) {
+							++previous;
+							CHECK(ix->apply(transaction{{put("Qc", 3), put("Qa", 4)}}, at2).result == verdict::accepted);
+						} else if (which != cut::first_refresh && d == after && a == (which == cut::first_commit ? at1 : at2)) {
+							++committed;
+						} else {
+							verdict_of = "opens another state";
+						}
+					} catch (const index_not_created&) {
+						if (which == cut::second_commit) {
+							verdict_of = "finds no index";
+						} else {
+							++uncreated;
+							ix.emplace(kv_index::create_deferred(io, keyed, uuid_a));
+							CHECK(ix->apply(first_tx(), at1).result == verdict::accepted);
+						}
+					} catch (const std::exception& e) {
+						verdict_of = std::string("refused: ") + e.what();
+					}
+					if (!verdict_of.empty()) {
+						++failed;
+						std::fprintf(stderr, "FAIL %s cut at %llu/%llu (%s): %s;%s\n", name, (unsigned long long)n, (unsigned long long)total, how.c_str(), verdict_of.c_str(),
+							listing.c_str());
+						continue;
+					}
+					ix->commit();  // over what the cut left: orphans never collide with the commit's files
+					ix->close();
+					ix.reset();
+					CHECK(kv_index::open(io, keyed).digest() == after);
+				}
+			}
+			std::printf("  %s: %llu mutations (%llu syncs to commit), %llu cuts x 9: %zu not created, %zu empty, %zu previous, %zu committed, %zu failed\n", name,
+				(unsigned long long)total, (unsigned long long)syncs, (unsigned long long)total + 1, uncreated, empties, previous, committed, failed);
+			CHECK(failed == 0);
+			if (which == cut::first_commit) { CHECK(uncreated > 0 && empties > 0 && committed > 0); }
+			if (which == cut::first_refresh) { CHECK(empties > 0); }
+			if (which == cut::second_commit) { CHECK(previous > 0 && committed > 0); }
+		}
+		// install() into a fresh deferred index, cut at every mutation the same way: no index, the
+		// empty one, or the installed checkpoint.
+		{
+			fl::filesystem sfs;
+			fl::io sio(sfs);
+			auto source = kv_index::create(sio, keyed, uuid_b);
+			CHECK(source.apply(first_tx(), {}).result == verdict::accepted);
+			source.refresh();
+			CHECK(source.apply(transaction{{put("Qc", 3)}}, {}).result == verdict::accepted);
+			source.refresh();
+			const std::uint64_t cp = source.checkpoint();
+			const std::uint64_t installed = source.digest();
+			std::uint64_t total = 0;
+			{
+				fl::filesystem fs;
+				fl::io io(fs);
+				auto ix = kv_index::create_deferred(io, keyed, uuid_a);
+				const auto m0 = fs.mutations();
+				ix.install(sio, cp);
+				total = fs.mutations() - m0;
+				CHECK(ix.digest() == installed);
+			}
+			std::size_t uncreated = 0, empties = 0, done = 0, failed = 0;
+			for (std::uint64_t n = 0; n <= total; ++n) {
+				for (std::uint64_t power = 0; power <= 8; ++power) {
+					fl::filesystem fs;
+					fl::io io(fs);
+					{
+						std::optional<kv_index> ix;
+						ix.emplace(kv_index::create_deferred(io, keyed, uuid_a));
+						fs.power_off_after(n);
+						try {
+							ix->install(sio, cp);
+						} catch (...) {
+						}
+						fs.power_off_after(0);
+						try {
+							ix.reset();
+						} catch (...) {
+						}
+					}
+					if (power) {
+						fs.crash(n * 7919 + power * 31 + 7);
+					} else {
+						fs.power_on();
+					}
+					std::string listing;
+					for (const auto& f : fs.list()) { listing += " " + f; }
+					std::string verdict_of;
+					try {
+						auto ix = kv_index::open(io, keyed);
+						const auto d = ix.digest();
+						if (d == empty && ix.applied() == files::position{}) {
+							++empties;
+						} else if (d == installed) {
+							++done;
+						} else {
+							verdict_of = "opens another state";
+						}
+						ix.close();
+					} catch (const index_not_created&) {
+						++uncreated;
+					} catch (const std::exception& e) {
+						verdict_of = std::string("refused: ") + e.what();
+					}
+					if (!verdict_of.empty()) {
+						++failed;
+						std::fprintf(stderr, "FAIL install into a deferred index cut at %llu/%llu (%s): %s;%s\n", (unsigned long long)n, (unsigned long long)total,
+							power ? ("power loss seed " + std::to_string(power)).c_str() : "process crash", verdict_of.c_str(), listing.c_str());
+					}
+				}
+			}
+			std::printf("  install into a deferred index: %llu mutations, %llu cuts x 9: %zu not created, %zu empty, %zu installed, %zu failed\n",
+				(unsigned long long)total, (unsigned long long)total + 1, uncreated, empties, done, failed);
+			CHECK(failed == 0 && empties > 0 && done > 0);
+		}
+	}
 	// T1: power loss at every mutation point of seeded workloads, with merges on the
 	// writer's thread, then with background merges on a stepping executor (condition 7):
 	// queued merge work runs a piece at a time (to its next write chunk or rate-limiter

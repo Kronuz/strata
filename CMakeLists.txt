@@ -1,11 +1,6 @@
 cmake_minimum_required(VERSION 3.18)
 project(strata LANGUAGES C CXX)
 
-# Ninja is the only supported generator (the top-level project only).
-if (CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR AND NOT CMAKE_GENERATOR MATCHES "^Ninja")
-	message(FATAL_ERROR "Ninja only: configure with -G Ninja (not ${CMAKE_GENERATOR})")
-endif ()
-
 include(FetchContent)
 
 # Building blocks (Kronuz libraries). Point FETCHCONTENT_SOURCE_DIR_<NAME> at local
@@ -35,11 +30,11 @@ set(COMPLETION_ASIO OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG d8b538c6778f0a1b969e42c8428995d1d29d4731)
 # The manifest log's block framing (manifest-log D2), and the turn log, its driver and host that a
 # logged index writes through (standalone-turn-log D1); strata::group runs on the drivers.
-FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.git GIT_TAG 9e11713edbb6e31681e1ae7a3f8f18f15eb7eaac)
+FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.git GIT_TAG 9c7e31cd1c69312b93eb45f3f349d39a81b2e3cb)
 # Background work's threaded executor: one WorkPool per node, a WorkGroup per index.
 FetchContent_Declare(workpool GIT_REPOSITORY https://github.com/Kronuz/workpool.git GIT_TAG 640c66bfebccae811377670a265b62f4878ede8a)
 # strata::group's replication: consensus's Driver (docs/DRIVER.md, contract consensus:driver).
-FetchContent_Declare(consensus GIT_REPOSITORY https://github.com/Kronuz/consensus.git GIT_TAG b8de3b81064405e4fa9a384cf3670a679f484b48)
+FetchContent_Declare(consensus GIT_REPOSITORY https://github.com/Kronuz/consensus.git GIT_TAG 6e1122cc691ddcdd3b5e527a1d4ac037cd7add57)
 # fst is termdict's; strata pins it so the dictionary's bytes do not drift.
 FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict compressors fusefilter completion workpool journal consensus)
 
@@ -57,6 +52,12 @@ add_library(strata::core ALIAS strata_core)
 add_library(strata_group INTERFACE)
 target_link_libraries(strata_group INTERFACE strata::core consensus::consensus)
 add_library(strata::group ALIAS strata_group)
+
+# strata::placement (header-only): the root authority's records, placement and application on
+# strata::group (docs/mechanisms/placement-root.md).
+add_library(strata_placement INTERFACE)
+target_link_libraries(strata_placement INTERFACE strata::group)
+add_library(strata::placement ALIAS strata_placement)
 
 # Core links none of prospect's libraries, directly or through the libraries it links (fst reaches it
 # through termdict; docset, bitpack, analysis, unicode, snowball are search's alone).
@@ -123,6 +124,22 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(group_voters_test PRIVATE strata::group)
   add_test(NAME group_voters COMMAND group_voters_test)
   set_tests_properties(group_voters PROPERTIES TIMEOUT 1500)
+  # Two data voters and a witness: any one member lost, the log carried by the witness (group-heal A4).
+  add_executable(group_witness_test test/group/witness_test.cc)
+  target_link_libraries(group_witness_test PRIVATE strata::group)
+  add_test(NAME group_witness COMMAND group_witness_test)
+  # A damaged segment, manifest or set file fences its replica, which reinstalls (group-heal A3).
+  add_executable(group_repair_test test/group/repair_test.cc)
+  target_link_libraries(group_repair_test PRIVATE strata::group)
+  add_test(NAME group_repair COMMAND group_repair_test)
+  set_tests_properties(group_repair PROPERTIES TIMEOUT 1500)
+  # A damaged segment found at open: eager_segments maps every segment there.
+  add_test(NAME group_repair_eager COMMAND group_repair_test segment)
+  set_tests_properties(group_repair_eager PROPERTIES TIMEOUT 300 ENVIRONMENT STRATA_EAGER_SEGMENTS=1)
+  # A learner installs a pinned pack and file set through the Driver's install surface (group-heal A1).
+  add_executable(group_install_test test/group/install_test.cc)
+  target_link_libraries(group_install_test PRIVATE strata::group)
+  add_test(NAME group_install COMMAND group_install_test)
   # What an idle open group holds, on real directories (A6); frames counted, the frame pool off
   # so a freed frame leaves the heap count (the pool's cache is per thread, not per group).
   add_executable(group_footprint_test test/group/footprint_test.cc)
@@ -141,6 +158,17 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_test(NAME group_lifetime COMMAND group_lifetime_test)
   set_tests_properties(group_lifetime PROPERTIES TIMEOUT 1500)
   add_test(NAME group_lifetime_reopen_turn COMMAND group_lifetime_test reopen-turn)
+  # A group on its catalog slot's index: the borrow, close_payload outside the lease, and each
+  # close and failed open through the catalog (D169), one test per case.
+  add_executable(group_catalog_test test/group/group_catalog_test.cc)
+  target_link_libraries(group_catalog_test PRIVATE strata::group)
+  add_test(NAME group_catalog COMMAND group_catalog_test borrow)
+  set_tests_properties(group_catalog PROPERTIES TIMEOUT 300)
+  foreach(case failed-open attach sweep bound replace bare-commit-crash pin-check)
+    string(REPLACE "-" "_" name "${case}")
+    add_test(NAME group_catalog_${name} COMMAND group_catalog_test ${case})
+    set_tests_properties(group_catalog_${name} PROPERTIES TIMEOUT 300)
+  endforeach()
   add_executable(core_kv_test test/core_kv_test.cc)
   target_link_libraries(core_kv_test PRIVATE strata::core)
   add_test(NAME core_kv COMMAND core_kv_test)
@@ -222,11 +250,37 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(standalone_turn_log_test PRIVATE strata::core)
   target_compile_definitions(standalone_turn_log_test PRIVATE STRATA_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
   add_test(NAME standalone_turn_log COMMAND standalone_turn_log_test)
+  # Group commit: a closed loop of writers rides one barrier each (rocksdb-parity D5).
+  add_executable(test_barrier_cohort test/test_barrier_cohort.cc)
+  target_link_libraries(test_barrier_cohort PRIVATE strata::core)
+  add_test(NAME barrier_cohort COMMAND test_barrier_cohort)
   # kv_strata's sync batch: one transaction, one record and one barrier (bench/kv/kv_strata.hh).
   add_executable(kv_strata_batch_test test/kv_strata_batch_test.cc)
   target_include_directories(kv_strata_batch_test PRIVATE bench/kv)
   target_link_libraries(kv_strata_batch_test PRIVATE strata::core)
   add_test(NAME kv_strata_batch COMMAND kv_strata_batch_test)
+  # Logged indexes reopened at L = 1, 3, 2 with power cuts (docs/design/rocksdb-parity.md D10 item 2).
+  add_executable(test_reopen_loops test/test_reopen_loops.cc)
+  target_include_directories(test_reopen_loops PRIVATE bench/kv)
+  target_link_libraries(test_reopen_loops PRIVATE strata::core)
+  add_test(NAME reopen_loops COMMAND test_reopen_loops)
+  # The tolerant open: a damaged block loses only the indexes whose head misses its bound (A2).
+  add_executable(test_reopen_damaged test/test_reopen_damaged.cc)
+  target_link_libraries(test_reopen_damaged PRIVATE strata::core)
+  add_test(NAME reopen_damaged COMMAND test_reopen_damaged)
+  # An idle index's checkpoint moves forward while another writes 10 x retain_segments segments;
+  # the log keeps at most retain + spare + 1 segment files (rocksdb-parity D2's test).
+  add_executable(test_checkpoint_window test/test_checkpoint_window.cc)
+  target_link_libraries(test_checkpoint_window PRIVATE strata::core)
+  add_test(NAME checkpoint_window COMMAND test_checkpoint_window)
+  # Read-your-writes under ack=none: the owner reads at applied, views at V (rocksdb-parity A1).
+  add_executable(test_ryw test/test_ryw.cc)
+  target_link_libraries(test_ryw PRIVATE strata::core)
+  add_test(NAME ryw COMMAND test_ryw)
+  # Transactions past command_bytes stream as chunk records, all or nothing (rocksdb-parity A3).
+  add_executable(test_large_tx test/test_large_tx.cc)
+  target_link_libraries(test_large_tx PRIVATE strata::core)
+  add_test(NAME large_tx COMMAND test_large_tx)
   add_executable(apply_atomic_test test/apply_atomic_test.cc)
   target_link_libraries(apply_atomic_test PRIVATE strata::core)
   add_test(NAME apply_atomic COMMAND apply_atomic_test)
@@ -385,6 +439,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
       target_link_options(fuzz_${target} PRIVATE -fsanitize=fuzzer,address,undefined)
     endif()
   endforeach()
+  # strata::placement's tests: one CMake file per part (test/placement/*.cmake).
+  file(GLOB placement_tests CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test/placement/*.cmake")
+  foreach(placement_test ${placement_tests})
+    include("${placement_test}")
+  endforeach()
   # The boundary (docs/design/core-split.md): every core header compiled alone, in a translation
   # unit of its own, with only strata::core's include root and libraries. core_boundary builds
   # with everything else, so a header that is not self-contained or reaches outside core fails
@@ -443,10 +502,25 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   endif()
   add_executable(kv_strata bench/kv/kv_strata.cc)
   target_link_libraries(kv_strata PRIVATE strata::core)
+  # rocksdb-parity D2 item 2's floor: checkpoints and bytes written at 10k logged indexes.
+  add_executable(checkpoint_floor bench/kv/probes/rocksdb-parity/checkpoint-floor.cc)
+  target_link_libraries(checkpoint_floor PRIVATE strata::core)
   # format-14-kv's micro-prototypes (bench/kv/proto): block layouts and codecs, the decoded-block
   # cache, the buffer's sorted view, and the current buffer's bytes per record. Off by default, so
   # no other build fetches what they use; LZ4 is the pinned one strata links.
   option(STRATA_KV_PROTO "Build format-14-kv's micro-prototypes (bench/kv/proto)" OFF)
+  # The deterministic simulator (docs/mechanisms/simulator.md): its own project under sim/.
+  set(SIMULATION_TESTS ON)
+  add_subdirectory(sim)
+  # strata::group's whole suite in one build (test/group/suite.sh): every group_*_test here and
+  # the simulator's group_sim_test.
+  get_property(group_test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+  list(FILTER group_test_targets INCLUDE REGEX "^group_.*_test$")
+  add_custom_target(group_tests)
+  add_dependencies(group_tests ${group_test_targets})
+  if(TARGET group_sim_test)
+    add_dependencies(group_tests group_sim_test)
+  endif()
 endif()
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND STRATA_KV_PROTO)
   add_executable(kv_proto_blocks EXCLUDE_FROM_ALL bench/kv/proto/blocks.cc)

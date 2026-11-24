@@ -1,14 +1,15 @@
 # basic_index's layout: which mechanism lives where
 
-> Status: step 1 of quest index-restructure (2026-11-21): member definitions out of the class
-> body, one header per mechanism. Step 2 (subobjects) has not started; its candidates are below.
+> Status: step 1 of quest index-restructure: member definitions out of the class body, one header
+> per mechanism, moved by cpp-libraries' `tools/outline.py` and proved by `split_check.py --members`.
+> Step 2 (subobjects) has not started; its candidates are below.
 
 ## The shape
 
 `basic_index<Layout>` (`include/strata/core/index.hh`) holds one shard's index: open and recovery,
 transactions, the write buffer, flushes, the turn log, commits, checkpoints, storage, merges, reads
 and shared readers. Each of these has its own state and invariants, so one class body holding every
-definition (5,309 lines) was not one unit. The class body now holds what a reader needs to see the
+definition (5,413 lines) was not one unit. The class body now holds what a reader needs to see the
 whole: the data members, the nested types, and every member's declaration with its comment, in the
 order the sections (`// --- writer ---`, ...) give them. A definition that fits on one line stays
 in the class beside its declaration (accessors, forwarding calls).
@@ -26,8 +27,8 @@ compiles alone; `#pragma once` breaks the cycle.
 | `index_apply.hh` | transactions | apply, abandon and evaluate (stage 1); the undo log (rollback, remove_copy, push_record, reserve_undo, note_docid_only, bump_last_docid, writable_buffer); the writer calls' plumbing (check_in, run_chores, guarded, live, fence) |
 | `index_buffer.hh` | the write buffer | lookups of its copies (locate_docid, lookup_key, find_key_in, the docid map), memory accounting (charge, needs_flush, buffer_limit, map_bytes, the inline-record predicates), fits, lane_fits, invert_pending, clear_buffer |
 | `index_flush.hh` | freeze and flush | refresh, freeze, apply_pending, flush, flush_active, flush_documents, install_flushed; the segment files they write (write_unsynced, streamed_segment, map_output); segment identity (new_identity, seed_identities) |
-| `index_turns.hh` | the turn log | attach_log, seal_log, join, leave, detach_log, join_log, replay_log, flush_point, stage_checkpoint, await_durable, await_log, await_log_through |
-| `index_commit.hh` | commit | commit, prepare_commit; the manifest log's edit (figures_now, target_scalars, target_pins, entry_of, edit_now, state_now); commit_files, durable, roll_over, append_edit, reopen_log |
+| `index_turns.hh` | the turn log | attach_log, seal_log, join, leave, detach_log, join_log, replay_log, replay_one, flush_point, log_due, stage_checkpoint, await_durable, await_log, await_log_through; a large transaction's chunks (join_chunks, await_sealed) and the sealer's writer count (count_writing) |
+| `index_commit.hh` | commit | commit, prepare_commit; the manifest log's edit (figures_now, target_scalars, target_pins, entry_of, edit_now, state_now); commit_files, durable, roll_over, append_edit, reopen_log; commit_empty (a deferred index's first manifest) |
 | `index_checkpoint.hh` | checkpoints and retention | checkpoint, release, install; retain, kept_files, names_of |
 | `index_storage.hh` | storage accounting and reclamation | reclaim, reclaim_for_space, the posted deletes (run_delete, collect_deletes, requeue_delete, finish_deletes, wait_deletes), reclaim_posted, reclaim_files, file tracking (track, remove_file, forget_file, sync_dir, sync_inherited), commit_allowance, drain, settle_storage, estimate_bytes |
 | `index_merge.hh` | background merges | merge, force_merge, force_merge_deletes, maybe_merge, wait_merges, run_merges, start_merges, schedule, run_merge, publish_merges, install_merge, carry_pending, mark_damaged, end_merges, abandon_merges |

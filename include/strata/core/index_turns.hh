@@ -37,6 +37,10 @@ void basic_index<Layout>::attach_log(bool created) {
 			return;
 		}
 		if (!member) { throw log_mismatch("strata: the group is another index's"); }
+		if (status == kronuz::journal::GroupStatus::bounded && cur_.applied.index < opts_.log->bound(g)) {
+			opts_.log->lose(g);
+			throw log_lost("strata: the turn log lost records the index's head does not hold");
+		}
 		if (status == kronuz::journal::GroupStatus::closed) { opts_.log->reopen(g); }
 		const std::vector<kronuz::journal::TurnRecord> records = opts_.log->records(g);
 		std::optional<std::pair<std::uint64_t, std::string>> table;
@@ -148,32 +152,65 @@ void basic_index<Layout>::replay_log(const std::vector<kronuz::journal::TurnReco
 		bool& on;
 		~done() { on = false; }
 	} ended{replaying_};
+	std::optional<files::position> run;  // the last chunk read of an open run
+	std::string bytes;                   // its chunks above the head
+	const auto drop_run = [&] {
+		if (run && *run > cur_.applied) {
+			cur_.applied = *run;
+			changed();
+		}
+		run.reset();
+		bytes.clear();
+	};
 	for (const auto& r : records) {
 		if (r.kind != kronuz::journal::TurnRecordKind::Batch) {
 			// The front checkpoint is attach_log's; any other kind is another build's log.
 			if (&r == &records.front() && r.kind == kronuz::journal::TurnRecordKind::Checkpoint) { continue; }
 			throw unsupported_index("strata: a turn-log record of a kind strata does not write");
 		}
-		const std::vector<std::string_view> commands = command::decode_batch(r.payload);
-		for (std::size_t i = 0; i < commands.size(); ++i) {
-			const files::position at{r.sequence, i + 1};
-			const transaction t = command::decode<Layout>(commands[i]);
-			for (int chores = 0;; ++chores) {
-				const verdict v = apply(t, at);
-				if (v.result == verdict::accepted || v.result == verdict::skipped) { break; }
-				if (v.result == verdict::no_space) { throw std::system_error(std::make_error_code(std::errc::no_space_on_device), "strata: replay: no space"); }
-				// Each owed answer comes at most once per transaction: map, flush, drain.
-				if (chores == 3) { throw replay_diverged(at, v.result); }
-				if (v.result == verdict::flush_owed) {
-					flush_point();
-				} else if (v.result == verdict::drain_owed) {
-					(void)reclaim_for_space();
-				} else if (v.result == verdict::map_owed) {
-					promote();
-				} else {
-					throw replay_diverged(at, v.result);
-				}
+		if (command::kind_of(r.payload) == command::chunk) {
+			const command::chunk_record c = command::decode_chunk(r.payload);
+			const files::position at{r.sequence, 1};
+			if (c.place == command::chunk_place::first) {
+				drop_run();
+			} else if (!run) {
+				if (at <= cur_.applied) { continue; }
+				throw log_lost("strata: a turn-log chunk with no run before it");
 			}
+			run = at;
+			if (at > cur_.applied) { bytes += c.bytes; }
+			if (c.place != command::chunk_place::last) { continue; }
+			const std::string whole = std::move(bytes);
+			run.reset();
+			bytes.clear();
+			if (at > cur_.applied) { replay_one(command::decode<Layout>(whole), at); }
+			continue;
+		}
+		drop_run();
+		const std::vector<std::string_view> commands = command::decode_batch(r.payload);
+		for (std::size_t i = 0; i < commands.size(); ++i) { replay_one(command::decode<Layout>(commands[i]), {r.sequence, i + 1}); }
+	}
+	drop_run();
+}
+
+template <class Layout>
+void basic_index<Layout>::replay_one(const transaction& t, files::position at)
+	requires(command::loggable<Layout>)
+{
+	for (int chores = 0;; ++chores) {
+		const verdict v = apply(t, at);
+		if (v.result == verdict::accepted || v.result == verdict::skipped) { return; }
+		if (v.result == verdict::no_space) { throw std::system_error(std::make_error_code(std::errc::no_space_on_device), "strata: replay: no space"); }
+		// Each owed answer comes at most once per transaction: map, flush, drain.
+		if (chores == 3) { throw replay_diverged(at, v.result); }
+		if (v.result == verdict::flush_owed) {
+			flush_point();
+		} else if (v.result == verdict::drain_owed) {
+			(void)reclaim_for_space();
+		} else if (v.result == verdict::map_owed) {
+			promote();
+		} else {
+			throw replay_diverged(at, v.result);
 		}
 	}
 }
@@ -188,6 +225,26 @@ void basic_index<Layout>::flush_point() {
 }
 
 template <class Layout>
+bool basic_index<Layout>::log_due() const noexcept {
+	if constexpr (command::loggable<Layout>) {
+		if (!logged_ || replaying_) { return false; }
+		const std::uint64_t share = opts_.log->window_bytes() / std::max<std::uint64_t>(opts_.log->writers(), 1);
+		return logged_->logged_bytes >= std::max(opts_.checkpoint_floor_bytes, share);
+	}
+	return false;
+}
+
+template <class Layout>
+void basic_index<Layout>::count_writing(bool on) noexcept {
+	if constexpr (command::loggable<Layout>) {
+		if (logged_ && opts_.log && logged_->writing != on) {
+			logged_->writing = on;
+			opts_.log->writing(on);
+		}
+	}
+}
+
+template <class Layout>
 void basic_index<Layout>::stage_checkpoint(bool force) {
 	if constexpr (command::loggable<Layout>) {
 		if (!logged_ || replaying_) { return; }
@@ -198,6 +255,7 @@ void basic_index<Layout>::stage_checkpoint(bool force) {
 		cp.generation = m_.generation;
 		cp.at = x;
 		logged_->checkpoint(command::encode_checkpoint(cp), x, visible_);
+		count_writing(false);
 		join_owed_ = false;
 		opts_.log->wake();
 	}
@@ -206,6 +264,7 @@ void basic_index<Layout>::stage_checkpoint(bool force) {
 template <class Layout>
 void basic_index<Layout>::detach_log() noexcept {
 	if constexpr (command::loggable<Layout>) {
+		count_writing(false);
 		if (logged_ && opts_.log) { opts_.log->unseal(logged_->group, logged_.get()); }
 	}
 	logged_.reset();
@@ -217,22 +276,52 @@ void basic_index<Layout>::join_log(std::string_view cmd) {
 		bool opened = false;
 		try {
 			if (opts_.log_seam) { opts_.log_seam(); }
-			for (;;) {
-				const auto j = logged_->join(cmd, visible_, cur_.applied);
-				if (!j.full) {
-					opened = j.opened;
-					break;
+			if (cmd.size() > logged_->command_bytes) {
+				join_chunks(cmd);
+			} else {
+				for (;;) {
+					const auto j = logged_->join(cmd, visible_, cur_.applied);
+					if (!j.full) {
+						opened = j.opened;
+						break;
+					}
+					await_sealed(j.full);
 				}
-				const auto* st = logged_.get();
-				opts_.log->await_sealed(logged_->group, [st, s = j.full] { return st->handed.load(std::memory_order_acquire) >= s; });
 			}
 		} catch (...) {
 			fenced_ = true;
 			throw;
 		}
 		changed();
-		if (opened) { opts_.log->wake(); }
+		count_writing(true);
+		opts_.log->joined(opened);
 	}
+}
+
+template <class Layout>
+void basic_index<Layout>::join_chunks(std::string_view cmd)
+	requires(command::loggable<Layout>)
+{
+	const std::uint64_t room = logged_->command_bytes - command::chunk_overhead;
+	for (std::uint64_t at = 0; at < cmd.size(); at += room) {
+		const bool last = cmd.size() - at <= room;
+		const command::chunk_place p = at == 0 ? command::chunk_place::first : last ? command::chunk_place::last : command::chunk_place::middle;
+		for (;;) {
+			const auto j = logged_->join_chunk(cmd.substr(at, room), p, last ? visible_ : visible_ - 1, cur_.applied);
+			if (!j.full) { break; }
+			await_sealed(j.full);
+		}
+		opts_.log->joined(true);
+	}
+}
+
+template <class Layout>
+void basic_index<Layout>::await_sealed(std::uint64_t s)
+	requires(command::loggable<Layout>)
+{
+	opts_.log->joined(false);  // a full record seals next turn: it need not wait for this writer
+	const auto* st = logged_.get();
+	opts_.log->await_sealed(logged_->group, [st, s] { return st->handed.load(std::memory_order_acquire) >= s; });
 }
 
 template <class Layout>

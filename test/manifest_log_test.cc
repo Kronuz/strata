@@ -31,20 +31,6 @@ namespace fl = kronuz::faultlab;
 #define MANIFEST_LOG_TSAN 1
 #endif
 #endif
-#if defined(MANIFEST_LOG_TSAN) || defined(__SANITIZE_ADDRESS__)
-#define MANIFEST_LOG_SANITIZED 1
-#elif defined(__has_feature)
-#if __has_feature(address_sanitizer)
-#define MANIFEST_LOG_SANITIZED 1
-#endif
-#endif
-
-// The time bounds' factor: a sanitizer runs this code 3 to 15 times slower.
-#ifdef MANIFEST_LOG_SANITIZED
-static constexpr double time_scale = 10;
-#else
-static constexpr double time_scale = 1;
-#endif
 
 // A global operator new that fails the nth allocation once armed (the allocation-failure stage).
 // TSan's runtime defines the replaceable operators itself, so the stages that count skip under it.
@@ -1177,28 +1163,37 @@ void deleted_sets() {
 		const std::string snapshot_only = emitter.bytes();
 		for (const auto& e : edits) { emitter.record(encode_edit(e)); }
 		const std::string log = emitter.bytes();
-		const double t = seconds([&] {
-			for (const auto& e : edits) { apply(s, e); }
+		// Each time is the fastest of five runs (apply from the snapshot's state), a ratio to the
+		// snapshot's own read in the same process: the machine's speed cancels.
+		log_state w;
+		const double t = fastest([&] {
+			w = s;
+			return seconds([&] {
+				for (const auto& e : edits) { apply(w, e); }
+			});
 		});
-		CHECK(snapshot_size(s) == encode_snapshot(s).size());
+		CHECK(snapshot_size(w) == encode_snapshot(w).size());
 		log_read got;
-		const double read_snapshot = seconds([&] { (void)read_log(snapshot_only, 1); });
-		const double read_all = seconds([&] { got = read_log(log, 1); });
-		CHECK(got.state == s && got.edits == 128 && !got.dirty);
-		return std::array<double, 3>{t, read_snapshot, read_all};
+		const double read_snapshot = fastest([&] { return seconds([&] { (void)read_log(snapshot_only, 1); }); });
+		const double read_all = fastest([&] { return seconds([&] { got = read_log(log, 1); }); });
+		CHECK(got.state == w && got.edits == 128 && !got.dirty);
+		return std::array<double, 4>{t / read_snapshot, read_all / read_snapshot, read_snapshot, t};
 	};
 	const std::uint64_t big = 20000000;
-	const auto [even, even_snapshot, even_read] = deletes(big, [](std::uint64_t o) { return o % 2 == 0; }, [](int i) { return 2 * std::uint64_t(i) * 77777 + 1; });
-	const auto [clumped, clumped_snapshot, clumped_read] = deletes(big, [&](std::uint64_t o) { return o < big / 64 + 1; }, [&](int i) { return big - 1 - 2 * std::uint64_t(i); });
-	const auto [below, below_snapshot, below_read] = deletes(big, [&](std::uint64_t o) { return o % 67 == 0; }, [](int i) { return 67 * std::uint64_t(i) + 1; });
-	std::printf("  128 one-ordinal delete edits on 20M documents: 10M deleted %.2f ms, clumped dense %.2f ms, sparse below the threshold %.2f ms\n", even * 1e3,
-		clumped * 1e3, below * 1e3);
-	std::printf("  the open's read, snapshot alone / with the 128 edits: 10M deleted %.2f / %.2f ms, clumped dense %.2f / %.2f ms, sparse below %.2f / %.2f ms\n",
-		even_snapshot * 1e3, even_read * 1e3, clumped_snapshot * 1e3, clumped_read * 1e3, below_snapshot * 1e3, below_read * 1e3);
-	CHECK(even < 0.05 * time_scale);     // 8.9 s on ordinal vectors
-	CHECK(clumped < 0.5 * time_scale);   // each walk at most the set's words
-	CHECK(below < 0.5 * time_scale);     // each merge at most doc_count / 64 ordinals
-	CHECK(even_read - even_snapshot < 0.5 * time_scale);  // the 8.9 s regression; A3's T7 job times it
+	const auto [even, even_read, even_unit, even_t] = deletes(big, [](std::uint64_t o) { return o % 2 == 0; }, [](int i) { return 2 * std::uint64_t(i) * 77777 + 1; });
+	const auto [clumped, clumped_read, clumped_unit, clumped_t] = deletes(big, [&](std::uint64_t o) { return o < big / 64 + 1; }, [&](int i) { return big - 1 - 2 * std::uint64_t(i); });
+	const auto [below, below_read, below_unit, below_t] = deletes(big, [&](std::uint64_t o) { return o % 67 == 0; }, [](int i) { return 67 * std::uint64_t(i) + 1; });
+	std::printf("  128 one-ordinal delete edits on 20M documents, apply / the snapshot's read, then the open's read of the log / the snapshot's read:\n"
+		"    10M deleted %.3f / %.3f (unit %.3f ms, apply %.3f ms), clumped dense %.3f / %.3f (unit %.3f ms, apply %.3f ms), sparse below the threshold %.3f / %.3f (unit %.3f ms, apply %.3f ms)\n",
+		even, even_read, even_unit * 1e3, even_t * 1e3, clumped, clumped_read, clumped_unit * 1e3, clumped_t * 1e3, below, below_read, below_unit * 1e3, below_t * 1e3);
+	// Healthy: apply 0.001 to 0.03 of a snapshot read, the log's read 1.0 to 1.2; the 8.9 s
+	// regression is about 400x the read, and a walk or copy per edit at least 100x.
+	CHECK(even < 2);          // 8.9 s on ordinal vectors
+	CHECK(clumped < 2);       // each walk at most the set's words
+	CHECK(below < 2);         // each merge at most doc_count / 64 ordinals
+	CHECK(even_read < 4);
+	CHECK(clumped_read < 4);
+	CHECK(below_read < 4);
 
 	// SR2 at the reader's bound: a log of one-ordinal delete edits up to 2x D7's edit bound,
 	// max(R, n, S / c), replays in a small multiple of its snapshot's read, the set clumped dense

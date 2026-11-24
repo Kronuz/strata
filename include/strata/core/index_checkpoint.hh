@@ -29,6 +29,7 @@ template <class Layout>
 void basic_index<Layout>::install(kronuz::journal::IO& source, std::uint64_t generation) {
 	const writer_scope leased{*this};
 	live();
+	if (!m_.generation) { guarded([&] { commit_empty(); }); }  // the first manifest before any copy
 	const files::log_state theirs = read_generation(source, generation);
 	check_readable(theirs.configured);
 	auto got = load_files(source, theirs, true, load_);

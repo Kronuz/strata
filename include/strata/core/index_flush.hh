@@ -112,6 +112,7 @@ void basic_index<Layout>::apply_pending() {
 template <class Layout>
 void basic_index<Layout>::flush() {
 	await_log();
+	if (!m_.generation && buffer_size()) { commit_empty(); }  // the first manifest before any data file
 	freeze();
 	while (!frozen_.empty()) {
 		const std::size_t first = segs_.size();

@@ -19,11 +19,6 @@ verdict basic_index<Layout>::apply(const transaction& t, files::position at) {
 			}
 			if (join_owed_) { throw std::logic_error("strata: a logged index applies after its first commit (D7's join)"); }
 			command::encode(cmd, t);
-			if (cmd.size() > opts_.command_bytes) {
-				verdict v;
-				v.result = verdict::invalid;
-				return v;
-			}
 		}
 	}
 	assert(!logged_ || at == files::position{} || at.index <= logged_->synced.load(std::memory_order_relaxed));  // replay: durable
