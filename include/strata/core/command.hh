@@ -1,6 +1,6 @@
 // A transaction, and the command codec (standalone-turn-log D3, version 1): a transaction's bytes
-// as the turn log's batch records carry them and the replicated path proposes them, and the
-// checkpoint record's. Integers are LEB128 in their shortest form and every length is bounded by
+// as the turn log's batch and chunk records carry them and the replicated path proposes them, and
+// the checkpoint record's. Integers are LEB128 in their shortest form and every length is bounded by
 // the bytes left (files::detail::reader), so a payload decodes from exactly one encoding.
 #pragma once
 
@@ -51,7 +51,7 @@ namespace command {
 inline constexpr std::uint64_t max_bytes = 64ull << 20;
 static_assert(max_bytes == format::max_stored_record);
 // A payload's first two bytes: its kind, then its version.
-inline constexpr std::uint8_t batch = 1, checkpoint = 2, version = 1;
+inline constexpr std::uint8_t batch = 1, checkpoint = 2, chunk = 3, version = 1;
 
 namespace detail {
 // The transaction's presence mask, and an operation's flags.
@@ -204,7 +204,7 @@ basic_transaction<Layout> decode(std::string_view bytes) {
 inline std::uint8_t kind_of(std::string_view payload) {
 	if (payload.size() < 2) { throw corrupt_index("strata command: truncated"); }
 	const std::uint8_t kind = std::uint8_t(payload[0]), v = std::uint8_t(payload[1]);
-	if ((kind != batch && kind != checkpoint) || v != version) { throw unsupported_index("strata command: unknown kind or version"); }
+	if ((kind != batch && kind != checkpoint && kind != chunk) || v != version) { throw unsupported_index("strata command: unknown kind or version"); }
 	return kind;
 }
 
@@ -233,6 +233,33 @@ inline std::vector<std::string_view> decode_batch(std::string_view payload) {
 	for (std::uint64_t i = 0; i < n; ++i) { out.push_back(in.sized()); }
 	in.finish();
 	return out;
+}
+
+// A chunk record (rocksdb-parity A3): a slice of one transaction's encoding past the command
+// limit, in a record of its own. Its place byte, then the slice, at least one byte, to the
+// payload's end. A run is a first, any middles and a last; the last's record holds the
+// transaction's position {s, 1}.
+enum class chunk_place : std::uint8_t { first = 1, middle = 2, last = 3 };
+inline constexpr std::uint64_t chunk_overhead = 3;
+inline std::string chunk_payload(chunk_place p, std::string_view bytes) {
+	std::string out;
+	out.reserve(chunk_overhead + bytes.size());
+	detail::put_u8(out, chunk);
+	detail::put_u8(out, version);
+	detail::put_u8(out, std::uint8_t(p));
+	out += bytes;
+	return out;
+}
+struct chunk_record {
+	chunk_place place = chunk_place::first;
+	std::string_view bytes;
+};
+inline chunk_record decode_chunk(std::string_view payload) {
+	if (kind_of(payload) != chunk) { throw corrupt_index("strata command: not a chunk"); }
+	if (payload.size() <= chunk_overhead) { throw corrupt_index("strata command: an empty chunk"); }
+	const std::uint8_t p = std::uint8_t(payload[2]);
+	if (p < 1 || p > 3) { throw corrupt_index("strata command: a chunk's place"); }
+	return {chunk_place(p), payload.substr(chunk_overhead)};
 }
 
 // A checkpoint record (D5): the index, the manifest-log generation that holds its state, and

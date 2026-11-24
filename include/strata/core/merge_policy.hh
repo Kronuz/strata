@@ -2,13 +2,17 @@
 // TieredMergePolicy as that release reports them (8 segments per tier, 10 per merge, a
 // 16 MiB floor, 5 GiB merged segments, 20% deleted documents allowed, 10% for
 // force_merge_deletes). It decides, from segment sizes and deleted counts alone, which
-// segments to merge next; the index runs the merges. The behavior it promises is the one
+// segments to merge next; the index runs the merges. A segment whose key range overlaps
+// no other segment's is a settled run and stays out of the tiers, as RocksDB moves an SST
+// that overlaps nothing down a level without rewriting it (D9). The behavior it promises is the one
 // Lucene's TestTieredMergePolicy checks, re-implemented in merge_test.
 #pragma once
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace strata {
@@ -21,9 +25,24 @@ struct merge_policy {
 	std::uint64_t max_merged_bytes = 5ull << 30;
 	double deletes_pct_allowed = 20;
 	double force_merge_deletes_pct_allowed = 10;
+	// Segments of at least this size whose key range overlaps no other's are never merged
+	// for size; smaller ones merge once, up to the floor, as before.
+	std::uint64_t run_bytes = 4ull << 20;
 
 	struct candidate {
 		std::uint64_t id = 0, bytes = 0, docs = 0, deleted = 0;
+		// The segment's keys span [first_key, last_key] when `ranged`; unranged segments
+		// (no keys, or a caller that does not say) are taken to overlap every other.
+		std::string first_key, last_key;
+		bool ranged = false;
+		candidate() = default;
+		candidate(std::uint64_t id_, std::uint64_t bytes_, std::uint64_t docs_, std::uint64_t deleted_) : id(id_), bytes(bytes_), docs(docs_), deleted(deleted_) {}
+		candidate& range(std::string_view first, std::string_view last) {
+			first_key = first;
+			last_key = last;
+			ranged = true;
+			return *this;
+		}
 		double live_bytes() const noexcept { return docs ? double(bytes) * double(docs - deleted) / double(docs) : 0.0; }
 		double deleted_bytes() const noexcept { return double(bytes) - live_bytes(); }
 		double deleted_pct() const noexcept { return docs ? 100.0 * double(deleted) / double(docs) : 0.0; }
@@ -58,12 +77,14 @@ struct merge_policy {
 	std::vector<merge> find_merges(std::vector<candidate> segs) const {
 		std::sort(segs.begin(), segs.end(), [](const candidate& a, const candidate& b) { return a.live_bytes() > b.live_bytes(); });
 		// Segments at half the maximum size or more stay out of the tiers.
+		const auto run = settled(segs);
 		std::vector<const candidate*> eligible;
 		double bytes = 0, smallest = 0, docs = 0, deleted = 0;
-		for (const auto& s : segs) {
+		for (std::size_t i = 0; i < segs.size(); ++i) {
+			const auto& s = segs[i];
 			docs += double(s.docs);
 			deleted += double(s.deleted);
-			if (s.live_bytes() >= double(max_merged_bytes) / 2) { continue; }
+			if (run[i] || s.live_bytes() >= double(max_merged_bytes) / 2) { continue; }
 			eligible.push_back(&s);
 			bytes += s.live_bytes();
 			smallest = eligible.size() == 1 ? s.live_bytes() : std::min(smallest, s.live_bytes());
@@ -172,6 +193,29 @@ struct merge_policy {
 	}
 
 private:
+	// Which segments are settled runs: at least run_bytes live, and a key range that
+	// overlaps no other segment's. Any unranged segment overlaps all, so none settles.
+	std::vector<bool> settled(const std::vector<candidate>& segs) const {
+		std::vector<bool> run(segs.size(), false);
+		std::vector<std::size_t> order;
+		for (std::size_t i = 0; i < segs.size(); ++i) {
+			if (!segs[i].ranged) { return run; }
+			order.push_back(i);
+		}
+		std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return segs[a].first_key < segs[b].first_key; });
+		// Sorted by first key, a segment overlaps none when it starts past every earlier
+		// segment's end and ends before the next one starts.
+		const std::string* reach = nullptr;  // the largest last key before this segment
+		for (std::size_t k = 0; k < order.size(); ++k) {
+			const auto& s = segs[order[k]];
+			const bool clear_before = !reach || *reach < s.first_key;
+			const bool clear_after = k + 1 == order.size() || s.last_key < segs[order[k + 1]].first_key;
+			run[order[k]] = clear_before && clear_after && s.live_bytes() >= double(run_bytes);
+			if (!reach || *reach < s.last_key) { reach = &s.last_key; }
+		}
+		return run;
+	}
+
 	// The best merge among unused segments (sorted by live bytes, largest first). A window
 	// starts at each segment and takes the next ones that fit under max_merged_bytes until
 	// it holds the merge factor and reaches the floor, or max_merge_at_once. Tier merges

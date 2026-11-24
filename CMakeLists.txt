@@ -30,7 +30,7 @@ set(COMPLETION_ASIO OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG d8b538c6778f0a1b969e42c8428995d1d29d4731)
 # The manifest log's block framing (manifest-log D2), and the turn log, its driver and host that a
 # logged index writes through (standalone-turn-log D1); strata::group runs on the drivers.
-FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.git GIT_TAG 9e11713edbb6e31681e1ae7a3f8f18f15eb7eaac)
+FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.git GIT_TAG a3eecb543a39193960ad4e2a0dbb67ef22d46a10)
 # Background work's threaded executor: one WorkPool per node, a WorkGroup per index.
 FetchContent_Declare(workpool GIT_REPOSITORY https://github.com/Kronuz/workpool.git GIT_TAG 640c66bfebccae811377670a265b62f4878ede8a)
 # strata::group's replication: consensus's Driver (docs/DRIVER.md, contract consensus:driver).
@@ -244,11 +244,37 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(standalone_turn_log_test PRIVATE strata::core)
   target_compile_definitions(standalone_turn_log_test PRIVATE STRATA_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
   add_test(NAME standalone_turn_log COMMAND standalone_turn_log_test)
+  # Group commit: a closed loop of writers rides one barrier each (rocksdb-parity D5).
+  add_executable(test_barrier_cohort test/test_barrier_cohort.cc)
+  target_link_libraries(test_barrier_cohort PRIVATE strata::core)
+  add_test(NAME barrier_cohort COMMAND test_barrier_cohort)
   # kv_strata's sync batch: one transaction, one record and one barrier (bench/kv/kv_strata.hh).
   add_executable(kv_strata_batch_test test/kv_strata_batch_test.cc)
   target_include_directories(kv_strata_batch_test PRIVATE bench/kv)
   target_link_libraries(kv_strata_batch_test PRIVATE strata::core)
   add_test(NAME kv_strata_batch COMMAND kv_strata_batch_test)
+  # Logged indexes reopened at L = 1, 3, 2 with power cuts (docs/design/rocksdb-parity.md D10 item 2).
+  add_executable(test_reopen_loops test/test_reopen_loops.cc)
+  target_include_directories(test_reopen_loops PRIVATE bench/kv)
+  target_link_libraries(test_reopen_loops PRIVATE strata::core)
+  add_test(NAME reopen_loops COMMAND test_reopen_loops)
+  # The tolerant open: a damaged block loses only the indexes whose head misses its bound (A2).
+  add_executable(test_reopen_damaged test/test_reopen_damaged.cc)
+  target_link_libraries(test_reopen_damaged PRIVATE strata::core)
+  add_test(NAME reopen_damaged COMMAND test_reopen_damaged)
+  # An idle index's checkpoint moves forward while another writes 10 x retain_segments segments;
+  # the log keeps at most retain + spare + 1 segment files (rocksdb-parity D2's test).
+  add_executable(test_checkpoint_window test/test_checkpoint_window.cc)
+  target_link_libraries(test_checkpoint_window PRIVATE strata::core)
+  add_test(NAME checkpoint_window COMMAND test_checkpoint_window)
+  # Read-your-writes under ack=none: the owner reads at applied, views at V (rocksdb-parity A1).
+  add_executable(test_ryw test/test_ryw.cc)
+  target_link_libraries(test_ryw PRIVATE strata::core)
+  add_test(NAME ryw COMMAND test_ryw)
+  # Transactions past command_bytes stream as chunk records, all or nothing (rocksdb-parity A3).
+  add_executable(test_large_tx test/test_large_tx.cc)
+  target_link_libraries(test_large_tx PRIVATE strata::core)
+  add_test(NAME large_tx COMMAND test_large_tx)
   add_executable(apply_atomic_test test/apply_atomic_test.cc)
   target_link_libraries(apply_atomic_test PRIVATE strata::core)
   add_test(NAME apply_atomic COMMAND apply_atomic_test)
@@ -465,6 +491,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   endif()
   add_executable(kv_strata bench/kv/kv_strata.cc)
   target_link_libraries(kv_strata PRIVATE strata::core)
+  # rocksdb-parity D2 item 2's floor: checkpoints and bytes written at 10k logged indexes.
+  add_executable(checkpoint_floor bench/kv/probes/rocksdb-parity/checkpoint-floor.cc)
+  target_link_libraries(checkpoint_floor PRIVATE strata::core)
   # format-14-kv's micro-prototypes (bench/kv/proto): block layouts and codecs, the decoded-block
   # cache, the buffer's sorted view, and the current buffer's bytes per record. Off by default, so
   # no other build fetches what they use; LZ4 is the pinned one strata links.
