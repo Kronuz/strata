@@ -1196,7 +1196,7 @@ void deleted_sets() {
 	const std::uint64_t big = 20000000;
 	const auto [even, even_read, even_unit, even_t] = deletes(big, [](std::uint64_t o) { return o % 2 == 0; }, [](int i) { return 2 * std::uint64_t(i) * 77777 + 1; });
 	const auto [clumped, clumped_read, clumped_unit, clumped_t] = deletes(big, [&](std::uint64_t o) { return o < big / 64 + 1; }, [&](int i) { return big - 1 - 2 * std::uint64_t(i); });
-	const auto [below, below_read, below_unit, below_t] = deletes(big, [&](std::uint64_t o) { return o % 67 == 0; }, [](int i) { return 67 * i + 1; });
+	const auto [below, below_read, below_unit, below_t] = deletes(big, [&](std::uint64_t o) { return o % 67 == 0; }, [](int i) { return 67 * std::uint64_t(i) + 1; });
 	std::printf("  128 one-ordinal delete edits on 20M documents, apply / the snapshot's read, then the open's read of the log / the snapshot's read:\n"
 		"    10M deleted %.3f / %.3f (unit %.3f ms, apply %.3f ms), clumped dense %.3f / %.3f (unit %.3f ms, apply %.3f ms), sparse below the threshold %.3f / %.3f (unit %.3f ms, apply %.3f ms)\n",
 		even, even_read, even_unit * 1e3, even_t * 1e3, clumped, clumped_read, clumped_unit * 1e3, clumped_t * 1e3, below, below_read, below_unit * 1e3, below_t * 1e3);
