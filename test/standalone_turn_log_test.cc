@@ -2,13 +2,13 @@
 // codec and its fixtures (T9), RFTW0001's checkpoint rule (T11), the position taken with the
 // append (T12), V and flushes held at the barrier (T4), a power-off sweep with checkpoints and
 // recycled segments (T1), a process crash at every mutation (T2), a failed barrier (T3), log
-// damage below the head (T5) and double damage past it (T5d), no_space and owed verdicts at
-// replay (T7, T7b), chunks past the command limit and the turn budget (T8), runtime refusals (T10), joining
+// damage below the head (T5), double damage past it (T5d), a bounded group (T5b), no_space and owed
+// verdicts at replay (T7, T7b), chunks past the command limit and the turn budget (T8), runtime refusals (T10), joining
 // and leaving (T6; t6w: a waiter across a close and reopen, and recovery over the retired
 // sequence), one write and one sync per acknowledgement (M1), a served loop with group commit, a
 // checkpointing writer and a reader (the TSan case), a writer outrunning slow barriers (lag: D4's
 // window), and another build's record failing the open (t9o).
-// Usage: standalone_turn_log_test [--seeds N] [codec|t9o|t11|t12|t4|t1|t1r|t2|t3|t5|t5d|t6|t6w|t7|t7b|t8|t10|m1|served|lag]...;
+// Usage: standalone_turn_log_test [--seeds N] [codec|t9o|t11|t12|t4|t1|t1r|t2|t3|t5|t5d|t5b|t6|t6w|t7|t7b|t8|t10|m1|served|lag]...;
 // none runs every case. --seeds sets T1's power-loss seeds per crash point (default 8).
 #include "kv_test.hh"
 #include "strata/core/command.hh"
@@ -904,6 +904,118 @@ void t5d() {
 	std::printf("t5d: %zu acknowledged writes; the reopen %s\n", acked.size(), refused ? "refused the group (log_lost)" : "kept them");
 }
 
+// --- T5b: a bounded group -----------------------------------------------------------------------
+
+// Damage to one block of the log leaves the group bounded (journal's lost-bound.md): the bound is the
+// highest sequence the block holds of it, and the index continues only when its head is past it.
+
+// A log of k0 (committed, with its checkpoint record) and `writes` more batches, each acknowledged by
+// its turn, with no checkpoint after them. The head is committed after write `commit_after` (-1:
+// stays at k0) and its checkpoint record never reaches the log: the stop of a crash before the turn
+// that would carry it. The writes after `commit_after` are not made.
+struct bounded_log {
+	std::vector<std::uint64_t> start, end;  // the log position before and after each write
+	std::uint64_t segment = 0;
+	state_t acked;
+};
+bounded_log bounded_build(fl::filesystem& fs, int writes, int commit_after) {
+	fl::io io(fs);
+	bounded_log out;
+	try {
+		host h(io);
+		kv_index ix = kv_index::create(io, logged_options(h.sealer), uuid_of("t5b"));
+		const auto write = [&](const std::string& key, const std::string& value) {
+			out.start.push_back(h.driver.log().position());
+			CHECK(ix.apply(tx({replace(key, value)}), {}).result == verdict::accepted);
+			while (h.sealer.turn()) {}
+			out.end.push_back(h.driver.log().position());
+			out.acked[key] = value;
+		};
+		write("k0", "a");
+		ix.commit();
+		while (h.sealer.turn()) {}
+		for (int i = 0; i < writes; ++i) {
+			write("s" + std::to_string(i), std::string(100, 'v'));
+			if (i == commit_after) {
+				ix.commit();
+				break;
+			}
+		}
+		out.segment = h.driver.log().segment();
+		fs.power_off_after(0);
+	} catch (const std::exception&) {
+	}
+	fs.power_on();
+	return out;
+}
+
+// Opens the damaged log and reports whether the index kept every acknowledged write, or refused
+// with log_lost. The group's status before the open and after it is checked against `bounded`.
+enum class outcome { kept, lost };
+outcome bounded_open(fl::filesystem& fs, const bounded_log& log, std::uint64_t block, bool expect_bounded) {
+	fl::io io(fs);
+	std::string name;
+	for (auto c = io.scan_directory(); auto n = c->next();) {
+		if (n->starts_with(host_view::prefix) && n->ends_with(jr::turn_log_detail::segment_name(log.segment))) { name = *n; }
+	}
+	CHECK(!name.empty());
+	{
+		auto f = io.open_existing(name);
+		const std::uint64_t at = block * 4096 + 1700;
+		char byte = 0;
+		f->read_at(at, std::span(&byte, 1));
+		byte = char(byte ^ 0x10);
+		f->write_at(at, std::string_view(&byte, 1));
+		f->sync();
+	}
+	host h(io);
+	CHECK((h.table.status(group) == jr::GroupStatus::bounded) == expect_bounded);
+	try {
+		kv_index ix = kv_index::open(io, logged_options(h.sealer));
+		for (const auto& [key, value] : log.acked) { CHECK(ix.get(key) == value); }
+		return outcome::kept;
+	} catch (const log_lost&) {
+		CHECK(h.table.status(group) == jr::GroupStatus::lost);
+		return outcome::lost;
+	}
+}
+
+void t5b() {
+	constexpr int writes = 120;
+	// The writes' positions, from a run that stops nowhere; B is the first block a write straddles
+	// (starts in it, ends in the next) past the middle one, and that write's sequence is B's bound.
+	fl::filesystem probe;
+	const bounded_log plan = bounded_build(probe, writes, writes - 1);
+	CHECK(plan.start.size() == std::size_t(writes) + 1);
+	int straddle = -1;
+	for (int i = writes / 2; i < writes && straddle < 0; ++i) {
+		if (plan.start[i + 1] / 4096 + 1 == plan.end[i + 1] / 4096) { straddle = i; }
+	}
+	CHECK(straddle > 0);
+	const std::uint64_t block = plan.start[straddle + 1] / 4096;
+	// The head at k0, below the bound: the index loses the group.
+	{
+		fl::filesystem fs;
+		const bounded_log log = bounded_build(fs, writes, -1);
+		CHECK(bounded_open(fs, log, block, true) == outcome::lost);
+		fl::io io(fs);
+		host h(io);
+		CHECK(h.table.status(group) == jr::GroupStatus::lost);  // durably
+	}
+	// The head at the bound's own write: it may lack the rest of that batch's record: lost.
+	{
+		fl::filesystem fs;
+		const bounded_log log = bounded_build(fs, writes, straddle);
+		CHECK(bounded_open(fs, log, block, true) == outcome::lost);
+	}
+	// The head past the bound: every acknowledged write is there.
+	{
+		fl::filesystem fs;
+		const bounded_log log = bounded_build(fs, writes, writes - 1);
+		CHECK(bounded_open(fs, log, block, true) == outcome::kept);
+	}
+}
+
 // --- T7: no_space at replay ---------------------------------------------------------------------
 
 void t7() {
@@ -1502,7 +1614,7 @@ void m1() {
 
 int main(int argc, char** argv) {
 	const std::vector<std::pair<std::string, void (*)()>> cases = {{"codec", codec}, {"t11", t11}, {"t12", t12}, {"t4", t4}, {"t1", t1}, {"t1r", t1r},
-		{"t2", t2}, {"t3", t3}, {"t5", t5}, {"t5d", t5d}, {"t7", t7}, {"t7b", t7b}, {"t6", t6}, {"t6w", t6w}, {"t8", t8}, {"t10", t10}, {"m1", m1}, {"served", served}, {"rival", rival}, {"lag", lag}, {"t9o", t9o}};
+		{"t2", t2}, {"t3", t3}, {"t5", t5}, {"t5d", t5d}, {"t5b", t5b}, {"t7", t7}, {"t7b", t7b}, {"t6", t6}, {"t6w", t6w}, {"t8", t8}, {"t10", t10}, {"m1", m1}, {"served", served}, {"rival", rival}, {"lag", lag}, {"t9o", t9o}};
 	std::vector<std::string> wanted;
 	for (int i = 1; i < argc; ++i) {
 		if (std::string(argv[i]) == "--seeds" && i + 1 < argc) {

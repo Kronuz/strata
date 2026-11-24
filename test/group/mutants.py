@@ -279,6 +279,15 @@ MUTANTS = {
     "read-skips-probe": [(GROUP,
         "\t\tconst auto ready = co_await loop_->driver().read(id_, std::move(token));\n\t\tco_await applied_at(ready.index);\n",
         "\t\t(void)token;\n")],
+    # An index opens a bounded group as a stored one: a head below the bound replays the records after it
+    # and misses the damaged batches (--target=standalone_turn_log_test t5b).
+    "bounded-as-stored": [(INDEX,
+        "status == kronuz::journal::GroupStatus::bounded && cur_.applied.index <= opts_.log->bound(g)",
+        "false && cur_.applied.index <= opts_.log->bound(g)")],
+    # A head at the bound counts as past it (--target=standalone_turn_log_test t5b).
+    "bounded-at-bound": [(INDEX,
+        "cur_.applied.index <= opts_.log->bound(g)",
+        "cur_.applied.index < opts_.log->bound(g)")],
 }
 
 

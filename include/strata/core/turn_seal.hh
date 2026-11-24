@@ -105,7 +105,7 @@ public:
 		return host_.status(group);
 	}
 	// A bounded group's bound (GroupStatus::bounded): the highest sequence damage to its log could
-	// hold. An index whose head ends below it loses the group: lose(), durable when it returns.
+	// hold. An index whose head does not pass it loses the group: lose(), durable when it returns.
 	std::uint64_t bound(std::uint64_t group) {
 		const auto turn = hold_loop();
 		return host_.bound(group);
@@ -121,7 +121,8 @@ public:
 		if (!e || e->manifest.empty()) { return std::nullopt; }
 		return std::pair{e->base, e->manifest};
 	}
-	// Each is durable when it returns.
+	// Create and reopen change the table in memory; the loop commits them before its next turn with
+	// records, so each is durable before the group's first record. Close is durable when it returns.
 	void create(std::uint64_t group) {
 		const auto turn = hold_loop();
 		mine(group);

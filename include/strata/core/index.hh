@@ -3366,8 +3366,8 @@ private:
 	// lost is log_lost; none joins (the group created, the attribute's edit, then the first record,
 	// a checkpoint at the head); closed reopens and stages the table's record again as base + 1;
 	// stored replays the log's records; bounded (damage to the log, journal's lost-bound.md) replays
-	// the records after the bound when the head holds the group through it (a commit seals the
-	// head's record), and otherwise loses the group. A head applied past the log's last durable
+	// the records after the bound when the head is past it (a head at the bound may lack the
+	// rest of that record's batch), and otherwise loses the group. A head applied past the log's last durable
 	// record, or older than its checkpoint record, names records the log lost (D6.4); a checkpoint
 	// record of another UUID is another index's group. `created`: create_deferred's, whose first
 	// commit joins.
@@ -3390,7 +3390,7 @@ private:
 				return;
 			}
 			if (!member) { throw log_mismatch("strata: the group is another index's"); }
-			if (status == kronuz::journal::GroupStatus::bounded && cur_.applied.index < opts_.log->bound(g)) {
+			if (status == kronuz::journal::GroupStatus::bounded && cur_.applied.index <= opts_.log->bound(g)) {
 				opts_.log->lose(g);
 				throw log_lost("strata: the turn log lost records the index's head does not hold");
 			}
