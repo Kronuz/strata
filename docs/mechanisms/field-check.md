@@ -35,9 +35,10 @@ again until `heal()`.
 
 The claim is kept on the record, one per segment of every open index, at no memory cost: the
 vouch is 32 bytes (16 on main), and the record's small members (`version` and three flags) share
-the one word each used to pad alone, so `open_segment` stays 200 bytes, as on main. The check
-itself keeps nothing: the counted heap per index equals main's with Xapiand's loop
-(`docs/perf/eager-open.md`, "The record's size").
+the one word each used to pad alone, so `open_segment` stays 200 bytes, as on main. Strata's
+part of the check keeps nothing; prospect's dictionary caches its pool reader (400 B per segment,
+as Xapiand's loop did on main), and opened in the middle of the load its placement costs ~160 B
+of fragmentation per index (`docs/perf/eager-open.md`, "The record's size").
 
 ## The plugin's part
 

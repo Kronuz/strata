@@ -193,13 +193,28 @@ record padded `version` and its three flags into three words; they now share one
 is 200 bytes again with the full claim. The check keeps nothing after the open: the fixed `eager`
 equals main's `today` (Xapiand's loop) byte for byte, after the open and after the first query.
 
-Beyond the band, the check (Xapiand's loop on main, the map's here) keeps prospect's pool reader:
+The check (Xapiand's loop on main, the map's here) keeps prospect's pool reader:
 `fielddict::reader::check_fields` scans the pool through `pool()`, which opens it into the reader's
 cache (a map node and a `termdict::reader`), 400 B in 2 allocations per segment, kept while the
 index is open. A query does not open it (`eager` on main, no check, holds 26,889 and 52,497 B).
+
+At strata:239d51e4 the `d1000s10` row still failed (261124-145139-a2c903): dirty 64,295 B over a
+top of 64,147, resident 228,483 over 228,336, and the proto build's `today` arm high too. The
+heap is the same: malloc's zone statistics give equal blocks and bytes in use per index, and
+`vmmap` on one paused run of each (1,000 indexes, `d1000s10`) gives the same 349,188 allocations
+and 58.9 MB allocated, with fragmentation 2,383 KB on main's `today` against 2,539 KB on proto
+`eager` (+156 B per index, in `MALLOC_TINY`). Main's loop opens the pool readers after each index
+is open; the map opens them in the middle of the load, among its short-lived allocations, and the
+holes those leave stay dirty. Closing the segment's file before the check (an experiment) moves
+it by under 50 B.
+
 Scanning through a reader of its own, dropped at return, gives the same refusals (`d1000s4c`) and
 the same identity hash, and takes `eager` and `today` to 26,889 B (`d1000s4`, -1,600) and 52,497 B
-(`d1000s10`, -4,000): 7% of a hot index's heap. It is prospect's change, not this quest's.
+(`d1000s10`, -4,000) of heap: 7% of a hot index's. Over it the gap falls within the run spread (an
+A3 row decides): dirty after open at `d1000s10`, 1,000 indexes, 6 runs each, main `today`
+59,859-59,961 B (median 59,890), proto `eager` 59,855-60,035 B (median 59,937), both 4.2 KB under
+main's `today` over prospect:4430396 (64,086-64,119). It is prospect's change (`fielddict.hh`),
+outside this quest's file set.
 
 ## Recommendation
 
