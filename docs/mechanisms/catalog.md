@@ -227,7 +227,7 @@ over `soft_hot`, idle slots and the bound close stay the pass's own (the sweep, 
 
 - **Queues.** A slot enters the small FIFO (a tenth of `soft_open`) when its open ends, or the main
   FIFO when the 64-bit hash of its key is in the ghost. The links live in the slot, under one
-  `policy_mu_` held for O(1) steps, taken on a miss and by the pass, never on a hit. The ghost
+  mutex of the policy subobject (`catalog_detail::s3fifo`, catalog_s3fifo.hh) held for O(1) steps, taken on a miss and by the pass, never on a hit. The ghost
   (`ghost_set.hh`) holds the hashes of the keys closed last, half as many as `soft_open` (limits.md has the size's reason and its bytes).
 - **Frequency.** The word's 2 bits, set by a use in the compare-exchange it already makes, in every
   state it meets (a hit costs no extra store). A `try_pin` that makes a compare-exchange
@@ -245,7 +245,7 @@ over `soft_hot`, idle slots and the bound close stay the pass's own (the sweep, 
   ghost when the pass took it from the small FIFO with its frequency clear (`to_ghost`, carried by a demotion's
   booking too); the idle and bound closes are not ghosted. A close the index refuses (`close_refused`, every
   exit that ends at the prior state) clears the mark, then puts the slot back in the main FIFO. A slot is
-  queued only while its state is neither `closing` nor `free`, read under `policy_mu_`, so a pass's put-back
+  queued only while its state is neither `closing` nor `free`, read under that mutex, so a pass's put-back
   cannot land between a close's unlink and its end.
   `close_refused` reads `gen` while the slot is still `closing` (ours), before `end_at`: a close another thread ends
   and a reopen of the slot for another key after that move `gen` on, so the put-back is refused and the open's own
