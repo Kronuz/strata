@@ -63,11 +63,12 @@ public:
 		return it == live_.end() ? 0 : it->second.length;
 	}
 	bool live(std::string_view name) const { return live_.find(name) != live_.end(); }
-	// Rotation, only ever at an entry: the file is immutable from here, its CRC32C named.
+	// Rotation, only ever at an entry: the file is immutable from here, its CRC32C named, read in
+	// bounded pieces as recovery verifies it (a volume can be tens of GiB).
 	void seal(std::string_view name) {
 		auto it = live_.find(name);
 		if (it == live_.end() || it->second.crc) { return; }
-		it->second.crc = kronuz::crc32c::crc32c(read(name, 0, std::size_t(it->second.length)));
+		it->second.crc = crc32c_of(*open(name, false), it->second.length);
 	}
 	// Retires a file at entry `at`: it leaves the live set now and is unlinked only after a
 	// bundle that omits it publishes. Retiring an absent file does nothing (replay).
