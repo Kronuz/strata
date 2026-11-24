@@ -31,20 +31,6 @@ namespace fl = kronuz::faultlab;
 #define MANIFEST_LOG_TSAN 1
 #endif
 #endif
-#if defined(MANIFEST_LOG_TSAN) || defined(__SANITIZE_ADDRESS__)
-#define MANIFEST_LOG_SANITIZED 1
-#elif defined(__has_feature)
-#if __has_feature(address_sanitizer)
-#define MANIFEST_LOG_SANITIZED 1
-#endif
-#endif
-
-// The time bounds' factor: a sanitizer runs this code 3 to 15 times slower.
-#ifdef MANIFEST_LOG_SANITIZED
-static constexpr double time_scale = 10;
-#else
-static constexpr double time_scale = 1;
-#endif
 
 // A global operator new that fails the nth allocation once armed (the allocation-failure stage).
 // TSan's runtime defines the replaceable operators itself, so the stages that count skip under it.
@@ -1200,10 +1186,14 @@ void deleted_sets() {
 	std::printf("  128 one-ordinal delete edits on 20M documents, apply / the snapshot's read, then the open's read of the log / the snapshot's read:\n"
 		"    10M deleted %.3f / %.3f (unit %.3f ms, apply %.3f ms), clumped dense %.3f / %.3f (unit %.3f ms, apply %.3f ms), sparse below the threshold %.3f / %.3f (unit %.3f ms, apply %.3f ms)\n",
 		even, even_read, even_unit * 1e3, even_t * 1e3, clumped, clumped_read, clumped_unit * 1e3, clumped_t * 1e3, below, below_read, below_unit * 1e3, below_t * 1e3);
-	CHECK(even < 1e9);     // 8.9 s on ordinal vectors
-	CHECK(clumped < 1e9);  // each walk at most the set's words
-	CHECK(below < 1e9);    // each merge at most doc_count / 64 ordinals
-	CHECK(even_read < 1e9);
+	// Healthy: apply 0.001 to 0.03 of a snapshot read, the log's read 1.0 to 1.2; the 8.9 s
+	// regression is about 400x the read, and a walk or copy per edit at least 100x.
+	CHECK(even < 2);          // 8.9 s on ordinal vectors
+	CHECK(clumped < 2);       // each walk at most the set's words
+	CHECK(below < 2);         // each merge at most doc_count / 64 ordinals
+	CHECK(even_read < 4);
+	CHECK(clumped_read < 4);
+	CHECK(below_read < 4);
 
 	// SR2 at the reader's bound: a log of one-ordinal delete edits up to 2x D7's edit bound,
 	// max(R, n, S / c), replays in a small multiple of its snapshot's read, the set clumped dense
