@@ -233,8 +233,9 @@ public:
 	loop& owner() const noexcept { return *loop_; }
 
 	// Opens the group: joins the loop's table, then recovers it when the host's table holds it,
-	// else creates it. On the loop. A failed open fences the group, closes its row, so the id opens
-	// again on this Driver, and tears down as close() does before it throws. Started on the loop,
+	// else creates it. A bounded group (damage to its log) recovers too: the Store loses it and the
+	// open fails (journal's lost-bound.md). On the loop. A failed open fences the group, closes its row,
+	// so the id opens again on this Driver, and tears down as close() does before it throws. Started on the loop,
 	// its Driver call enters before a request started after it, which so rides the reopen's turn
 	// (consensus quiescence.md).
 	task::task<void> open() {
@@ -251,7 +252,7 @@ public:
 			// Recovery goes first: the ranges Core delivers meanwhile wait behind it.
 			hold_.store(true);
 			std::optional<bundle> restored;
-			if (const auto status = loop_->host().status(id_); status == jn::GroupStatus::stored || status == jn::GroupStatus::closed) {
+			if (const auto status = loop_->host().status(id_); status == jn::GroupStatus::stored || status == jn::GroupStatus::closed || status == jn::GroupStatus::bounded) {
 				// With the last close's record, a matching one resumes its term with no election.
 				co_await driver.recover(
 					id_,

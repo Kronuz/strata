@@ -288,6 +288,11 @@ MUTANTS = {
     "bounded-at-bound": [(INDEX,
         "cur_.applied.index <= opts_.log->bound(g)",
         "cur_.applied.index < opts_.log->bound(g)")],
+    # A bounded group opens through create, not recover: the table's entry stays bounded and the open
+    # fails on it, not as the Store's loss (--target=group_lifetime_test bounded).
+    "bounded-created": [(GROUP,
+        "status == jn::GroupStatus::closed || status == jn::GroupStatus::bounded) {",
+        "status == jn::GroupStatus::closed) {")],
 }
 
 

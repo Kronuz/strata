@@ -25,7 +25,8 @@
 // failed-open: a reopen over a lost directory fails closed (P_b > P_H), closes its row and leaves
 // the loop's table; the same process then reopens the group over its directory and reads every
 // acknowledged entry.
-// `group_lifetime_test [held|points|reopen|reopen-turn|failed-open]`.
+// bounded: a damaged turn log leaves the group bounded; its open loses it and fails closed.
+// `group_lifetime_test [held|points|reopen|reopen-turn|failed-open|bounded]`.
 #include "blob_app.hh"
 #include "group_catalog_borrow.hh"
 #include "host_io.hh"
@@ -670,6 +671,57 @@ void failed_open() {
 	p->shut();
 }
 
+// A group whose turn log took damage is bounded (journal's lost-bound.md): a consensus group holds
+// its state through a checkpoint record, none of which follows the bound, so its open loses the
+// group durably and fails closed, as a lost group's, and the next host still holds it lost.
+void bounded() {
+	context = "bounded";
+	disks d;
+	std::map<std::uint64_t, blob::app::seen_entry> seen;
+	blob::app app;
+	app.seen = &seen;
+	auto p = std::make_unique<process>(d, app);
+	const auto settle = [&](const std::shared_ptr<started<bool>>& call) { p->pump([&] { return call->done.load(); }); };
+	{
+		auto o = start(p->ref(), p->g->open());
+		settle(o);
+		check(!o->error, "the first open: " + what(o->error));
+	}
+	// 40 writes of about 100 bytes, no checkpoint after the first record: one block of the log, with
+	// its neighbors' records in its sectors, takes the damage.
+	for (int i = 0; i < 40; ++i) { write_barriers(*p, "P|k" + std::to_string(i) + "|" + std::string(60, char('a' + i % 26))); }
+	p->shut();
+	std::string segment;
+	std::uint64_t at = 0;
+	for (const auto& name : d.host.list()) {
+		const auto found = d.host.view(name).find(std::string(60, char('a' + 20 % 26)));
+		if (found != std::string_view::npos) { segment = name; at = found; }
+	}
+	check(!segment.empty(), "the turn log holds the twentieth write");
+	{
+		auto f = fl::io(d.host).open_existing(segment);
+		char byte = 0;
+		f->read_at(at + 30, std::span(&byte, 1));
+		byte = char(byte ^ 0x5a);
+		f->write_at(at + 30, std::string_view(&byte, 1));
+		f->sync();
+	}
+	p = std::make_unique<process>(d, app);
+	check(p->host->status(gid) == j::GroupStatus::bounded, "the damaged log leaves the group bounded");
+	auto o = start(p->ref(), p->g->open());
+	settle(o);
+	check(o->error != nullptr, "the open of a bounded group fails");
+	check(what(o->error).find("the turn log lost this group") != std::string::npos, "it fails as a lost group: " + what(o->error));
+	check(p->host->status(gid) == j::GroupStatus::lost, "the host loses the group durably");
+	check(p->g->fenced(), "the failed group is fenced");
+	check(!p->lp->find(gid), "the failed open left the loop's table");
+	check(p->lp->driver().groups() == 0, "the failed open closed its row: " + std::to_string(p->lp->driver().groups()) + " rows");
+	p->shut();
+	p = std::make_unique<process>(d, app);
+	check(p->host->status(gid) == j::GroupStatus::lost, "a restarted host still holds the group lost");
+	p->shut();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -679,6 +731,7 @@ int main(int argc, char** argv) {
 	if (only.empty() || only == "reopen") { reopen(false); }
 	if (only == "reopen-turn") { reopen(true); }
 	if (only.empty() || only == "failed-open") { failed_open(); }
+	if (only.empty() || only == "bounded") { bounded(); }
 	std::printf("lifetime: %s\n", failures ? "FAIL" : "ok");
 	return failures ? 1 : 0;
 }

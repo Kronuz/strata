@@ -43,7 +43,7 @@ public:
 		std::exception_ptr failed;
 		try {
 			// A restored image is a data member's bundle: the witness keeps none of it.
-			if (const auto status = loop_->host().status(id_); status == jn::GroupStatus::stored || status == jn::GroupStatus::closed) {
+			if (const auto status = loop_->host().status(id_); status == jn::GroupStatus::stored || status == jn::GroupStatus::closed || status == jn::GroupStatus::bounded) {
 				co_await driver.recover(id_, [](jn::ArtifactReader&) {}, std::move(opening_->closed));
 			} else {
 				co_await driver.create(id_, opening_->identity);
