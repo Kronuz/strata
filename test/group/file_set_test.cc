@@ -3,11 +3,12 @@
 // the set's recovery deletes only names under its prefix, so the index reopens at its position.
 // A group creates its index deferred (D112): nothing is written until the first commit, which
 // alone makes the index durable, crash or not, beside the set's files. A sealed file recovers
-// only against its CRC32C.
+// only against its CRC32C, and sealing and recovery read a file in bounded pieces.
 #include "blob_app.hh"
 
 #include "faultlab/faultfs.h"
 
+#include <algorithm>
 #include <iostream>
 #include <set>
 #include <string>
@@ -33,6 +34,48 @@ std::set<std::string> names(kronuz::journal::IO& io, bool set) {
 	}
 	return out;
 }
+
+// An IO over faultfs that records the largest read asked of any of its files: a seal or a
+// recovery that reads a whole file in one call shows here (file-set-seal-streaming A2).
+struct read_bound {
+	std::size_t largest = 0;
+};
+class bounded_file final : public kronuz::journal::File {
+public:
+	bounded_file(std::unique_ptr<kronuz::journal::File> f, read_bound& r) : f_(std::move(f)), r_(&r) {}
+	std::uint64_t size() override { return f_->size(); }
+	std::size_t read_at(std::uint64_t o, std::span<char> b) override {
+		r_->largest = std::max(r_->largest, b.size());
+		return f_->read_at(o, b);
+	}
+	std::size_t write_at(std::uint64_t o, std::string_view b) override { return f_->write_at(o, b); }
+	void truncate(std::uint64_t s) override { f_->truncate(s); }
+	void sync() override { f_->sync(); }
+	void sync_data() override { f_->sync_data(); }
+
+private:
+	std::unique_ptr<kronuz::journal::File> f_;
+	read_bound* r_;
+};
+class bounded_io final : public kronuz::journal::IO {
+public:
+	bounded_io(fl::io& in, read_bound& r) : in_(&in), r_(&r) {}
+	std::unique_ptr<kronuz::journal::OwnerLock> acquire_owner(bool c) override { return in_->acquire_owner(c); }
+	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view n) override { return std::make_unique<bounded_file>(in_->open_existing(n), *r_); }
+	std::unique_ptr<kronuz::journal::File> create_exclusive(std::string_view n) override { return std::make_unique<bounded_file>(in_->create_exclusive(n), *r_); }
+	std::unique_ptr<kronuz::journal::File> open_existing_read_only(std::string_view n) override { return std::make_unique<bounded_file>(in_->open_existing_read_only(n), *r_); }
+	void open_existing_read_only_into(std::string_view n, kronuz::journal::File& f) override { in_->open_existing_read_only_into(n, f); }
+	std::unique_ptr<kronuz::journal::File> open_reclaim_candidate_read_only(std::string_view n) override { return in_->open_reclaim_candidate_read_only(n); }
+	bool open_reclaim_candidate_read_only_into(std::string_view n, kronuz::journal::File& f) override { return in_->open_reclaim_candidate_read_only_into(n, f); }
+	void replace(std::string_view s, std::string_view d) override { in_->replace(s, d); }
+	void remove(std::string_view n) override { in_->remove(n); }
+	std::unique_ptr<kronuz::journal::DirectoryCursor> scan_directory() override { return in_->scan_directory(); }
+	void sync_directory() override { in_->sync_directory(); }
+
+private:
+	fl::io* in_;
+	read_bound* r_;
+};
 
 blob::transaction put(std::uint64_t i) {
 	blob::transaction t;
@@ -130,6 +173,36 @@ int main() {
 			check(damaged, "a sealed file with byte " + std::to_string(at) + " flipped fails recovery on its CRC32C");
 		} catch (const std::exception& e) {
 			check(false, "sealed at " + std::to_string(at) + " threw: " + e.what());
+		}
+	}
+	// Sealing streams: a file sixteen times the read bound, and an empty one, seal to their
+	// whole-file CRC32C with no read past the bound, and recover against it the same way.
+	{
+		constexpr std::size_t bound = 64 * 1024;
+		fl::filesystem d;
+		fl::io inner(d);
+		read_bound r;
+		bounded_io dio(inner, r);
+		try {
+			std::string bytes(16 * bound + 7, '\0');
+			for (std::size_t i = 0; i < bytes.size(); ++i) { bytes[i] = char(i * 131 + (i >> 9)); }
+			sg::file_set files(dio);
+			for (std::size_t at = 0; at < bytes.size(); at += 3 * bound) { files.write("vol-0", at, std::string_view(bytes).substr(at, 3 * bound)); }
+			files.write("up-1", 0, "");
+			files.seal("vol-0");
+			files.seal("up-1");
+			const sg::file_map named = files.capture();
+			check(named.at("vol-0").length == bytes.size(), "the large file's whole length is written");
+			check(named.at("vol-0").crc == kronuz::crc32c::crc32c(bytes), "a large sealed file's CRC32C is its whole bytes'");
+			check(named.at("up-1").crc == kronuz::crc32c::crc32c(std::string_view()), "an empty sealed file's CRC32C is the empty bytes'");
+			check(r.largest <= bound, "a seal reads at most " + std::to_string(bound) + " bytes at a time, read " + std::to_string(r.largest));
+			files.sync(named);
+			r.largest = 0;
+			sg::file_set again(dio);
+			again.recover(named);
+			check(r.largest <= bound, "a recovery reads at most " + std::to_string(bound) + " bytes at a time, read " + std::to_string(r.largest));
+		} catch (const std::exception& e) {
+			check(false, std::string("sealing streams threw: ") + e.what());
 		}
 	}
 	// A deferred create: no index before its first commit; after it, a power cut at any seed
