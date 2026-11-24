@@ -48,8 +48,9 @@ the member definitions. Each piece includes `catalog.hh` and compiles alone.
 | `catalog_table.hh` | construction and teardown, the slots' chunks, chores and timers, the host's defaults, the call guard |
 | `catalog_pin.hh` | the pin protocol: pins by key and by handle, waiters and their delivery, the awaiter, unpin, reopen |
 | `catalog_transitions.hh` | the slot transitions, one state machine: open, wake, demote, close, replace, shutdown, and their ends |
-| `catalog_policy.hh` | the sweep and the closing policy: the pass, the soft caps, S3-FIFO's queues, ghost and order |
+| `catalog_policy.hh` | the sweep and the closing policy: the pass, the soft caps, each candidate's fate |
+| `catalog_s3fifo.hh` | `catalog_detail::s3fifo`, the catalog's policy subobject: S3-FIFO's queues, ghost and order; included by `catalog.hh` before the class |
 | `catalog_observe.hh` | observation: snapshots, statistics, the shutdown report |
 
-`catalog.hh` is about 1,000 lines, 734 of them `catalog`'s body: about 200 lines of nested types
+`catalog.hh` is about 1,000 lines, about 730 of them `catalog`'s body: about 200 lines of nested types
 and the declarations with their comments.

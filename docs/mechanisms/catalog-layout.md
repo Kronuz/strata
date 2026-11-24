@@ -1,7 +1,8 @@
 # The catalog's layout: which mechanism lives where
 
-> Status: step 1 of quest catalog-restructure: member definitions out of the class body, one header
+> Status: quest catalog-restructure. Step 1: member definitions out of the class body, one header
 > per mechanism, moved by cpp-libraries' `tools/outline.py` and proved by `split_check.py --members`.
+> Step 2: the closing policy's queues and order as a subobject (below).
 
 ## The shape
 
@@ -27,7 +28,8 @@ Each mechanism header includes `catalog.hh`, so it compiles alone; `#pragma once
 | `catalog_table.hh` | the table and what every mechanism shares | the constructor and destructor and their teardown (orphan_waiters, release_chunks); the slots' chunks (alloc_slot, free_slot); chores and timers (post, after, after_or_post, timer_end); the host's defaults and checks (default_payload, checked, fresh_uuid), pin_held (the index's call guard), the test hooks |
 | `catalog_pin.hh` | the pin protocol | pin_request, pin_chore, repin, try_pin; acquire_impl and the by-handle try_fast; the waiter's life (join, deliver, unlink_waiter, cancel_wait, abandon) and the awaiter's (pin_awaiter, cancel_pin); unpin, drain_unpin, uncount_miss; pin's move and release; reopen, a holder's hand-back of a fenced index |
 | `catalog_transitions.hh` | the slot transitions | the sweep's compare-exchanges that begin one (begin_demote, begin_close, begin_due_close, begin_bound_close); the edge count and the relief booked (note, book, unbook, book_due, release_due); the open, wake, demotion, close and replace chores and how each ends (finish_open, finish_wake, end_at, close_refused, after_close, retire, finish_close, erase_failed); shutdown (kick, shutdown_slot, join_shutdown, maybe_complete_shutdown, shutdown_awaiter) |
-| `catalog_policy.hh` | the sweep and the closing policy | start, stop_sweep, post_pass, run_pass, arm_period; policy_pass; the soft caps (over_soft, closing_over, share); S3-FIFO's queues and ghost (policy_enqueue, policy_unlink, policy_ghost, policy_requeue, pick, evict) and its frequency writes (clear_freq, decay); its observers (queue_sizes, queue_of, ghost_bytes) |
+| `catalog_policy.hh` | the sweep and the closing policy | start, stop_sweep, post_pass, run_pass, arm_period; policy_pass; the soft caps (over_soft, closing_over, share); evict (each candidate decided from its word), policy_enqueue and policy_ghost (with their counts), S3-FIFO's frequency writes (clear_freq, decay) |
+| `catalog_s3fifo.hh` | S3-FIFO itself | `catalog_detail::s3fifo`, the policy subobject (step 2), with `policy_limits` and `policy_result`; included by `catalog.hh` before the class |
 | `catalog_observe.hh` | observation | snapshot, slots_made, waiters_of, key_at, table_size, stats, shutdown_report, set_pins_for_test: what the tests, the sweep and T4 read |
 
 ## Why the transitions stay one header
@@ -57,3 +59,38 @@ Step 1 moves definitions only: every mechanism is still the catalog's, sharing i
 The nested types stay in the class body (slot, host, handle, stats_t, pin, pin_awaiter,
 shutdown_awaiter, and the request and result types), as SPLITTING.md's class restructure keeps
 them: the data members and the declarations name them.
+
+## The policy subobject (step 2)
+
+`catalog_detail::s3fifo<Slots>` (`catalog_s3fifo.hh`), the catalog's `policy_`, holds S3-FIFO's
+state: the small and main FIFOs' heads, tails and sizes, the ghost, the small FIFO's cap, and the
+mutex that guards them and every slot's links. It owns no slot. `Slots` gives it, for a slot index,
+the links it alone writes (`prev`, `next`, `queue`: the slot's `q_prev`, `q_next`, `q`) and two reads
+of the slot's word under its mutex: `gen(i)` and `queueable(i, gen)`, the generation still `gen` and
+the state neither closing nor free. The catalog's `policy_slots` is that view.
+
+What it decides, each in one place:
+
+1. Order: a slot enters its FIFO's tail (`enqueue`), and `pick` takes the small FIFO's head while
+   the small FIFO is over its cap (a tenth of `soft_open`) or the main one is empty, else the main
+   FIFO's head.
+2. The ghost: a key whose hash is in it enters the main FIFO, and the ghost gives the hash up; a
+   key closed from the small FIFO unused enters it (`ghost`, called by `finish_close`).
+3. A pass's walk (`evict`): while a closing cap is over and the limits allow (`visits`
+   candidates, `transitions` posts), each candidate is decided by the catalog from its word; a used
+   one goes to the main FIFO's tail, a kept one back to its own FIFO's tail, and a full round of kept
+   candidates ends the pass.
+4. The requeue's refusal: a slot goes back only while it is in no queue and `queueable`, read
+   under the mutex `finish_close` takes to unlink it once it is `closing`, so a requeue is either
+   refused or unlinked after.
+
+What stays in the catalog, because it is the slot's word: the frequency (a use sets it in the pin's
+compare-exchange; `clear_freq` and `decay` are the policy's word writes), each candidate's fate
+(pinned, in a transition, refused lately, hot and demoted for the close it books, or closed), the
+ghost mark a close carries (`to_ghost`), the counts in `stats()`, and when a pass runs (the sweep).
+
+The links stay in the slot, where `q_next` is also the free list's link while the slot is free, so
+the slot's 184 bytes (D4) do not change. The policy's own tests are the named cases of
+`test/catalog_policy_test.cc` (fifo_order, ghost_to_main, pick_queue, evict_order, kept_round,
+limits, requeue_refused, unlink_any), over a table of links with no catalog; the catalog's behavior
+tests in the same file (lock-step with the model, each choice of D6 on a scene) run unchanged.
