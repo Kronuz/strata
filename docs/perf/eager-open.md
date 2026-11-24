@@ -174,6 +174,33 @@ Identity (261121-110632-e10bb1, 1,000 indexes of each fixture, every arm, both s
   (261121-111138-374fa5). prospect's fielddict, fields, index, lifecycle, merge, multisegment,
   background_merge and reclaim suites over this branch are queued (261121-111140-64ce5a).
 
+### The record's size
+
+The first A3 rows at strata:55a5ea73 failed on memory: `proto eager` against `today`'s A/A band,
+resident 106,152 B over a top of 106,148 at `d1000s4` (261124-122702-df0b09), and dirty 64,455 B
+over 64,164 and resident 228,647 over 228,356 at `d1000s10` (261124-122705-fcbe11). The counting
+build (`eager_open_count`, 200 clones, macOS x86_64) names the cause: the same allocations, 16
+more bytes per segment, on every arm, lazy included, so in the record, not the check.
+
+| Heap after open, B/index | main `today` | 55a5ea73 `eager` | fixed `eager` | main `lazy` | 55a5ea73 `lazy` | fixed `lazy` |
+|---|---|---|---|---|---|---|
+| `d1000s4` (4 segments) | 28,489 | 28,553 (+64) | 28,489 (0) | 10,761 | 10,825 (+64) | 10,761 (0) |
+| `d1000s10` (10 segments) | 56,497 | 56,657 (+160) | 56,497 (0) | 14,921 | 15,081 (+160) | 14,921 (0) |
+
+`vouch` grew from 16 to 32 bytes (the field-table size and the optional key field), and
+`open_segment` with it from 200 to 216 bytes (224 in malloc's 16-byte classes, against 208). The
+record padded `version` and its three flags into three words; they now share one, and the record
+is 200 bytes again with the full claim. The check keeps nothing after the open: the fixed `eager`
+equals main's `today` (Xapiand's loop) byte for byte, after the open and after the first query.
+
+Beyond the band, the check (Xapiand's loop on main, the map's here) keeps prospect's pool reader:
+`fielddict::reader::check_fields` scans the pool through `pool()`, which opens it into the reader's
+cache (a map node and a `termdict::reader`), 400 B in 2 allocations per segment, kept while the
+index is open. A query does not open it (`eager` on main, no check, holds 26,889 and 52,497 B).
+Scanning through a reader of its own, dropped at return, gives the same refusals (`d1000s4c`) and
+the same identity hash, and takes `eager` and `today` to 26,889 B (`d1000s4`, -1,600) and 52,497 B
+(`d1000s10`, -4,000): 7% of a hot index's heap. It is prospect's change, not this quest's.
+
 ## Recommendation
 
 1. Drop lazy segments for Xapiand's open as a memory or latency quest. On the request path the

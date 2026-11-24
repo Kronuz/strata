@@ -1711,15 +1711,16 @@ private:
 		files::segment_ref ref;
 		deleted_bits deleted;   // bit per ordinal, copied on write (shared-reader D3); sized from ref.doc_count
 		std::uint64_t dead = 0;  // bits set in deleted
-		bool deletes_dirty = false;          // deletes since the head (manifest-log D3)
-		bool damaged = false;                // a background merge found it corrupt; heal() clears it
 		std::unique_ptr<kronuz::journal::File> unsynced;  // flushed, awaiting the commit's sync
 		// The facts the manifest needs and the entry lacks. Only the owner writes them (under the
 		// lease, or before the record is published): a reader's map leaves them in the body.
 		format::structure_bits structures = 0;
-		std::uint32_t version = 0;
 		std::uint64_t total_length = 0;
+		// The small members share one word: a record per segment of every open index.
+		std::uint32_t version = 0;
 		bool facts_known = false;
+		bool deletes_dirty = false;          // deletes since the head (manifest-log D3)
+		bool damaged = false;                // a background merge found it corrupt; heal() clears it
 		std::shared_ptr<load_context> ctx;
 		vouch claim;
 		open_segment(files::segment_ref r, std::shared_ptr<load_context> c, vouch v = {})

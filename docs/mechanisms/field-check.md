@@ -33,6 +33,12 @@ field (`fields` all ones): its ids passed stage 1, and the table in memory may b
 manifest. A refusal at a first read marks the record failed (cold-tier D11), so it is not mapped
 again until `heal()`.
 
+The claim is kept on the record, one per segment of every open index, at no memory cost: the
+vouch is 32 bytes (16 on main), and the record's small members (`version` and three flags) share
+the one word each used to pad alone, so `open_segment` stays 200 bytes, as on main. The check
+itself keeps nothing: the counted heap per index equals main's with Xapiand's loop
+(`docs/perf/eager-open.md`, "The record's size").
+
 ## The plugin's part
 
 `basic_segment::check_fields(size, key)` (`reader.hh`) calls each plugin reader's
