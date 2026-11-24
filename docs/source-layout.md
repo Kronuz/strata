@@ -32,3 +32,24 @@ and compiles alone. `docs/mechanisms/index-layout.md` says why each mechanism is
 `index.hh` is about 2,970 lines, 2,100 of them `basic_index`'s body: about 1,100 lines of nested
 types and the declarations with their comments. Step 2 of the restructure decides which state
 leaves the class as a subobject.
+
+## catalog.hh and catalog_*.hh
+
+`include/strata/core/catalog.hh` keeps its path and is the header callers include. It holds the
+namespace-scope types (`pin_kind`, `open_intent`, `slot_state`, `payload_work`, `catalog_detail`'s
+word, waiter and wait list, the errors, the shutdown report's types) and `class catalog` with its
+data members, nested types and member declarations, then includes one header per mechanism holding
+the member definitions. Each piece includes `catalog.hh` and compiles alone.
+`docs/mechanisms/catalog-layout.md` says why each mechanism is cut where it is.
+
+| File | Holds |
+|---|---|
+| `catalog.hh` | the namespace-scope types, `catalog`'s body, and the includes of the pieces below |
+| `catalog_table.hh` | construction and teardown, the slots' chunks, chores and timers, the host's defaults, the call guard |
+| `catalog_pin.hh` | the pin protocol: pins by key and by handle, waiters and their delivery, the awaiter, unpin, reopen |
+| `catalog_transitions.hh` | the slot transitions, one state machine: open, wake, demote, close, replace, shutdown, and their ends |
+| `catalog_policy.hh` | the sweep and the closing policy: the pass, the soft caps, S3-FIFO's queues, ghost and order |
+| `catalog_observe.hh` | observation: snapshots, statistics, the shutdown report |
+
+`catalog.hh` is about 1,000 lines, 734 of them `catalog`'s body: about 200 lines of nested types
+and the declarations with their comments.
