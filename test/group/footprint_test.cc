@@ -270,7 +270,11 @@ struct row final : sg::member {
 		task::spawn(lp->scheduler(), report(lp, id, applied));
 	}
 	void fenced(std::string) override {}
-	void install_needed(cs::NodeId) override {}
+	// A row opens without `snapshots`: the Driver sends it no install notice.
+	void install_needed(cs::NodeId, cs::SnapshotKey) override {}
+	void install_released(cs::NodeId, cs::SnapshotKey, cs::SnapshotReleaseReason) override {}
+	void validate(cs::Token, cs::LogBoundary, cs::NodeId, j::ArtifactReader&) override {}
+	void activate(cs::Token, cs::LogBoundary, j::ArtifactReader&) override {}
 };
 task::task<void> open_row(sg::loop& lp, cs::GroupId id, cs::GroupOptions options, j::Identity identity) {
 	lp.driver().open(id, std::move(options));

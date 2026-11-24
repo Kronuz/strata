@@ -35,6 +35,12 @@ struct sim {
 		segs.push_back({next_id++, std::uint64_t(bytes), docs, 0});
 		flushed += bytes;
 	}
+	// A flush whose keys span [first, last].
+	void flush_range(double bytes, const std::string& first, const std::string& last) {
+		candidate c{next_id++, std::uint64_t(bytes), 1000, 0};
+		segs.push_back(c.range(first, last));
+		flushed += bytes;
+	}
 	void add(std::uint64_t docs, std::uint64_t deleted, double bytes) { segs.push_back({next_id++, std::uint64_t(bytes), docs, deleted}); }
 	// Replaces the merge's segments by one holding their live documents.
 	void apply(const merge_policy::merge& m) {
@@ -44,6 +50,11 @@ struct sim {
 			auto it = std::find_if(segs.begin(), segs.end(), [&](const candidate& c) { return c.id == id; });
 			CHECK(it != segs.end());
 			if (it == segs.end()) { continue; }
+			if (it->ranged) {  // the output spans its inputs' keys
+				if (!out.ranged || it->first_key < out.first_key) { out.first_key = it->first_key; }
+				if (!out.ranged || it->last_key > out.last_key) { out.last_key = it->last_key; }
+				out.ranged = true;
+			}
 			bytes += it->live_bytes();
 			out.docs += it->docs - it->deleted;
 			segs.erase(it);
@@ -309,6 +320,63 @@ int main() {
 		segs[3].deleted = 0;
 		p.force_merge_deletes_pct_allowed = 0;
 		CHECK(p.find_forced_deletes_merges(segs).size() == 19);
+	}
+	// Sorted runs (D9): a sequential load's segments overlap nothing, so no merge rewrites
+	// them; the index only grows.
+	{
+		merge_policy p;
+		sim s;
+		auto key = [](int i) {
+			char b[16];
+			std::snprintf(b, sizeof b, "k%08d", i);
+			return std::string(b);
+		};
+		for (int i = 0; i < 200; ++i) {
+			s.flush_range(12 * MB, key(i * 1000), key(i * 1000 + 999));
+			s.merge_all(p);
+		}
+		CHECK(s.merged == 0);
+		CHECK(s.segs.size() == 200);
+	}
+	// A random load's segments each span the whole key space: they still merge by size,
+	// within the tiers' budget, with logarithmic write amplification.
+	{
+		merge_policy p;
+		sim s;
+		for (int i = 0; i < 200; ++i) {
+			s.flush_range(12 * MB, "k00000001", "k99999990");
+			s.merge_all(p);
+		}
+		CHECK(s.merged > 0);
+		CHECK(s.merged <= 6 * s.flushed);
+		CHECK(within_budget(p, s.segs));
+	}
+	// Sequential runs with a segment overlapping two of them: only the overlapping ones
+	// merge, the rest stay; small disjoint segments (under run_bytes) merge once as before.
+	{
+		merge_policy p;
+		p.segments_per_tier = 2;
+		p.max_merge_at_once = 2;
+		const auto seg = [](std::uint64_t id, double mb, const char* a, const char* b) {
+			candidate c{id, std::uint64_t(mb * MB), 1000, 0};
+			return c.range(a, b);
+		};
+		std::vector<candidate> segs{seg(1, 12, "a", "b"), seg(2, 12, "c", "d"), seg(3, 12, "e", "f"), seg(4, 12, "g", "h")};
+		CHECK(p.find_merges(segs).empty());  // four disjoint runs over a budget of two segments: left alone
+		segs.push_back(seg(5, 12, "b", "c"));  // two segments reaching from run 1 to run 2
+		segs.push_back(seg(6, 12, "b", "c"));
+		const auto ms = p.find_merges(segs);
+		CHECK(ms.size() == 1);
+		for (const auto& m : ms) {
+			for (auto id : m) { CHECK(id == 1 || id == 2 || id == 5 || id == 6); }  // never the settled runs 3 and 4
+		}
+		segs.resize(4);
+		for (std::uint64_t i = 0; i < 12; ++i) { segs.push_back(seg(10 + i, 1, ("m" + std::to_string(i)).c_str(), ("m" + std::to_string(i)).c_str())); }
+		std::size_t small = 0;
+		for (const auto& m : p.find_merges(segs)) {
+			for (auto id : m) { small += id >= 10; CHECK(id >= 10); }
+		}
+		CHECK(small > 0);  // disjoint segments under run_bytes still merge
 	}
 	std::printf("merge_policy: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
