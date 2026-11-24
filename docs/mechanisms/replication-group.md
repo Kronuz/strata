@@ -58,9 +58,21 @@ transaction and its own state.
   retryable 503. `invalid` and a client's own condition answer as they are, `superseded` too. A
   replica that is not the leader forwards the original request once, carrying its placement
   count; a read refused before the ready point answers 503 with nothing placed.
-- **A replica behind the leader's checkpoint** catches up only by install (group-install). Until
-  that lands the group answers consensus's `SnapshotNeeded` by naming the peer in
-  `installs_needed()`; the peer stays behind.
+- **A replica behind the leader's checkpoint** catches up only by install
+  ([group-install.md](group-install.md): the pin, the staged transfer, activation and its
+  recovery, and their binding to consensus's Driver). The leader pins at `SnapshotNeeded` and
+  names the peer in `installs_needed()` until the install ends; the learner stages at
+  `ValidateImage` and becomes the bundle at `ActivateImage`, then applies past it.
+- **A witness** (`witness.hh`, Q3 (a), consensus D9) is a voting member with the log and no
+  application state, in a group of two data voters and itself (rf = 2 + witness). It is its own
+  `member` on the loop: no index, file set or chore. consensus acknowledges a witness's own ranges,
+  refuses its proposals and reads, and hands off a leadership it wins to the most caught-up live
+  data voter; it wins one when it holds committed entries a returning data voter lacks. Its Sink
+  answers what reaches it before it is a witness without applying it: a range below its
+  promotion is acknowledged, an image while it joins is validated with nothing staged (consensus
+  keeps it as the base of the log), and it pins nothing for a peer's install. It joins by the
+  install's steps, a learner promoted to witness beside the voter it replaces, and leaves by
+  removal; it never becomes a data member.
 - **A fence or a close refuses every `quorum` waiter** from then on, linked or not yet: a fence
   answers `fenced`, a close `closed` for a placement this replica never applied (a leader cut off
   from its followers closes with one). journal's `group_closed` maps to `closed` too.
@@ -135,6 +147,12 @@ A crash inside recovery repeats it: truncation and deletion converge.
 
 ## What it relies on
 
+- **A witness's compaction** (consensus, not exposed): a witness checkpoints only through what
+  every data voter matched (`Core::witness_bound`), which the Driver's `GroupState` does not
+  give, so a witness takes no checkpoint and its retained log grows until consensus's log limits
+  refuse appends. The Driver compacting a witness's log itself, as it acknowledges its ranges,
+  or exposing the bound, closes it.
+
 - **strata-nospace-position** (not landed): a `no_space` answer leaves strata's position
   unmoved, so the retry applies the transaction again. At strata 491a1bdc the reservation path
   keeps it, the allowance path moves it (`index.hh:878-880`); the group fences on the `skipped`
@@ -170,7 +188,20 @@ which answers it, or to a replica that does not lead, which answers 503; a leade
 `no_space` hands leadership to a follower applied past it, which answers writes while the old
 leader's waits, and so does a follower stalled on `no_space` and then elected by transfer
 (`stalled_follower_elected`). A replica cut off while every other one checkpoints past it is named in
-`installs_needed()` and stays behind (no install yet).
+`installs_needed()` and installs (`install_gap`); the ungated schedules, whose checkpoints leave a
+replica behind, settle by install and pass the oracle over the log merged from every replica's
+applied entries; a learner joins past every checkpoint, installs, and is promoted to replace a
+voter that consensus's core then removes, across leader changes (`grow_and_heal`).
+
+`test/group/witness_test.cc` (ctest `group_witness`, group-heal A4), on the voters' world
+(`test/group/world.hh`): two data voters and a founding witness write on through a power cut of
+each member, which rejoins (`loss`); a data voter cut while the others commit returns as the other
+is cut, so only the witness holds what it lacks: the witness leads, refuses a proposal and a read,
+replicates, and hands leadership to it (`carry`); a witness joins three voters as a learner that
+installs, is promoted beside the voter it replaces, which is removed, and the group survives each
+member's loss (`join`). Once settled, every acknowledged command is in the log, every data
+member's digest equals the replay, the witness applied through the commit index with its Sink
+handed no range once it is a witness, and a data voter leads.
 
 `test/group/lifetime_test.cc` (ctest `group_lifetime`, A5 and A10): two groups on one loop with
 their chores on threads; one group's apply blocks at an entry's strata write while the other

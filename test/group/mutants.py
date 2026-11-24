@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mutants for strata::group (quests group-core, group-catalog).
+"""Mutants for strata::group (quests group-core, group-heal, group-catalog).
 
 Each mutant breaks one rule of the design or a criterion (named beside it); its test must fail
 with it. Usage:
@@ -24,9 +24,16 @@ BUNDLE = "include/strata/group/bundle.hh"
 INDEX = "include/strata/core/index.hh"
 CATALOG = "include/strata/core/catalog.hh"
 FOOTPRINT = "test/group/footprint_test.cc"
+WITNESS = "include/strata/group/witness.hh"
 
 # name: [(file, old, new), ...]
 MUTANTS = {
+    # A settle runs with an isolated node still cut off: a cut upload's isolation in a
+    # fault-free stretch outlives the stretch (corruption row, file seed 3). voters_test's
+    # settle_heals fails.
+    "settle-keeps-isolation": [("test/group/world.hh",
+        "\t\tisolated.clear();\n\t\tfor (auto& [id, x] : nodes) {\n\t\t\tif (!x->up()) { boot(*x); }\n",
+        "\t\tfor (auto& [id, x] : nodes) {\n\t\t\tif (!x->up()) { boot(*x); }\n")],
     # Recovery replays the file set only above P_H, as strata does (D16's a1-literal).
     "replay-from-ph": [(GROUP,
         "\t\tif (phase_ == phase::effects) {\n",
@@ -39,8 +46,8 @@ MUTANTS = {
     # The bundle publishes before the files it names are synced (D16 steps 2 and 4).
     "publish-before-sync": [
         (GROUP, "\t\tfiles_.sync(b.files);\n\t\tix_->commit();\n", "\t\tix_->commit();\n"),
-        (GROUP, "co_await on_chore([&] { files_.unlink_retired(b.position); });",
-                "co_await on_chore([&] { files_.sync(b.files); files_.unlink_retired(b.position); });")],
+        (GROUP, "\t\t\tfiles_.unlink_retired(unlink_through(b.position));\n",
+                "\t\t\tfiles_.sync(b.files);\n\t\t\tfiles_.unlink_retired(unlink_through(b.position));\n")],
     # The capture runs inside an entry's apply, between its file effects and its strata write.
     "capture-mid-entry": [
         (GROUP, "\t\t\tphase_ = phase::strata;\n\t\t}\n", "\t\t\tphase_ = phase::strata;\n\t\t\treturn step::more;\n\t\t}\n"),
@@ -61,8 +68,8 @@ MUTANTS = {
     # strata commits after the bundle publishes, so a crash between leaves P_b > P_H (D16 step 3).
     "commit-after-publish": [
         (GROUP, "\t\tfiles_.sync(b.files);\n\t\tix_->commit();\n", "\t\tfiles_.sync(b.files);\n"),
-        (GROUP, "co_await on_chore([&] { files_.unlink_retired(b.position); });",
-                "co_await on_chore([&] { ix_->commit(); files_.unlink_retired(b.position); });")],
+        (GROUP, "\t\t\tfiles_.unlink_retired(unlink_through(b.position));\n",
+                "\t\t\tix_->commit();\n\t\t\tfiles_.unlink_retired(unlink_through(b.position));\n")],
     # A file effect appends at the file's size: a retry after a partial push writes past it (D3).
     "append-on-retry": [(FILES,
         "\t\tfor (std::size_t done = 0; done < bytes.size();) { done += f->write_at(offset + done, bytes.substr(done)); }\n",
@@ -104,14 +111,41 @@ MUTANTS = {
     "lift-the-bound": [(ANSWER,
         "return placements < max_placements ? next_step::resubmit : next_step::unavailable;",
         "return next_step::resubmit;")],
-    # The group drops consensus's SnapshotNeeded: a replica left behind goes unnamed (D109).
+    # The group drops consensus's SnapshotNeeded: no pin, so a replica behind the leader's
+    # checkpoint never installs and the ungated schedules do not settle (group-heal A2).
     "install-silent": [(GROUP,
-        "\tif (auto* m = owner->find(id)) { m->install_needed(s.peer); }\n",
+        "\tif (auto* m = owner->find(id)) { m->install_needed(s.peer, s.key); }\n",
         "\t(void)id;\n\t(void)s;\n")],
-    # A2's checkpoints ungated: one compacts past a replica cut off (D109; run with 14 schedules).
-    "checkpoint-ungated": [("test/group/voters_test.cc",
-        "(!gated || w.leaves_none_behind(",
-        "(true || w.leaves_none_behind(")],
+    # A witness's Sink holds a range below its promotion: the learner it joins as never applies
+    # it, and its promotion never commits (group-heal A4; group_witness_test join).
+    "witness-holds-range": [(WITNESS,
+        "\t\tloop_->driver().applied(id_, cs::Applied{range.entries.back().index});\n",
+        "")],
+    # A witness refuses the image it joins by: it never catches up past the leader's checkpoint
+    # (group-heal A4; group_witness_test join).
+    "witness-refuses-image": [(WITNESS,
+        "\t\tloop_->driver().validated(id_, token);\n",
+        "\t\tloop_->driver().validation_failed(id_, token);\n")],
+    # The teardown waits for the chore alone, not the learner's install tasks: a close returns
+    # while a stage still touches the group (--target=group_voters_test 0: close_mid_install).
+    "close-skips-install-tasks": [
+        (GROUP, "\t\t\treturn !self->running_ && !self->tasks_;\n", "\t\t\treturn !self->running_;\n"),
+        (GROUP, "\t\t\tif (!self->running_ && !self->tasks_) { return false; }\n", "\t\t\tif (!self->running_) { return false; }\n")],
+    # A pin release short of space fences the leader instead of stalling its chore
+    # (--target=group_voters_test 0: release_short_of_space).
+    "release-fences": [(GROUP,
+        "\t\t\t\trelease_pin(*ix_, gone->pin);\n\t\t\t} catch (const std::system_error& x) {\n\t\t\t\tif (x.code() == std::errc::no_space_on_device) { return step::stall; }\n",
+        "\t\t\t\trelease_pin(*ix_, gone->pin);\n\t\t\t} catch (const std::system_error& x) {\n")],
+    # Recovery releases the pins an earlier process left, committing strata: a full disk fails
+    # the open (--target=group_voters_test 0: reopen_short_of_space).
+    "release-at-open": [(GROUP,
+        "\t\tauto stale = held_pins(files_.io());\n",
+        "\t\tfor (const auto g : held_pins(files_.io())) { ix_->release(g); }\n\t\tstd::vector<std::uint64_t> stale;\n")],
+    # The pin goes with its flight's end, not when a later bundle supersedes it: the learner's
+    # fetch outruns the leader's chore at every flight (--target=group_voters_test 0: install_gap).
+    "pin-per-flight": [(GROUP,
+        "if (at != recovered_.position && p->flights.empty()) {",
+        "if (p->flights.empty()) {")],
     # A deposed proposer answers 503 instead of forwarding to the leader (A3).
     "no-forward": [(SUBMIT,
         "\t\t\t\tif (forwarded) {",
