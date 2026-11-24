@@ -36,7 +36,7 @@
 
 #include "strata/core/counted_io.hh"
 #include "strata/core/executor.hh"
-#include "strata/core/ghost_set.hh"
+#include "strata/core/catalog_s3fifo.hh"
 #include "strata/core/index.hh"
 #include "strata/core/resource_budget.hh"
 
@@ -317,7 +317,7 @@ private:
 		std::atomic<std::uint32_t> pend_maps{0};
 		// The holders still to unpin in a replace's `closing`; the last posts the replace close (F4).
 		std::atomic<std::uint32_t> drain{0};
-		// The policy's queue links (under policy_mu_); `q_next` is also the free list's link while the slot is free,
+		// The policy's queue links (catalog_detail::s3fifo's, under its mutex); `q_next` is also the free list's link while the slot is free,
 		// when it is in no queue.
 		std::uint32_t q_prev = none, q_next = none;
 		std::uint16_t last_open = 0;  // when the last replacement's open was due, in 2^27 ns (134 ms) units modulo 2^16
@@ -329,7 +329,7 @@ private:
 		std::atomic<std::uint8_t> failures{0};
 		std::atomic<bool> commit_failed{false};
 		std::atomic<bool> to_ghost{false};  // the pass chose this close from the small FIFO: its hash enters the ghost when it ends
-		std::uint8_t q = 0;                 // the policy's queue (under policy_mu_): 0 none, 1 small, 2 main
+		std::uint8_t q = 0;                 // the policy's queue (under its mutex): 0 none, 1 small, 2 main
 		// A close that left closing() true (a view kept past its pin): the sweep, and shutdown, retry try_finish_close().
 		std::atomic<bool> stuck{false}, retrying{false};
 		std::atomic<std::uint8_t> due{0};     // a demotion for a closing cap booked its close (see pend_maps)
@@ -529,14 +529,8 @@ public:
 	void post_pass();
 	// What one pass may do: slots the window visits and queue candidates examined (a move, a decrement or a
 	// requeue counts), and transitions posted. `lifted()` is the policy tests' (and the stress's) unlimited pass.
-	struct policy_limits {
-		std::uint64_t visits = 256, transitions = 16;
-		static policy_limits lifted() noexcept { return {~std::uint64_t(0), ~std::uint64_t(0)}; }
-	};
-	struct policy_result {
-		bool again = false;  // it posted some and the soft caps still call for more
-		std::uint64_t visited = 0, promoted = 0, decayed = 0, closes = 0, demotes = 0, busy = 0;
-	};
+	using policy_limits = catalog_detail::policy_limits;
+	using policy_result = catalog_detail::policy_result;
 
 	// One pass, a chore: visits at most `pass_visits` slots from where the last one stopped and posts at most
 	// `pass_posts` transitions. True when it posted some and the soft caps still call for more.
@@ -609,16 +603,14 @@ public:
 
 	// --- the closing policy: S3-FIFO and the hot cap (D6; CT-R10, CT-R31, CT-R41) ----------------
 
-	struct queue_sizes_t {
-		std::uint64_t small = 0, main = 0, ghost = 0;
-	};
-	queue_sizes_t queue_sizes() const;
+	using queue_sizes_t = catalog_detail::fifo_sizes;
+	queue_sizes_t queue_sizes() const { return policy_.sizes(); }
 	// The queue a slot is in: 0 none, 1 small, 2 main.
-	unsigned queue_of(std::uint32_t idx) const;
-	std::uint64_t small_cap() const noexcept { return small_cap_; }
-	std::uint64_t ghost_capacity() const noexcept { return ghost_.capacity(); }
+	unsigned queue_of(std::uint32_t idx) const { return policy_.queue_of(idx); }
+	std::uint64_t small_cap() const noexcept { return policy_.small_cap(); }
+	std::uint64_t ghost_capacity() const noexcept { return policy_.ghost_capacity(); }
 	// The ghost's bytes now (nodes and table); under the policy mutex.
-	std::uint64_t ghost_bytes() const;
+	std::uint64_t ghost_bytes() const { return policy_.ghost_bytes(); }
 
 	// --- observation (tests, the sweep, T4) ---------------------------------------------------
 
@@ -755,33 +747,37 @@ private:
 	void uncount_miss() noexcept;
 
 
-	// --- the policy's queues (under policy_mu_) ---------------------------------------------------
+	// --- the policy's queues (catalog_detail::s3fifo, `policy_`) -------------------------------------
 
 	static std::uint64_t key_hash64(std::string_view key) noexcept { return ::wordwise::hash(key.data(), key.size()); }
-	void push_tail_locked(std::uint32_t idx, unsigned q);
-	void unlink_locked(std::uint32_t idx);
+	// What the policy sees of a slot: its links, and its word's generation and state, read under the policy's mutex.
+	// Invariant: a slot is queued only while its state is not closing or free; `finish_close` unlinks it after the state
+	// is `closing`, so a requeue is either refused or unlinked after. A close that ends at its prior state requeues the
+	// slot itself (`close_refused`).
+	struct policy_slots {
+		const catalog* c;
+		std::uint32_t& prev(std::uint32_t i) const { return c->at(i).q_prev; }
+		std::uint32_t& next(std::uint32_t i) const { return c->at(i).q_next; }
+		std::uint8_t& queue(std::uint32_t i) const { return c->at(i).q; }
+		std::uint64_t gen(std::uint32_t i) const { return word::gen(c->at(i).word.load(std::memory_order_acquire)); }
+		bool queueable(std::uint32_t i, std::uint64_t g) const {
+			const std::uint64_t w = c->at(i).word.load(std::memory_order_acquire);
+			const slot_state st = word::state(w);
+			return word::gen(w) == g && st != slot_state::closing && st != slot_state::free;
+		}
+	};
 	// An open slot enters the small FIFO, or the main one when its hash is in the ghost (before its open ends).
 	void policy_enqueue(std::uint32_t idx);
-	// A slot leaves the queue it is in (a close ends).
-	void policy_unlink(std::uint32_t idx);
 	// The ghost remembers the hash of a key the pass closed from the small FIFO, its frequency clear.
 	void policy_ghost(std::uint64_t h);
-	// Puts a slot back at the tail of `q` unless it is in a queue, `gen` moved on (closed or reused), or it is closing or free.
-	// Invariant: a slot is queued only while its state is not closing or free, as read under `policy_mu_`; `finish_close` unlinks
-	// under it after the state is `closing`, so a requeue is either refused here or unlinked after. A close that ends at its prior
-	// state requeues the slot itself (`run_close`).
-	void policy_requeue(std::uint32_t idx, std::uint64_t gen, unsigned q);
 
 	// What the closing caps still ask for, in closes: the open slots over `soft_open` and the descriptors' and vnodes'
 	// shares, each less the closes begun or booked (relief already posted: a refused close books none).
 	std::uint64_t closing_over() const noexcept;
-	// The next candidate: the small FIFO's head while it is over its share, else the main FIFO's, taken out
-	// of its queue; false when both are empty. `round`: the queued slots, for the caller's bound.
-	bool pick(std::uint32_t& idx, std::uint64_t& gen, unsigned& q, std::uint64_t& round);
-
-	// Closes slots in S3-FIFO order while a closing cap is over (`closing_over()`). A candidate used since it entered is
-	// not taken: small moves to main with the frequency cleared, main decrements. A hot one is demoted for the close it
-	// books (B2); a warm one is closed. Whatever is pinned, in a transition or used since is put back, its generation checked.
+	// Closes slots in S3-FIFO order (`policy_.evict`) while a closing cap is over (`closing_over()`), deciding each candidate
+	// from its word. A candidate used since it entered is not taken: small moves to main with the frequency cleared, main
+	// decrements. A hot one is demoted for the close it books (B2); a warm one is closed. Whatever is pinned, in a
+	// transition or refused lately is put back, its generation checked.
 	void evict(const policy_limits& lim, policy_result& r, std::uint64_t& posts);
 
 	// --- transitions ---------------------------------------------------------------------------
@@ -962,12 +958,8 @@ private:
 	std::uint32_t free_head_ = none, next_new_ = 0;
 	std::atomic<std::uint64_t> misses_{0}, opens_{0}, open_failures_{0}, failed_fast_{0}, retries_{0}, stale_{0}, handle_pins_{0}, wakes_{0}, reposts_{0};
 	std::atomic<std::uint64_t> promoted_{0}, decayed_{0}, evictions_{0}, evict_demotes_{0}, busy_{0}, ghost_hits_{0}, ghost_adds_{0};
-	// The policy: the queues (small = 1, main = 2) and the ghost under policy_mu_; the pass's own state.
-	mutable std::mutex policy_mu_;
-	std::uint32_t qhead_[3] = {none, none, none}, qtail_[3] = {none, none, none};
-	std::uint64_t qsize_[3] = {0, 0, 0};
-	ghost_set ghost_;
-	std::uint64_t small_cap_ = ~std::uint64_t(0);
+	// The policy: S3-FIFO's queues (small = 1, main = 2) and ghost over the slots' links.
+	catalog_detail::s3fifo<policy_slots> policy_{policy_slots{this}};
 	std::atomic<std::uint64_t> wake_failures_{0}, wake_overloads_{0}, wake_gated_{0}, bound_closes_{0}, bound_commits_{0}, commit_failures_{0};
 	std::atomic<std::uint64_t> passes_{0}, pass_demotes_{0}, pass_closes_{0}, pass_reposts_{0}, reclaims_{0}, erased_{0};
 	std::atomic<std::uint64_t> stuck_closes_{0}, stuck_retries_{0}, close_failures_{0}, shutdown_commits_{0}, shutdown_commit_failures_{0}, payload_close_failures_{0};

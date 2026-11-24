@@ -680,7 +680,7 @@ void catalog<Index, H>::close_refused(std::uint32_t idx, slot_state prior) {
 	const std::uint64_t gen = word::gen(s.word.load(std::memory_order_acquire));
 	end_at(idx, slot_state::closing, prior);
 	hook("refuse.end", false);
-	policy_requeue(idx, gen, 2);
+	policy_.requeue(idx, gen, 2);
 }
 
 template <class Index, class H>
@@ -750,7 +750,7 @@ void catalog<Index, H>::finish_close(std::uint32_t idx) {
 	const std::uint32_t h = s.key_hash;
 	bool reopen = false;
 	std::uint64_t delay = 0;
-	policy_unlink(idx);
+	policy_.unlink(idx);
 	const bool ghost = s.to_ghost.exchange(false, std::memory_order_relaxed);
 	std::uint64_t h64;
 	{

@@ -12,10 +12,7 @@ catalog<Index, H>::catalog(host h) : h_(std::move(h)), life_(std::make_shared<li
 	if (h_.wake_bound > 255) { throw std::invalid_argument("strata: host::wake_bound is at most 255 (the slot counts failures in a byte)"); }
 	group_ = h_.exec->open();
 	for (auto& c : chunks_) { c.store(nullptr, std::memory_order_relaxed); }
-	if (h_.soft_open) {
-		small_cap_ = h_.soft_open / 10;  // the small FIFO is a tenth of soft_open, the ghost half of it
-		ghost_ = ghost_set(static_cast<std::size_t>(h_.soft_open / 2));
-	}
+	if (h_.soft_open) { policy_.cap(h_.soft_open); }
 }
 
 template <class Index, class H>

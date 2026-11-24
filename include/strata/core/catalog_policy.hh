@@ -132,24 +132,6 @@ void catalog<Index, H>::decay(std::uint32_t idx) {
 }
 
 template <class Index, class H>
-auto catalog<Index, H>::queue_sizes() const -> queue_sizes_t {
-	std::lock_guard l(policy_mu_);
-	return {qsize_[1], qsize_[2], ghost_.size()};
-}
-
-template <class Index, class H>
-unsigned catalog<Index, H>::queue_of(std::uint32_t idx) const {
-	std::lock_guard l(policy_mu_);
-	return at(idx).q;
-}
-
-template <class Index, class H>
-std::uint64_t catalog<Index, H>::ghost_bytes() const {
-	std::lock_guard l(policy_mu_);
-	return ghost_.bytes();
-}
-
-template <class Index, class H>
 void catalog<Index, H>::over_soft() noexcept {
 	if (!started_.load(std::memory_order_relaxed) || pass_queued_.load(std::memory_order_relaxed)) { return; }
 	const std::uint64_t band = h_.pass_posts > 1 ? h_.pass_posts - 1 : 0;
@@ -170,56 +152,14 @@ void catalog<Index, H>::over_soft() noexcept {
 }
 
 template <class Index, class H>
-void catalog<Index, H>::push_tail_locked(std::uint32_t idx, unsigned q) {
-	slot& s = at(idx);
-	assert(s.q == 0 && (q == 1 || q == 2));
-	s.q = static_cast<std::uint8_t>(q), s.q_next = none, s.q_prev = qtail_[q];
-	(qtail_[q] != none ? at(qtail_[q]).q_next : qhead_[q]) = idx;
-	qtail_[q] = idx;
-	++qsize_[q];
-}
-
-template <class Index, class H>
-void catalog<Index, H>::unlink_locked(std::uint32_t idx) {
-	slot& s = at(idx);
-	const unsigned q = s.q;
-	assert(q == 1 || q == 2);
-	(s.q_prev != none ? at(s.q_prev).q_next : qhead_[q]) = s.q_next;
-	(s.q_next != none ? at(s.q_next).q_prev : qtail_[q]) = s.q_prev;
-	s.q = 0, s.q_prev = s.q_next = none;
-	--qsize_[q];
-}
-
-template <class Index, class H>
 void catalog<Index, H>::policy_enqueue(std::uint32_t idx) {
-	slot& s = at(idx);
-	const std::uint64_t h = key_hash64(s.key);
-	std::lock_guard l(policy_mu_);
-	if (s.q != 0) { return; }
-	const bool seen = ghost_.take(h);
-	if (seen) { ghost_hits_.fetch_add(1, std::memory_order_relaxed); }
-	push_tail_locked(idx, seen ? 2 : 1);
-}
-
-template <class Index, class H>
-void catalog<Index, H>::policy_unlink(std::uint32_t idx) {
-	std::lock_guard l(policy_mu_);
-	if (at(idx).q != 0) { unlink_locked(idx); }
+	if (policy_.enqueue(idx, key_hash64(at(idx).key))) { ghost_hits_.fetch_add(1, std::memory_order_relaxed); }
 }
 
 template <class Index, class H>
 void catalog<Index, H>::policy_ghost(std::uint64_t h) {
-	std::lock_guard l(policy_mu_);
-	ghost_.add(h);
+	policy_.ghost(h);
 	ghost_adds_.fetch_add(1, std::memory_order_relaxed);
-}
-
-template <class Index, class H>
-void catalog<Index, H>::policy_requeue(std::uint32_t idx, std::uint64_t gen, unsigned q) {
-	std::lock_guard l(policy_mu_);
-	const std::uint64_t w = at(idx).word.load(std::memory_order_acquire);
-	const slot_state st = word::state(w);
-	if (at(idx).q == 0 && word::gen(w) == gen && st != slot_state::closing && st != slot_state::free) { push_tail_locked(idx, q); }
 }
 
 template <class Index, class H>
@@ -243,66 +183,43 @@ std::uint64_t catalog<Index, H>::closing_over() const noexcept {
 }
 
 template <class Index, class H>
-bool catalog<Index, H>::pick(std::uint32_t& idx, std::uint64_t& gen, unsigned& q, std::uint64_t& round) {
-	std::lock_guard l(policy_mu_);
-	round = qsize_[1] + qsize_[2];
-	if (round == 0) { return false; }
-	q = (qsize_[1] > small_cap_ || qsize_[2] == 0) ? 1 : 2;
-	idx = qhead_[q];
-	unlink_locked(idx);
-	gen = word::gen(at(idx).word.load(std::memory_order_acquire));
-	return true;
-}
-
-template <class Index, class H>
 void catalog<Index, H>::evict(const policy_limits& lim, policy_result& r, std::uint64_t& posts) {
-	std::uint64_t skipped = 0;
 	const std::uint64_t now = exec_now();
-	for (std::uint32_t idx; r.visited < lim.visits && posts < lim.transitions && closing_over() != 0;) {
-		std::uint64_t gen, round;
-		unsigned q;
-		if (!pick(idx, gen, q, round)) { break; }
-		++r.visited;
+	policy_.evict(lim, r, posts, [this] { return closing_over() != 0; }, [this, now](std::uint32_t idx, unsigned q, policy_result& res, std::uint64_t& posted) {
 		slot& s = at(idx);
 		const std::uint64_t w = s.word.load(std::memory_order_acquire);
 		if (word::freq(w) != 0) {  // used since it entered: small moves to main with the frequency cleared, main decrements
 			if (q == 1) {
 				clear_freq(idx);
-				promoted_.fetch_add(1, std::memory_order_relaxed), ++r.promoted;
+				promoted_.fetch_add(1, std::memory_order_relaxed), ++res.promoted;
 			} else {
 				decay(idx);
-				decayed_.fetch_add(1, std::memory_order_relaxed), ++r.decayed;
+				decayed_.fetch_add(1, std::memory_order_relaxed), ++res.decayed;
 			}
-			policy_requeue(idx, gen, 2);
-			skipped = 0;
-			continue;
+			return catalog_detail::visit::used;
 		}
 		const slot_state st = word::state(w);
 		if (now < s.probe_at.load(std::memory_order_relaxed)) {  // refused lately, or a failed commit's probe: not again yet
-			busy_.fetch_add(1, std::memory_order_relaxed), ++r.busy;
-			policy_requeue(idx, gen, q);
+			busy_.fetch_add(1, std::memory_order_relaxed), ++res.busy;
 		} else if (st == slot_state::open && word::pins(w) == 0 && s.counts.get(resource::maps) != 0) {  // hot: demote first, for the close it books
 			if (begin_demote(idx, true, q == 1)) {
-				++posts, ++r.demotes;
+				++posted, ++res.demotes;
 				evict_demotes_.fetch_add(1, std::memory_order_relaxed), pass_demotes_.fetch_add(1, std::memory_order_relaxed);
 			}
-			policy_requeue(idx, gen, q);
 		} else {
 			if (st == slot_state::open || st == slot_state::owed) {
 				if (q == 1) { s.to_ghost.store(true, std::memory_order_relaxed); }
 				if (begin_close(idx, true)) {
-					++posts, ++r.closes;
+					++posted, ++res.closes;
 					evictions_.fetch_add(1, std::memory_order_relaxed), pass_closes_.fetch_add(1, std::memory_order_relaxed);
-					skipped = 0;
-					continue;
+					return catalog_detail::visit::closed;
 				}
 				s.to_ghost.store(false, std::memory_order_relaxed);
 			}
-			busy_.fetch_add(1, std::memory_order_relaxed), ++r.busy;  // pinned, in a transition, or used since: put back
-			policy_requeue(idx, gen, q);
+			busy_.fetch_add(1, std::memory_order_relaxed), ++res.busy;  // pinned, in a transition, or used since: put back
 		}
-		if (++skipped > round) { break; }  // a full round with nothing to take
-	}
+		return catalog_detail::visit::kept;
+	});
 }
 
 template <class Index, class H>
