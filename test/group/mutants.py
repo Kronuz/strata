@@ -25,10 +25,15 @@ INDEX = "include/strata/core/index.hh"
 CATALOG = "include/strata/core/catalog.hh"
 FOOTPRINT = "test/group/footprint_test.cc"
 WITNESS = "include/strata/group/witness.hh"
-INSTALL = "include/strata/group/install.hh"
 
 # name: [(file, old, new), ...]
 MUTANTS = {
+    # A settle runs with an isolated node still cut off: a cut upload's isolation in a
+    # fault-free stretch outlives the stretch (corruption row, file seed 3). voters_test's
+    # settle_heals fails.
+    "settle-keeps-isolation": [("test/group/world.hh",
+        "\t\tisolated.clear();\n\t\tfor (auto& [id, x] : nodes) {\n\t\t\tif (!x->up()) { boot(*x); }\n",
+        "\t\tfor (auto& [id, x] : nodes) {\n\t\t\tif (!x->up()) { boot(*x); }\n")],
     # Recovery replays the file set only above P_H, as strata does (D16's a1-literal).
     "replay-from-ph": [(GROUP,
         "\t\tif (phase_ == phase::effects) {\n",
@@ -136,11 +141,6 @@ MUTANTS = {
     "release-at-open": [(GROUP,
         "\t\tauto stale = held_pins(files_.io());\n",
         "\t\tfor (const auto g : held_pins(files_.io())) { ix_->release(g); }\n\t\tstd::vector<std::uint64_t> stale;\n")],
-    # A deferred index installs without its first commit: a crash leaves segment copies with no
-    # manifest log, which strata refuses to open (--target=group_voters_test 0: deferred_learner_crash).
-    "install-onto-deferred": [(INSTALL,
-        "\t\tif (!index_detail::log_holding(dir)) { ix.commit(); }\n",
-        "")],
     # The pin goes with its flight's end, not when a later bundle supersedes it: the learner's
     # fetch outruns the leader's chore at every flight (--target=group_voters_test 0: install_gap).
     "pin-per-flight": [(GROUP,

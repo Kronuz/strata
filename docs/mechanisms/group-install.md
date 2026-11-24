@@ -74,11 +74,11 @@ consensus persists the install (the bundle becomes the replica's checkpoint) onl
 stage completes; then `activate` makes the replica the pin's:
 
 1. strata installs generation G from the staged files (`index::install` through a view of the
-   `is.` names): the old content or the new across a crash. A deferred index (a fresh learner's,
-   which never committed) commits its empty state first: install writes its segment copies
-   before its manifest, and a directory holding segments with no manifest log is damage to
-   strata's open, not an interrupted create. The staged strata files go next, the manifest log
-   first, so a repeat does not install again.
+   `is.` names): the old content or the new across a crash. strata's install commits a deferred
+   index's empty first generation before any copy, so a crash never leaves segments with no
+   manifest log. A staged checkpoint strata refuses marks the replica damaged and sweeps the
+   stage, as a staged file that fails its CRC32C does below. The staged strata files go next,
+   the manifest log first, so a repeat does not install again.
 2. Each staged set file replaces the replica's own.
 3. The marker goes, then every staging name.
 
@@ -134,12 +134,81 @@ answered by the leader's `group::serve`).
 - **A close** waits for the learner's stage and activation tasks as for the chore: its teardown
   ends once neither runs, so the host may close the index and destroy the group on return.
 
+## Repair
+
+A replica whose bytes fail their checks reinstalls its leader's image through the same path
+(lead's decision 2026-11-21; consensus `docs/mechanisms/install-request.md`).
+`include/strata/group/repair.hh` holds the marker and the checks; `group.hh` binds them.
+
+```
+ damage found                       fenced locally                 repaired
+ open: corrupt_index ──┐            reads, writes, checkpoints
+ recovery: set check ──┼─▶ rd ──▶   answer replica_damaged   ──▶   Driver::reinstall ─▶ image
+ apply, read ──────────┘  (durable) ranges acknowledged unapplied  stage, activate (CRC32C) ─▶ rd goes
+```
+
+- **Damage** is strata's `corrupt_index` or `corrupt_segment` and the set's `file_set_damage` (a
+  missing, short or, sealed, CRC32C-failing file), met at the index's open (`group::open_index`),
+  at recovery's `files_.recover`, at apply or at a read. A segment maps at its first read
+  (cold-tier D2), so its footer and sections are checked there, at the read, apply or merge
+  that first touches it; a host that sets `eager_segments` finds it at the open. A leader's pin
+  checks each segment whole from the bytes it ships (the footer against the manifest's entry,
+  then every section's checksum) as it takes their CRC32C, so a source never ships a segment it
+  would refuse to load: a failure is its damage. A learner checks the staged checkpoint the same
+  way before it answers `validated`; a refusal there (or a fetched byte that fails the pin's
+  CRC32C) fails the flight: consensus releases it `Unavailable` (a failed validation carries no
+  durable term; `Rejected` is the learner's core refusing validated bytes), and the leader reads
+  its pin's files again against their CRC32Cs on every such release: bytes that changed since
+  the pin are its damage, and it hands off. A
+  live set file carries no CRC32C, so its damage is not seen (F24: no scrubber).
+- **The marker** `rd` (its text the reason, through a temporary and a rename, the directory
+  synced) goes first: a crash anywhere from here reopens the replica damaged. A damaged index's
+  names are then set aside under `iq.` (`quarantine_strata`) and a deferred index takes their
+  place. The set-aside bytes go only once the replica recovers unmarked, after an activation
+  replaced them (`release_quarantine`): a lone voter (D7), or a group whose every replica holds
+  the damage, keeps its only bytes. A marker that cannot be written fences as before.
+- **Fenced locally.** consensus's Core is not fenced (`application_failed` would end the
+  incarnation). The group refuses reads, proposals and checkpoints with `replica_damaged`,
+  answers every waiter so, pins and serves nothing, and runs only the install's own chore items.
+  A delivered range is acknowledged unapplied: consensus refuses the request while a range is
+  outstanding, and it re-delivers past the image's boundary from this replica's log. The
+  acknowledgement moves consensus's applied index only; votes and commits count the log, which
+  the replica holds, and the group's own applied index stays, so nothing is served from state
+  it lacks. Once the leader admits the request it sends the replica the image alone, and its
+  Core delivers nothing while the request is pending: its log stops counting toward commits
+  until the image activates.
+- **The request.** `Driver::reinstall` on the loop, one at a time, repeated each election
+  timeout while damaged (`Current`: the leader ships one image per base; `NotLeader`, `Busy`). A
+  damaged leader (`LeaderMustTransfer`) first hands leadership off round the ring: each try goes
+  to the next data voter after itself in incarnation order, one further per try. Damaged
+  leaders handing to each other so reach a sound voter within one turn of the ring, and a voter
+  that is down is passed by at the next try. It needs no host view.
+- **The image** stages as any install: kept bytes that fail the pin's CRC32C are fetched whole,
+  so only damaged or missing files cross the lane. The activation reads every staged file back
+  against its CRC32C before it moves anything; one that fails marks the replica damaged, sweeps
+  the stage, and the activation still answers `activated` (consensus holds the image as its
+  base; failing it would fence the Core), so the replica asks again; its reason is the refused
+  file's, the marker kept.
+- **An owed image.** A leader still owes an image after a flight fails, and it may reach the
+  replica once another image repaired it. A sound replica stages no image at or below its
+  applied index: consensus refuses it as caught up (only a pending request installs there), so
+  validation answers at once and nothing is left staged. A complete activation
+  removes the marker, durably, before it sweeps the stage; the group's recovery from the bundle
+  then ends the local fence. A crash after the marker goes recovers through `resume` as any
+  activation does.
+
 ## What it costs
 
 A fresh learner moves every pinned byte once over the lane: G's segments, its manifest log, and
 the set's files to P_b. The leader reads each live file and segment once more at the pin for its
-CRC32C. The learner writes strata's files twice (staged, then strata's own copy under its names)
-and the set's once, and needs room for both until the sweep.
+CRC32C and each segment's checks, and its pin's files once more for each flight a learner
+rejects. The learner writes strata's files twice (staged, then strata's own copy under its
+names) and the set's once, and needs room for both until the sweep. It reads its staged
+segments once more for strata's checks before it answers, and the activation every staged byte
+once more for its CRC32C. A repair moves what an install of the leader's base moves, less the
+set's files the replica holds whole, and a damaged index's set-aside bytes stay on disk until
+the activation, so a repair needs room for both; short of it the install stalls rather than
+losing them. An idle group carries two flags, a hand-off count and a reason string for it.
 
 ## What it relies on
 
@@ -161,8 +230,10 @@ past it installs and its digest equals the replay), the ungated schedules (group
 install), and `grow_and_heal` (at 3 and 5 voters, a joiner added past every checkpoint installs,
 is promoted beside a voter it replaces, and consensus's core removes that voter by itself (D3),
 a leader change between each step; the removed voter never learns its removal's commit, so the
-test retires it before settling; the second round replaces the leader). `test/group/install_suite.sh BUILD [regex]` builds
-and runs ctest's group tests, against a consensus checkout when CONSENSUS_DIR is set.
+test retires it before settling; the second round replaces the leader). `test/group/suite.sh
+BUILD [regex]` builds the `group_tests` target (every `group_*_test` and `group_sim_test`) and
+runs ctest's group tests and simulator rows, against a consensus checkout when CONSENSUS_DIR is
+set.
 `release_short_of_space` fills the leader's disk after a checkpoint supersedes the install's
 pin: the release stalls the leader, unfenced, and it settles once resumed (mutant
 `release-fences` fences it instead). Mutant `pin-per-flight` releases a pin at its flight's end:
@@ -171,9 +242,37 @@ settle. `reopen_short_of_space` restarts a leader holding its bundle's pin on a 
 opens, the pin's release stalls, and once resumed the pin goes and the cluster settles (mutant
 `release-at-open` releases at recovery and fails the open). `deferred_learner_crash` cuts the
 power of a learner whose index is deferred at every mutation of its directory from its rejoin
-through the settled install: each reboot settles with equal digests and no staging name (mutant
-`install-onto-deferred`, which installs without the first commit, leaves a directory strata
-refuses to open).
+through the settled install: each reboot settles with equal digests and no staging name.
+
+`test/group/repair_test.cc` (ctest's `group_repair`; `group_repair_test [case]`): `segment`,
+`manifest`, `file` (a stopped follower's damaged segment footer, manifest log or sealed set file:
+it reopens damaged, a damaged index replaced by a deferred one, and reinstalls once; a damaged
+segment is found by the first read that maps it, which answers `replica_damaged`, and at the
+open under `eager_segments`, ctest's `group_repair_eager`), `apply`
+and `read` (damage met while running; the read answers `replica_damaged`), `refusal` (while
+damaged, the write that damaged it and those before its request is admitted commit counting
+its log; it answers every read, checkpoint and write `replica_damaged`, serves no install and
+keeps its applied index while consensus's moves past it; the only healthy replica that applied
+those commits is then lost and they survive), `staged` (a
+staged live set file flipped before the activation is refused, and a later image repairs),
+`leader` (a damaged leader hands off, then reinstalls), `source` (a leader's segments damaged
+and never read since its reboot, which the pin's checkpoint maps, or rotted on disk after the
+leader mapped them, which only the pin's footer check reads: a learner's request makes it pin
+them, the pin meets the damage and marks it damaged, it hands off to the sound follower, and the learner and it install
+from the next leader), `body` (as `source` at rest, with a byte rotted inside each segment's
+body behind a valid footer: the pin's whole check finds it), `rot` (the source's segment bodies
+rot after its pin was made and served: the next learner's stage fails the pin's CRC32C, the
+failed flight makes the source read its pin again, and it hands off), `two-damaged` (two
+damaged replicas, one leading, with no host view: the hand-offs reach the sound one),
+`handoff-down` (the ring's next voter is down and the hand-off passes it by), `lone` (a lone
+voter's damaged index stays set aside under `iq.`, byte for byte), `deposed` (a leader that loses its
+leadership mid-flight names no install from then on, and none does once settled: every flight's
+release ends its peer's entry, review F3), and `crash` (a power cut at every
+mutation of the directory disk, then the host disk, from the damaged reboot through the settled
+repair, for a damaged manifest log on a deferred index and a damaged set file: each reboot is damaged
+or repaired, never unfenced over damaged bytes, and no stage or set-aside name stays once
+settled). `test/group/repair_mutants.py` holds one mutant per mechanism, each killed by the case
+it names.
 
 `test/group/install_test.cc` (ctest's `group_install`; `group_install_test [case]`):
 `values` (the pin, the serve's bounds, a fresh learner fetching every byte once in
@@ -184,5 +283,8 @@ flipped byte in a held sealed volume: that file fetched whole), `crash` (a proce
 power loss at every mutating operation from the stage through the activating recovery, persisted
 or not, then the activating recovery crashed at each of its own: old replica or complete new
 one), `deferred` (the same crashes on a fresh learner whose index is deferred: the empty replica
-or the complete new one), `threads` (fetches answered on four threads; TSan). `test/group/install_mutants.py` holds
+or the complete new one), `rotted` (a source with a rotted segment body refuses to pin it, a pin
+whose segment rotted since fails `check_pin`, a learner refuses a stage whose bytes match the
+pin's CRC32C but fail strata's checks, and the activation of such a stage marks the replica
+damaged and sweeps), `threads` (fetches answered on four threads; TSan). `test/group/install_mutants.py` holds
 one mutant per guard, each killed by the case it names.

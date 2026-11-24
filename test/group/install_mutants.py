@@ -49,11 +49,15 @@ MUTANTS = {
     "holder-unordered": ("crash", [(INSTALL,
         "\t\tdir.remove(std::string(d::strata_prefix) + p.strata.front().name);\n\t\tdir.sync_directory();\n",
         "")]),
-    # A deferred index installs without its first commit: a crash leaves segment copies with no
-    # manifest log, which strata refuses to open.
-    "install-onto-deferred": ("deferred", [(INSTALL,
-        "\t\tif (!index_detail::log_holding(dir)) { ix.commit(); }\n",
-        "")]),
+    # The learner answers validated on bytes that pass the pin's CRC32C but not strata's checks.
+    "stage-unchecked": ("rotted", [(INSTALL,
+        "\t\t(void)install_detail::checked_segment<Layout>(*f, s.size, s.footer_crc);\n",
+        "\t\t(void)f;\n")]),
+    # strata's refusal of a staged checkpoint escapes the activation as corrupt_segment: the
+    # learner's activation item fails instead of marking it damaged (F7).
+    "install-damage-escapes": ("rotted", [(INSTALL,
+        "\t\t\tif (!damage(e)) { throw; }\n\t\t\tconst auto why = ",
+        "\t\t\tthrow;\n\t\t\tconst auto why = ")]),
     # Recovery does not finish an activation consensus persisted: P_b > P_H fences the replica.
     "no-resume": ("crash", [(INSTALL,
         "\tif (p && p->base == restored) {\n",
