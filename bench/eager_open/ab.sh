@@ -15,6 +15,33 @@
 set -euo pipefail
 cmd=$1 out=$2
 here="$(cd "$(dirname "$0")/../.." && pwd)"
+# Prints the sides line and refuses (exit 3) when a side's recorded commits (strata, prospect) are not
+# what the job asks for: proto is this tree, base and aa are $JOB_REF_BASE, every side is built over
+# $JOB_REF_PROSPECT (the sides' prospects agree with each other when it is unset). A row measures
+# the binaries the job built, never a leftover's.
+guard() {  # SIDE...; $label ends the line
+	local want_proto want_base want_pro="" s strata prospect want line=""
+	want_proto=$(git -C "$here" rev-parse HEAD)
+	want_base=${JOB_REF_BASE:+$(git -C "$JOB_REF_BASE" rev-parse HEAD)}
+	want_pro=${JOB_REF_PROSPECT:+$(git -C "$JOB_REF_PROSPECT" rev-parse HEAD)}
+	for s in "$@"; do
+		line="$line$s $(tr '\n' ' ' <"$out/$s/commit" 2>/dev/null); "
+	done
+	echo "sides: $line$(uname -sm), $(date -u +%FT%TZ)${label:+, $label}"
+	for s in "$@"; do
+		{ read -r strata && read -r prospect; } <"$out/$s/commit" || { echo "ab.sh: $out/$s/commit is missing or short" >&2; exit 3; }
+		case $s in proto) want=$want_proto ;; *) want=$want_base ;; esac
+		if [ -n "$want" ] && [ "$strata" != "$want" ]; then
+			echo "ab.sh: $s was built at strata $strata, the job asks for $want: rebuild (ab.sh build)" >&2
+			exit 3
+		fi
+		[ -n "$want_pro" ] || want_pro=$prospect
+		if [ "$prospect" != "$want_pro" ]; then
+			echo "ab.sh: $s was built over prospect $prospect, the job asks for $want_pro: rebuild (ab.sh build)" >&2
+			exit 3
+		fi
+	done
+}
 run() {  # SIDE BIN ARGS...
 	local side=$1 bin=$2
 	shift 2
@@ -61,7 +88,7 @@ row)
 	fixture=$3 count=$4 rounds=$5
 	shift 5
 	read -r -a sides <<<"${SIDES:-base proto}"
-	echo "sides: $(for s in "${sides[@]}"; do printf '%s %s; ' "$s" "$(tr '\n' ' ' <"$out/$s/commit")"; done)$(uname -sm), $(date -u +%FT%TZ), $fixture x $count"
+	label="$fixture x $count" guard "${sides[@]}"
 	n=${#sides[@]}
 	for p in $(seq 0 $((rounds - 1))); do
 		for i in $(seq 0 $((n - 1))); do
@@ -73,16 +100,19 @@ row)
 heap)
 	fixture=$3 count=$4
 	shift 4
+	label="$fixture x $count" guard base proto
 	for side in base proto; do
 		for a in "$@"; do run "$side" eager_open_count open "$out/$fixture" "$count" "$a" query; done
 	done
 	;;
 identity)
 	count=$3
+	read -r -a sides <<<"${SIDES:-base proto}"
+	label="identity x $count" guard "${sides[@]}"
 	for fixture in d1000s1 d1000s4 d1000s10 d1000s4c; do
 		n=$count
 		[ "$fixture" = d1000s4c ] && n=100
-		for side in ${SIDES:-base proto}; do
+		for side in "${sides[@]}"; do
 			for a in today eager lazy warm; do run "$side" eager_open identity "$out/$fixture" "$n" "$a"; done
 		done
 	done

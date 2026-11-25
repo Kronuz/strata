@@ -205,6 +205,7 @@ static void lazy_first_read(const std::function<void(fl::io&)>& damage, const ch
 	bool segment = false;
 	std::string what = error_of([&] { (void)views[1].seg(); }, &segment);
 	CHECK(segment && names(what, field));
+	CHECK(what.find("corrupt segment") == what.rfind("corrupt segment"));  // one prefix, not two
 	if (!segment || !names(what, field)) { std::fprintf(stderr, "  first read: \"%s\"\n", what.c_str()); }
 	CHECK(error_of([&] { (void)views[2].seg(); }).empty());
 	what = error_of([&] { (void)views[1].seg(); }, &segment);
@@ -236,9 +237,95 @@ static void merge_inputs(const std::function<void(fl::io&)>& damage, const char*
 	CHECK(segment);  // a commit refuses while a first map failed (cold-tier D11)
 }
 
+// A record read from disk, demoted to its twin, re-maps under its claim (a wake): the damaged
+// segment is refused again, each map checking, and the good ones read.
+static void wake_after_demote() {
+	fl::filesystem fs;
+	fl::io io{fs};
+	build(io, shape);
+	drop_last_field(io);
+	auto ix = index_t::open(io, opts(false));
+	{
+		const auto v = ix.segments();
+		CHECK(error_of([&] { (void)v[0].seg(); }).empty());
+		CHECK(error_of([&] { (void)v[2].seg(); }).empty());
+	}
+	CHECK(ix.demote());
+	const auto v = ix.segments();
+	field_ids_plugin::checks = 0;
+	CHECK(error_of([&] { (void)v[0].seg(); }).empty());
+	bool segment = false;
+	const std::string what = error_of([&] { (void)v[1].seg(); }, &segment);
+	CHECK(segment && names(what, "field id 2 outside the field table"));
+	CHECK(field_ids_plugin::checks >= 2);  // segment 0 and the damaged one both checked
+}
+
+// heal() rereads a failed record under the head's claim: still refused, nothing installed
+// unchecked, and the good segments read.
+static void heal_keeps_refusing() {
+	fl::filesystem fs;
+	fl::io io{fs};
+	build(io, shape);
+	drop_last_field(io);
+	auto ix = index_t::open(io, opts(false));
+	std::uint64_t bad = 0;
+	{
+		const auto v = ix.segments();
+		bad = v[1].id;
+		(void)error_of([&] { (void)v[1].seg(); });
+	}
+	CHECK(ix.needs_heal());
+	const auto damaged = ix.heal();
+	CHECK(damaged.size() == 1 && damaged[0] == bad);
+	const auto v = ix.segments();
+	bool segment = false;
+	(void)error_of([&] { (void)v[1].seg(); }, &segment);
+	CHECK(segment);
+	CHECK(error_of([&] { (void)v[0].seg(); (void)v[2].seg(); }).empty());
+}
+
+// A checkpoint install from a source whose manifest drops a field is refused, and the target
+// keeps its digest, segments, fields and commit; a good source installs afterwards.
+static void install_refused(bool eager) {
+	fl::filesystem sfs, tfs;
+	fl::io src{sfs}, dst{tfs};
+	const std::uint64_t good_digest = build(src, shape);
+	const files::log_state good_state = index_detail::read_state(src);
+	const std::uint64_t gen = good_state.generation;
+	drop_last_field(src);
+	auto ix = index_t::create(dst, opts(eager), uuid);
+	{
+		index_t::transaction t;
+		t.fields = {{"x", field_role::indexed, field_postings::docs, false}};
+		index_t::operation o;
+		o.type = index_t::operation::add;
+		o.doc.key = "mine";
+		o.doc.stored = id_bytes(0);
+		t.ops = {o};
+		CHECK(ix.apply(t, {}).result == verdict::accepted);
+		ix.refresh();
+		ix.commit();
+	}
+	const std::uint64_t before = ix.digest();
+	const std::size_t nseg = ix.segments().size();
+	bool segment = false;
+	const std::string what = error_of([&] { ix.install(src, gen); }, &segment);
+	CHECK(segment && names(what, "outside the field table"));
+	CHECK(ix.digest() == before && ix.segments().size() == nseg && ix.fields().size() == 1);
+	CHECK(error_of([&] { for (const auto& v : ix.segments()) { (void)v.seg(); } }).empty());
+	CHECK(error_of([&] { ix.commit(); }).empty());
+	reseal(src, good_state);
+	CHECK(error_of([&] { ix.install(src, gen); }).empty());
+	CHECK(ix.digest() == good_digest);
+}
+
 int main() {
 	good();
 	own_segments();
+	wake_after_demote();
+	heal_keeps_refusing();
+	install_refused(true);
+	install_refused(false);
 	const std::pair<std::function<void(fl::io&)>, const char*> damages[] = {
 		{drop_last_field, "field id 2 outside the field table"},
 		{make_c_the_key, "field id 2 is the key field"},

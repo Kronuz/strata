@@ -58,6 +58,9 @@ Xapiand master (`src/engine/strata`, `src/database`):
 - Host: the development Mac (x86_64, macOS 15, APFS, Apple clang, Release), strict jobs beside
   other agents' light work, page cache warm. Each row interleaves the sides and arms run by run;
   a cell is the median of its runs with the [min-max] range.
+- Rows run in the job that builds them: `row`, `heap` and `identity` print the `sides:` line and
+  refuse (exit 3) when a side's recorded strata or prospect commit is not what the job asks for
+  (`bench/eager_open/test_guard.sh` pins that). Three evidence jobs once measured a leftover build.
 
 ## Results
 
@@ -168,8 +171,8 @@ Identity (261121-110632-e10bb1, 1,000 indexes of each fixture, every arm, both s
   index (hash 878cc613f60d2790), which is the guarantee resting on Xapiand's loop alone. `proto`
   refuses every eager arm at open with the same message and no host check, and `lazy` at its first
   read with `corrupt_segment`, the record marked failed (D9, D11): the refusal moves to where the
-  segment maps. Its message is wrapped twice ("strata: corrupt segment: strata: corrupt segment:
-  ..."), as for any first-map refusal on main (`open_segment::fail` wraps `what()` again).
+  segment maps, with the plugin's message, prefixed once (`open_segment::fail` rethrows a
+  `corrupt_segment` as it is; 261124-193029-58f381's lazy line, run before that fix, shows the prefix doubled).
 - Suites at the change: strata's index, warm, reader_check, background_merge and key_index pass
   (261121-111138-374fa5). prospect's fielddict, fields, index, lifecycle, merge, multisegment,
   background_merge and reclaim suites over this branch are queued (261121-111140-64ce5a).
@@ -244,9 +247,10 @@ but 80 KB less resident per index at `d1000s10` (138.8 against 218.8 KB, all fil
 too. With the
 transient reader `today` itself falls 4.2 KB per index at `d1000s10` (64,111 B to 59,896 B dirty,
 against jobs 261124-145139-a2c903 and its base). `lazy` is unchanged by the move (15.7 KB dirty
-after open at `d1000s10`, equal on all three sides). Identity (`d1000s4` hash 1e688dacf0ef51b0,
-`d1000s10` ee3e4c737f1ce5d0) is the same on every arm and side; the corrupt-fixture refusals are
-rerun in 261124-193029-58f381.
+after open at `d1000s10`, equal on all three sides). Identity (261124-193029-58f381: `d1000s1` 0e0fdda1ad7eb910,
+`d1000s4` f21c5648f9f055c0, `d1000s10` da0735ac41071fd0) is the same on every arm and side, and its
+`d1000s4c` refusals are as above. The rows' own query hashes (`d1000s4` 1e688dacf0ef51b0,
+`d1000s10` ee3e4c737f1ce5d0) agree across their sides.
 
 Void as evidence: the d1000s4 pass at strata:239d51e4 (261124-145136-a057fa) and the 261124-190110-6a800d
 and 261124-190112-00d680 rows ran binaries built before prospect:c99e6be (the last two without a build

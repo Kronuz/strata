@@ -1802,10 +1802,13 @@ private:
 		}
 		[[noreturn]] static const segment& throw_failed() { throw corrupt_segment("the segment failed its checks"); }
 		// Marks the record failed, unless a map that passed got there first.
-		const segment& fail(const char* what) const {
+		// Fences the segment and throws: a corrupt_index as a corrupt_segment, a corrupt_segment as it is
+		// (rethrown from the catch, so its prefix is not doubled).
+		const segment& fail(const char* what, bool rewrap) const {
 			const void* expected = nullptr;
 			if (body_.compare_exchange_strong(expected, failed_marker(), std::memory_order_acq_rel, std::memory_order_acquire) || expected == failed_marker()) {
-				throw corrupt_segment(what);
+				if (rewrap) { throw corrupt_segment(what); }
+				throw;
 			}
 			return static_cast<const segment_body*>(expected)->seg;
 		}
@@ -1816,9 +1819,9 @@ private:
 			try {
 				fresh = read_checked([&] { return open_body(*ctx->io, ref, claim, false); }, &ctx->retries);
 			} catch (const corrupt_index& e) {
-				return fail(e.what());
+				return fail(e.what(), true);
 			} catch (const corrupt_segment& e) {
-				return fail(e.what());
+				return fail(e.what(), false);
 			}
 			const void* expected = nullptr;
 			if (body_.compare_exchange_strong(expected, fresh.get(), std::memory_order_acq_rel, std::memory_order_acquire)) { return fresh.release()->seg; }
