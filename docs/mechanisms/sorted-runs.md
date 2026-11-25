@@ -16,7 +16,7 @@ strata's keys section and filter are per segment, so a run needs no rewrite.
 Past `max_runs` runs (64), the smallest key-adjacent runs merge: a window of up to the merge
 factor of runs with no other segment between them in key order, the one writing the fewest bytes
 per segment it removes, repeated down to the cap. The output spans only its runs' keys, so it is a
-run again. The cap bounds what every segment costs whatever its size: a query's per-segment setup
+run again. `max_runs = 0` keeps no runs: the tiers alone, as before D9. The cap bounds what every segment costs whatever its size: a query's per-segment setup
 (query-gap H20), a mapping and its record. 64 is twice what the tiers hold at their largest (8 a
 tier over four tiers up to the 2.5 GiB half-maximum), and RocksDB holds every flushed SST with no
 cap (103 files after `tenx1` fillseq).
