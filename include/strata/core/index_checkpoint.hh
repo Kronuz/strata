@@ -75,6 +75,7 @@ void basic_index<Layout>::install(kronuz::journal::IO& source, std::uint64_t gen
 	}
 	guarded([&] {
 		segs_ = std::move(got);
+		index_ranges();
 		clear_buffer();
 		reserved_ = 0;  // the discarded buffer's reservations
 		if (permit_) { permit_.settle(); }

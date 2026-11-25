@@ -133,7 +133,7 @@ bool basic_index<Layout>::get(std::string_view key, F&& f) const
 	for (std::size_t i = frozen_.size(); i-- > 0;) {
 		if (const int got = in(*frozen_[i]); got >= 0) { return got; }
 	}
-	return get_segments(owned_segments{segs_}, key, f, pending_index());
+	return get_segments(probed_segments{segs_, ranges_.find(key, segs_.size())}, key, f, pending_index());
 }
 
 template <class Layout>

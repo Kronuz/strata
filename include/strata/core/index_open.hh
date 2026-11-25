@@ -76,6 +76,7 @@ basic_index<Layout>::~basic_index() {
 		pub_.reset();
 	}
 	segs_.clear();  // the segments drop here, under the lease
+	index_ranges();
 }
 
 template <class Layout>
@@ -90,6 +91,7 @@ void basic_index<Layout>::close() {
 	detach_log();
 	end_merges();
 	segs_.clear();
+	index_ranges();
 	clear_buffer();
 	appender_.reset();
 	log_.reset();
@@ -174,6 +176,7 @@ std::vector<std::uint64_t> basic_index<Layout>::heal() {
 			fresh->deletes_dirty = s->deletes_dirty;
 			fresh->ref = s->ref;
 			s = std::move(fresh);  // a view keeps the failing object until it is freed (D11)
+			index_ranges();
 			load_->retries.fetch_add(1, std::memory_order_relaxed);
 			changed();
 		} catch (const corrupt_index&) {
@@ -198,6 +201,7 @@ bool basic_index<Layout>::demote() {
 	for (auto& s : segs_) { twins.push_back(s->twin()); }
 	const bool owed = opts_.defer_io && std::any_of(twins.begin(), twins.end(), [](const auto& t) { return !t->failed(); });
 	segs_ = std::move(twins);
+	index_ranges();
 	appender_.reset();  // warm holds the directory alone: the next commit opens the log again
 	log_.reset();
 	if (owed) { promote_owed_.store(true, std::memory_order_release); }
@@ -343,6 +347,7 @@ void basic_index<Layout>::recover(std::optional<std::uint64_t> to) {
 	check_readable(m_.configured);
 	// Lazy: the names and sizes the scan recorded stand for the segment files (cold-tier D11).
 	segs_ = load_files(*io_, m_, false, load_, opts_.eager_segments ? nullptr : &ledger_.files());
+	index_ranges();
 	meta_ = m_.metadata;
 	fields_ = m_.fields;
 	cur_ = {m_.uuid, m_.last_docid, std::max(m_.next_segment, max_segment + 1), m_.schema_version, m_.configured, {m_.applied_index, m_.applied_count}};

@@ -201,6 +201,7 @@ void basic_index<Layout>::flush_active(const buffer& b) {
 	ref.size = sink.size();
 	ref.doc_count = as_is ? a.buf.doc_count() : order.size();
 	segs_.emplace_back(streamed_segment(std::move(file), ref));
+	index_ranges();
 }
 
 template <class Layout>
@@ -312,6 +313,7 @@ void basic_index<Layout>::flush_documents(buffer& b) {
 			segs_.emplace_back(streamed_segment(std::move(files[k]), ref, &charges[k]));
 			charges[k].settle();
 		}
+		index_ranges();
 	}
 }
 

@@ -4,6 +4,7 @@
 // deleted fraction, logarithmic write amplification, merges of equal segments, maximum-size
 // segments left alone, floor-sized merges, singleton merges reclaiming deletes, forced
 // merges to an exact count within the size limit, and forced deletes merges.
+#include "strata/core/key_ranges.hh"
 #include "strata/core/merge_policy.hh"
 
 #include <algorithm>
@@ -322,9 +323,10 @@ int main() {
 		CHECK(p.find_forced_deletes_merges(segs).size() == 19);
 	}
 	// Sorted runs (D9): a sequential load's segments overlap nothing, so no merge rewrites
-	// them; the index only grows.
-	{
+	// them up to max_runs; past it adjacent runs merge, each byte a few times at most.
+	for (const std::size_t cap : {std::size_t(1000), std::size_t(64)}) {
 		merge_policy p;
+		p.max_runs = cap;
 		sim s;
 		auto key = [](int i) {
 			char b[16];
@@ -335,8 +337,14 @@ int main() {
 			s.flush_range(12 * MB, key(i * 1000), key(i * 1000 + 999));
 			s.merge_all(p);
 		}
-		CHECK(s.merged == 0);
-		CHECK(s.segs.size() == 200);
+		const double amplification = (s.flushed + s.merged) / s.flushed;
+		if (cap == 1000) {
+			CHECK(s.merged == 0);
+			CHECK(s.segs.size() == 200);
+		} else {
+			CHECK(s.segs.size() <= cap && amplification < 2);
+			std::printf("  sequential past max_runs: %zu segments, write amplification %.2f\n", s.segs.size(), amplification);
+		}
 	}
 	// A random load's segments each span the whole key space: they still merge by size,
 	// within the tiers' budget, with logarithmic write amplification.
@@ -352,7 +360,7 @@ int main() {
 		CHECK(within_budget(p, s.segs));
 	}
 	// Sequential runs with a segment overlapping two of them: only the overlapping ones
-	// merge, the rest stay; small disjoint segments (under run_bytes) merge once as before.
+	// merge, the rest stay; disjoint segments stay whatever their size (D9).
 	{
 		merge_policy p;
 		p.segments_per_tier = 2;
@@ -371,16 +379,69 @@ int main() {
 			for (auto id : m) { CHECK(id == 1 || id == 2 || id == 5 || id == 6); }  // never the settled runs 3 and 4
 		}
 		segs.resize(4);
-		for (std::uint64_t i = 0; i < 12; ++i) { segs.push_back(seg(10 + i, 1, ("m" + std::to_string(i)).c_str(), ("m" + std::to_string(i)).c_str())); }
-		std::size_t small = 0;
-		for (const auto& m : p.find_merges(segs)) {
-			for (auto id : m) { small += id >= 10; CHECK(id >= 10); }
+		for (std::uint64_t i = 0; i < 12; ++i) {
+			char k[8];
+			std::snprintf(k, sizeof k, "m%02d", int(i));
+			segs.push_back(seg(10 + i, 0.25, k, k));
 		}
-		CHECK(small > 0);  // disjoint segments under run_bytes still merge
+		CHECK(p.find_merges(segs).empty());  // sixteen small disjoint runs, under max_runs: none merges
 		// A run meeting a segment outside the candidates (one being merged) is no run.
 		segs.resize(4);
 		for (auto& s : segs) { s.overlapped = true; }
 		CHECK(!p.find_merges(segs).empty());
+	}
+	// Past max_runs the smallest key-adjacent runs merge, down to the cap: each window
+	// consecutive in key order and only runs, the overlapping pair left to the tiers.
+	{
+		merge_policy p;
+		p.segments_per_tier = 2;
+		p.max_merge_at_once = 2;
+		p.max_runs = 8;
+		std::vector<candidate> segs;
+		for (std::uint64_t i = 0; i < 12; ++i) {
+			char k[8];
+			std::snprintf(k, sizeof k, "m%02d", int(i));
+			segs.push_back(candidate{10 + i, std::uint64_t((i < 4 ? 6 : 5) * MB), 1000, 0}.range(k, k));  // ids in key order
+		}
+		segs.push_back(candidate{30, std::uint64_t(12 * MB), 1000, 0}.range("x", "z"));
+		segs.push_back(candidate{31, std::uint64_t(12 * MB), 1000, 0}.range("y", "y"));
+		std::size_t removed = 0, smallest = 0;
+		for (const auto& m : p.find_merges(segs)) {
+			if (std::find(m.begin(), m.end(), 30u) != m.end()) { continue; }  // the tiers' pair
+			const auto [lo, hi] = std::minmax_element(m.begin(), m.end());
+			CHECK(m.size() == 2 && *hi - *lo + 1 == m.size() && *hi < 22);
+			smallest += *lo >= 14;  // the 5 MiB runs before the 6 MiB ones
+			removed += m.size() - 1;
+		}
+		CHECK(removed == 4 && smallest == 4);
+	}
+	// The lookup side (key_ranges): a key inside a run's range probes that run and the
+	// overlapping or unknown segments, oldest first, and never another run.
+	{
+		strata::key_ranges r;
+		r.start(6);
+		r.add(0, "a", "c");
+		r.add(1, "d", "f");
+		r.add(2, "m", "p");
+		r.add(3, "n", "o");  // overlaps 2: both are probed for any key
+		r.add_unknown(4);    // unmapped: probed for any key
+		r.add(5, "g", "h");
+		r.finish();
+		CHECK(r.runs() == 3);
+		const auto probed = [&](std::string_view key, std::size_t n) {
+			const auto p = r.find(key, n);
+			std::vector<std::size_t> out;
+			for (std::size_t i = 0; i < p.size(); ++i) { out.push_back(p[i]); }
+			return out;
+		};
+		CHECK((probed("e", 6) == std::vector<std::size_t>{1, 2, 3, 4}));
+		CHECK((probed("g", 6) == std::vector<std::size_t>{2, 3, 4, 5}));
+		CHECK((probed("c", 6) == std::vector<std::size_t>{0, 2, 3, 4}));
+		CHECK((probed("cc", 6) == std::vector<std::size_t>{2, 3, 4}));  // between runs: none of them
+		CHECK((probed("z", 6) == std::vector<std::size_t>{2, 3, 4}));
+		CHECK((probed("e", 7) == std::vector<std::size_t>{0, 1, 2, 3, 4, 5, 6}));  // another list: every position
+		r.start(6);  // unfinished: every position
+		CHECK((probed("e", 6) == std::vector<std::size_t>{0, 1, 2, 3, 4, 5}));
 	}
 	std::printf("merge_policy: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;

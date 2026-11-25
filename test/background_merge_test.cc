@@ -217,9 +217,10 @@ static void sorted_runs(std::size_t threads) {
 	fl::filesystem fs, twin_fs;
 	fl::io io(fs), twin_io(twin_fs);
 	auto o = bg.options();
-	o.policy.run_bytes = 1;
+	auto to = bg.options(false);
+	to.policy.max_runs = 0;  // the twin merges its runs as they come
 	auto ix = kv_index::create(io, o, uuid);
-	auto twin = kv_index::create(twin_io, bg.options(false), uuid);
+	auto twin = kv_index::create(twin_io, to, uuid);
 	const auto key = [](int i) {
 		char b[16];
 		std::snprintf(b, sizeof b, "S%06d", i);
@@ -241,19 +242,31 @@ static void sorted_runs(std::size_t threads) {
 		for (int d = 0; d < 4; ++d) { put(s * 10 + d, "body"); }
 		settle();
 	}
+	// Every key's get and lookup, present or not, as the twin answers: the runs' ranges are
+	// current after each flush, merge, and reopen.
+	const auto gets_equal = [&] {
+		bool same = true;
+		for (int i = 0; i < 64; ++i) { same = same && ix.get(key(i)) == twin.get(key(i)) && ix.find_key(key(i)).has_value() == twin.find_key(key(i)).has_value(); }
+		return same;
+	};
 	CHECK(ix.segments().size() == 6);  // six disjoint runs over a budget of two: none merges
 	CHECK(twin.segments().size() < 6);
 	CHECK(contents(ix) == contents(twin));
+	CHECK(gets_equal());
 	ix.commit();
 	ix.close();
 	ix = kv_index::open(io, o);
+	CHECK(gets_equal());  // unmapped: every segment probed
 	settle();
 	CHECK(ix.segments().size() == 6);  // reopened, unmapped: still runs
+	CHECK(gets_equal());
 	put(2, "again");  // a segment reaching across every run: none is settled now
 	put(52, "again");
+	CHECK(gets_equal());  // in the buffer
 	settle();
 	CHECK(ix.segments().size() < 7);
 	CHECK(contents(ix) == contents(twin));
+	CHECK(gets_equal());
 	(void)ix.check();
 }
 

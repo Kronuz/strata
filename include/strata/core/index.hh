@@ -15,6 +15,7 @@
 #include "strata/core/manifest_log.hh"
 #include "strata/core/hazard.hh"
 #include "strata/core/index_ledger.hh"
+#include "strata/core/key_ranges.hh"
 #include "strata/core/merge.hh"
 #include "strata/core/merge_policy.hh"
 #include "strata/core/owner.hh"
@@ -2590,6 +2591,15 @@ private:
 
 	// A key's live copy: the buffers' key maps newest first, then segments newest first.
 	copy lookup_key(std::string_view key) const;
+	// Rebuilds ranges_ from segs_; called right after every change to segs_ or its records.
+	void index_ranges();
+	// The segments a key's lookup probes, as owned_segments lists them (get_segments' Segs).
+	struct probed_segments {
+		const std::vector<std::shared_ptr<open_segment>>& segs;
+		key_ranges::probes p;
+		std::size_t size() const noexcept { return p.size(); }
+		segment_view operator[](std::size_t i) const noexcept { return owned_segments{segs}[p[i]]; }
+	};
 	// A copy's key, when the buffer holds it; a segment's is not recoverable from its ordinal.
 	std::string_view key_of_copy(const copy& c) const;
 
@@ -2893,6 +2903,7 @@ private:
 	std::vector<std::pair<std::uint64_t, std::uint64_t>> deleted_since_;
 	std::set<std::string> meta_since_;
 	std::vector<std::shared_ptr<open_segment>> segs_;  // by id, as the manifest lists them; a background merge shares its sources
+	key_ranges ranges_;  // segs_' mapped key ranges, for lookups (D9)
 	std::vector<std::shared_ptr<merge_job>> pending_;  // handed to the executor, oldest first
 	// The buffers (D18's stage 2, write-buffer D3, D8): the active one takes writes; frozen ones,
 	// oldest first, wait for their flush. In an inverting layout each holds its inverter.

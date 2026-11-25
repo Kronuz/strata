@@ -3,8 +3,8 @@
 // 16 MiB floor, 5 GiB merged segments, 20% deleted documents allowed, 10% for
 // force_merge_deletes). It decides, from segment sizes and deleted counts alone, which
 // segments to merge next; the index runs the merges. A segment whose key range overlaps
-// no other segment's is a settled run and stays out of the tiers, as RocksDB moves an SST
-// that overlaps nothing down a level without rewriting it (D9). The behavior it promises is the one
+// no other segment's is a run and stays out of the tiers, as RocksDB moves an SST that
+// overlaps nothing down a level without rewriting it (D9). The behavior it promises is the one
 // Lucene's TestTieredMergePolicy checks, re-implemented in merge_test.
 #pragma once
 
@@ -25,9 +25,10 @@ struct merge_policy {
 	std::uint64_t max_merged_bytes = 5ull << 30;
 	double deletes_pct_allowed = 20;
 	double force_merge_deletes_pct_allowed = 10;
-	// Segments of at least this size whose key range overlaps no other's are never merged
-	// for size; smaller ones merge once, up to the floor, as before.
-	std::uint64_t run_bytes = 4ull << 20;
+	// A segment whose key range overlaps no other's is a run and never merges for size,
+	// whatever its size. Past this many runs the smallest key-adjacent ones merge: each
+	// segment costs a query its setup and the index a mapping, whatever its size (D9, N13).
+	std::size_t max_runs = 64;
 
 	struct candidate {
 		std::uint64_t id = 0, bytes = 0, docs = 0, deleted = 0;
@@ -77,8 +78,13 @@ struct merge_policy {
 	// amplification stays logarithmic; merges only reclaiming deletes may be singletons.
 	std::vector<merge> find_merges(std::vector<candidate> segs) const {
 		std::sort(segs.begin(), segs.end(), [](const candidate& a, const candidate& b) { return a.live_bytes() > b.live_bytes(); });
-		// Segments at half the maximum size or more stay out of the tiers.
-		const auto run = settled(segs);
+		// Segments at half the maximum size or more stay out of the tiers, and so do runs.
+		const auto order = by_first_key(segs);
+		const auto run = settled(segs, order);
+		std::vector<merge> merges;
+		std::vector<bool> used(segs.size(), false);
+		auto index_of = [&](const candidate* c) { return std::size_t(c - segs.data()); };
+		cap_runs(segs, order, run, used, merges);
 		std::vector<const candidate*> eligible;
 		double bytes = 0, smallest = 0, docs = 0, deleted = 0;
 		for (std::size_t i = 0; i < segs.size(); ++i) {
@@ -90,9 +96,6 @@ struct merge_policy {
 			bytes += s.live_bytes();
 			smallest = eligible.size() == 1 ? s.live_bytes() : std::min(smallest, s.live_bytes());
 		}
-		std::vector<merge> merges;
-		std::vector<bool> used(segs.size(), false);
-		auto index_of = [&](const candidate* c) { return std::size_t(c - segs.data()); };
 		// Tier merges while the eligible segments outnumber the budget.
 		double count = double(eligible.size());
 		const double allowed = allowed_segments(bytes, smallest);
@@ -194,17 +197,20 @@ struct merge_policy {
 	}
 
 private:
-	// Which segments are settled runs: at least run_bytes live, and a key range that
-	// overlaps no other segment's, candidate or not. Any unranged segment overlaps all, so
-	// none settles.
-	std::vector<bool> settled(const std::vector<candidate>& segs) const {
-		std::vector<bool> run(segs.size(), false);
+	// Every segment's position, by first key; empty when one is unranged, which overlaps all.
+	static std::vector<std::size_t> by_first_key(const std::vector<candidate>& segs) {
 		std::vector<std::size_t> order;
 		for (std::size_t i = 0; i < segs.size(); ++i) {
-			if (!segs[i].ranged) { return run; }
+			if (!segs[i].ranged) { return {}; }
 			order.push_back(i);
 		}
 		std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return segs[a].first_key < segs[b].first_key; });
+		return order;
+	}
+
+	// Which segments are runs: a key range that overlaps no other segment's, candidate or not.
+	static std::vector<bool> settled(const std::vector<candidate>& segs, const std::vector<std::size_t>& order) {
+		std::vector<bool> run(segs.size(), false);
 		// Sorted by first key, a segment overlaps none when it starts past every earlier
 		// segment's end and ends before the next one starts.
 		const std::string* reach = nullptr;  // the largest last key before this segment
@@ -212,10 +218,45 @@ private:
 			const auto& s = segs[order[k]];
 			const bool clear_before = !reach || *reach < s.first_key;
 			const bool clear_after = k + 1 == order.size() || s.last_key < segs[order[k + 1]].first_key;
-			run[order[k]] = clear_before && clear_after && !s.overlapped && s.live_bytes() >= double(run_bytes);
+			run[order[k]] = clear_before && clear_after && !s.overlapped;
 			if (!reach || *reach < s.last_key) { reach = &s.last_key; }
 		}
 		return run;
+	}
+
+	// Merges of runs while they outnumber max_runs: each the key-adjacent window (no other
+	// segment between its runs) of up to the merge factor that writes the fewest bytes per
+	// segment it removes. Its output spans only its runs' keys, so it is a run again.
+	void cap_runs(const std::vector<candidate>& segs, const std::vector<std::size_t>& order, const std::vector<bool>& run, std::vector<bool>& used, std::vector<merge>& merges) const {
+		std::size_t count = std::size_t(std::count(run.begin(), run.end(), true));
+		while (count > max_runs) {
+			std::size_t best_at = 0, best_n = 0;
+			double best_score = 0;
+			for (std::size_t k = 0; k < order.size(); ++k) {
+				double bytes = 0;
+				std::size_t n = 0;
+				for (std::size_t j = k; j < order.size() && n < merge_factor(); ++j, ++n) {
+					const auto& s = segs[order[j]];
+					if (!run[order[j]] || used[order[j]] || bytes + s.live_bytes() > double(max_merged_bytes)) { break; }
+					bytes += s.live_bytes();
+				}
+				if (n < 2) { continue; }
+				const double score = bytes / double(n - 1);
+				if (!best_n || score < best_score) {
+					best_at = k;
+					best_n = n;
+					best_score = score;
+				}
+			}
+			if (!best_n) { break; }
+			merge m;
+			for (std::size_t j = best_at; j < best_at + best_n; ++j) {
+				used[order[j]] = true;
+				m.push_back(segs[order[j]].id);
+			}
+			merges.push_back(std::move(m));
+			count -= best_n - 1;
+		}
 	}
 
 	// The best merge among unused segments (sorted by live bytes, largest first). A window

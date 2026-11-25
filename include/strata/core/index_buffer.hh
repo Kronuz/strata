@@ -193,7 +193,9 @@ auto basic_index<Layout>::lookup_key(std::string_view key) const -> copy {
 	}
 	const pending_set* pending = pending_index();
 	const std::uint64_t hash = xxh64::hash(key);  // one hash, one filter probe per segment (CR7)
-	for (std::size_t i = segs_.size(); i-- > 0;) {
+	const auto probes = ranges_.find(key, segs_.size());  // the runs not holding the key are skipped (D9)
+	for (std::size_t j = probes.size(); j-- > 0;) {
+		const std::size_t i = probes[j];
 		const auto& s = *segs_[i];
 		const segment& sg = s.seg();  // a map point under the lease (cold-tier D9)
 		const auto& keys = sg.template get<keys_plugin>();
@@ -203,6 +205,23 @@ auto basic_index<Layout>::lookup_key(std::string_view key) const -> copy {
 		}
 	}
 	return {};
+}
+
+template <class Layout>
+void basic_index<Layout>::index_ranges() {
+	ranges_.start(segs_.size());
+	if constexpr (segment::template contains<keys_plugin>()) {
+		for (std::size_t i = 0; i < segs_.size(); ++i) {
+			const auto& s = *segs_[i];
+			if (!s.bodied()) {
+				ranges_.add_unknown(i);
+				continue;
+			}
+			const auto& k = s.mapped().template get<keys_plugin>();
+			if (k.key_count()) { ranges_.add(i, k.min_key(), k.max_key()); }  // a keyless segment answers no lookup
+		}
+		ranges_.finish();
+	}
 }
 
 template <class Layout>
