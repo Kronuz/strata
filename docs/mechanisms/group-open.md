@@ -49,6 +49,9 @@ and strata would skip them as replay.
 | a complete install stage that consensus persisted | the boundary B | the old index's, below B (consensus installs only above its commit index); B once activated | at least B |
 | a damaged index (quarantined, opened deferred) | any | 0 | any |
 
+| a restart after an install's activation, before the log passed B | B | B: the leader pins strata at the bundle itself (docs/design/journal-binding.md D5), and the learner's `check_stage` refuses a staged head past it | at least B |
+
 An install's activation (`activate_image`) is not checked: the image replaces the index, so the
-old P_H says nothing about the new pair. Tests: `test/group/journal_behind_test.cc` (clean-stop,
+old P_H says nothing about the new pair; the new one is the bundle's boundary (D5,
+`test/group/install_bundle_test.cc`). Tests: `test/group/journal_behind_test.cc` (clean-stop,
 crash, missing, sound) and `test/group/lifetime_test.cc` (failed-open, P_b > P_H).

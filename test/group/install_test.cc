@@ -137,7 +137,8 @@ struct replica {
 	}
 };
 
-// The leader: applied through the bundle, checkpointed, then on past it, and pinned there.
+// The leader: applied through the bundle, checkpointed and pinned there (strata at the bundle),
+// then on past it.
 struct leader_state {
 	replica r;
 	sg::bundle b;
@@ -147,8 +148,8 @@ struct leader_state {
 		r.create();
 		r.apply(bundle_at);
 		b = r.checkpoint();
-		r.apply(last);
 		pin = sg::make_pin(*r.ix, r.io, b);
+		r.apply(last);
 		for (const auto* list : {&pin.strata, &pin.files}) {
 			for (const auto& f : *list) { total += f.length; }
 		}
@@ -640,6 +641,46 @@ void rotted() {
 	check(learner.of() == before, "the replica's own content is as it was");
 }
 
+// A source that pinned past its bundle (journal-binding.md D5, check C7): its strata generation's
+// head is not the bundle's position. The learner's check_stage refuses the complete stage before
+// it answers validated; the stage is swept (the group's refusal), the learner's own content is as
+// it was, and a correct pin of the same bundle then installs.
+void stage_head() {
+	replica past;
+	past.create();
+	past.apply(bundle_at);
+	const auto b = past.checkpoint();
+	past.apply(last);
+	check(throws<std::logic_error>([&] { (void)sg::make_pin(*past.ix, past.io, b); }), "make_pin refuses a bundle strata is past");
+	const auto pin = sg::install_detail::list_pin<strata::document_layout>(past.io, b, past.ix->checkpoint());  // the split order's pin
+	check(pin.base.position == bundle_at, "the pin names the bundle");
+	replica learner;
+	learner.create();
+	learner.apply(old_at);
+	const auto old = learner.checkpoint();
+	learner.recover(old);
+	const auto before = learner.of();
+	const sg::fetcher fetch = [&](std::string name, sg::fetch_done done) { done({}, sg::serve(past.io, pin, name)); };
+	(void)run(sg::stage(learner.io, pin, fetch));
+	std::string refusal;
+	try {
+		sg::check_stage<strata::document_layout>(learner.io, pin);
+	} catch (const sg::install_failed& e) {
+		refusal = e.what();
+	} catch (...) {}
+	check(past.ix->applied().index > bundle_at, "the source's strata is past the bundle");
+	check(refusal.find("head " + std::to_string(past.ix->applied().index) + " ") != std::string::npos && refusal.find("position " + std::to_string(bundle_at)) != std::string::npos,
+		"check_stage refuses a staged head past its bundle, naming both: " + refusal);
+	sg::sweep(learner.io);
+	const auto names = learner.fs.list();
+	check(std::none_of(names.begin(), names.end(), [](const std::string& n) { return n.starts_with("is.") || n.starts_with("ia.") || n == "ip"; }), "the refused stage is swept");
+	learner.recover(old);
+	check(learner.of() == before, "the learner's content is as it was");
+	check(leader().b == b, "the leader's bundle is the same bundle");
+	source src;
+	install_and_check(learner, src, "the correct pin after a refused one");
+}
+
 // Fetches answered on other threads, as the transport's loop answers them: the stage resumes on
 // its own scheduler. Run under TSan.
 void threads() {
@@ -703,7 +744,7 @@ void threads() {
 int main(int argc, char** argv) {
 	const std::string only = argc > 1 ? argv[1] : "";
 	const std::vector<std::pair<std::string, void (*)()>> cases = {
-		{"values", values}, {"retry", retry}, {"held", held}, {"damaged", damaged}, {"threads", threads}, {"crash", crash}, {"deferred", deferred}, {"rotted", rotted}};
+		{"values", values}, {"retry", retry}, {"held", held}, {"damaged", damaged}, {"threads", threads}, {"crash", crash}, {"deferred", deferred}, {"rotted", rotted}, {"stage-head", stage_head}};
 	try {
 		for (const auto& [name, fn] : cases) {
 			if (only.empty() || only == name) {

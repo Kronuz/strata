@@ -1017,9 +1017,10 @@ int main(int argc, char** argv) {
 	stalled_follower_elected(3);
 	stalled_follower_elected(5);
 	// D109: the schedules whose ungated checkpoints left a replica behind settle by install,
-	// and 40 more ungated ones at 3 voters (group-heal A2).
+	// and 40 more ungated ones at 3 voters (group-heal A2). Which seeds leave one behind depends
+	// on the chore's item count per checkpoint (one since journal-binding.md D5's fused item).
 	std::uint64_t installed = 0;
-	for (std::uint64_t seed : {8, 12, 16, 18, 23, 24, 27}) {
+	for (std::uint64_t seed : {3, 24, 27, 45, 49, 51, 60}) {
 		const auto o = schedule(3, seed, seed % 2 == 0, false);
 		check(o.installs > 0, "seed " + std::to_string(seed) + " settles by an install");
 		installed += o.installs;

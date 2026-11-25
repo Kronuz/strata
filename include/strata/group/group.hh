@@ -71,6 +71,9 @@ public:
 	virtual void install_released(cs::NodeId peer, cs::SnapshotKey key, cs::SnapshotReleaseReason reason) = 0;
 	virtual void validate(cs::Token token, cs::LogBoundary boundary, cs::NodeId source, jn::ArtifactReader& image) = 0;
 	virtual void activate(cs::Token token, cs::LogBoundary boundary, jn::ArtifactReader& image) = 0;
+	// A requested reinstall completed: consensus's application epoch, which every later
+	// checkpoint names (consensus refuses one from an older epoch).
+	virtual void repaired(std::uint64_t epoch) { (void)epoch; }
 };
 
 class loop;
@@ -85,7 +88,7 @@ struct dispatch {
 	void operator()(cs::GroupId, cs::ValidateImage) const;
 	void operator()(cs::GroupId, cs::ActivateImage) const;
 	void operator()(cs::GroupId, cs::CheckpointPublished) const {}
-	void operator()(cs::GroupId, cs::RepairCompleted) const {}
+	void operator()(cs::GroupId, cs::RepairCompleted) const;
 	void operator()(cs::GroupId, cs::SnapshotNeeded) const;
 	void operator()(cs::GroupId, cs::SnapshotTransmit) const {}
 	void operator()(cs::GroupId, cs::SnapshotReleased) const;
@@ -164,6 +167,9 @@ inline void dispatch::operator()(cs::GroupId id, cs::ActivateImage a) const {
 	} else {
 		owner->driver().activation_failed(id, a.token, "strata::group: no group to activate the install");
 	}
+}
+inline void dispatch::operator()(cs::GroupId id, cs::RepairCompleted r) const {
+	if (auto* m = owner->find(id)) { m->repaired(r.epoch); }
 }
 inline void dispatch::operator()(cs::GroupId id, cs::Fenced f) const {
 	if (auto* m = owner->find(id)) { m->fenced(std::move(f.reason)); }
@@ -486,11 +492,14 @@ public:
 		push(new range_work(*this, std::move(range)));
 	}
 	void fenced(std::string reason) override { fence_local(std::move(reason)); }
+	void repaired(std::uint64_t epoch) override { epoch_.store(epoch); }
 	// The leader: a flight to `peer` sends the bundle at the key's boundary; pin it on the chore.
 	void install_needed(cs::NodeId peer, cs::SnapshotKey key) override {
 		{
 			std::lock_guard lock(mu_);
-			made_sources().needed[peer] = key.transfer;
+			auto& s = made_sources();
+			s.needed[peer] = key.transfer;
+			s.awaiting.insert(peer);
 		}
 		push(new notice_work([this, peer, key] {
 			pin_for(peer, key);
@@ -499,14 +508,21 @@ public:
 	}
 	void install_released(cs::NodeId peer, cs::SnapshotKey key, cs::SnapshotReleaseReason reason) override {
 		// Every flight ends in one release, whatever its reason (a lost leadership's too); a retry
-		// is a new flight, which names the peer again.
+		// is a new flight, which names the peer again. The peer awaits an install across flights
+		// until it installed, caught up or left, or this leader's term ended (D5).
 		{
 			std::lock_guard lock(mu_);
 			if (sources_) {
 				if (auto it = sources_->needed.find(peer); it != sources_->needed.end() && it->second == key.transfer) { sources_->needed.erase(it); }
+				using reason_t = cs::SnapshotReleaseReason;
+				if (reason == reason_t::Installed || reason == reason_t::CaughtUp || reason == reason_t::Removed || reason == reason_t::LeadershipLost || reason == reason_t::Fenced) {
+					sources_->awaiting.erase(peer);
+				}
 			}
 			trim_sources();
+			++releases_;
 		}
+		wake_publication();
 		// A learner's failed validation carries no durable term: consensus releases it Unavailable
 		// (Rejected is its core refusing validated bytes), as it does a lost transfer.
 		push(new notice_work([this, peer, key, refused = reason == cs::SnapshotReleaseReason::Unavailable, ended = false]() mutable {
@@ -708,6 +724,7 @@ private:
 		}
 		while (!left.empty()) { drop(left.pop_front(), true); }
 		fail_waiters(std::make_exception_ptr(cs::closed{}));
+		wake_publication();
 		co_await chore_idle();
 		for (auto n = serving_.load(); n; n = serving_.load()) { serving_.wait(n); }
 		files_.close();
@@ -1095,20 +1112,55 @@ private:
 			return step::done;
 		};
 	}
+	// The checkpoint's chore item (D5): the capture at P_b, the named files synced, strata
+	// committed there and, while a peer awaits an install, pinned there, with no apply between.
+	struct made_checkpoint {
+		bool fresh = false, fits = true;
+		std::string bytes;
+		std::exception_ptr failed;
+	};
+	std::function<step()> checkpoint_work(bundle& b, made_checkpoint& out) {
+		return [this, &b, &out, capture = capture_work(b)] {
+			if (const auto r = capture(); r != step::done) { return r; }
+			// Nothing applied past the last bundle: it is this checkpoint (consensus refuses a
+			// capture at or below its base).
+			if (b.position <= published_.load()) { return step::done; }
+			out.fresh = true;
+			out.bytes = encode(b);
+			// The admission reserves at least the bundle and the log's bound from its replacement
+			// pool: one that cannot hold them would wait forever, so it fails here, before any sync.
+			if (log_bound_ + out.bytes.size() > replacement_pool_) {
+				out.fits = false;
+				return step::done;
+			}
+			try {
+				sync_and_commit(b);
+			} catch (...) {
+				out.failed = std::current_exception();
+			}
+			return step::done;
+		};
+	}
 	// A checkpoint, its serializer held. The close tears down under it, so a checkpoint after the
 	// teardown is refused at its capture (`closed`) and none is torn down mid-way.
 	task::task<cs::CheckpointPublished> checkpoint_held(task::cancel_token token = {}) {
+		forget_awaiting();
 		bundle b;
-		co_await on_chore_step(capture_work(b));
-		// Nothing applied past the last bundle: it is this checkpoint (consensus refuses a
-		// capture at or below its base).
-		if (b.position <= published_.load()) { co_return cs::CheckpointPublished{0, published_.load()}; }
+		made_checkpoint made;
+		co_await on_chore_step(checkpoint_work(b, made));
+		if (!made.fresh) { co_return cs::CheckpointPublished{0, published_.load()}; }
+		if (!made.fits) { throw std::length_error("strata::group: a checkpoint cannot fit the admission's replacement pool (size it to the group's limits)"); }
+		if (made.failed) {
+			if (!damaged_.load()) { fence(error_text(made.failed)); }
+			std::rethrow_exception(made.failed);
+		}
 		struct source {
 			std::string bytes;
 			std::size_t at = 0;
 			cs::Index through;
 			cs::Term term;
-			cs::CaptureMetadata metadata() const { return {0, through, term, 0}; }
+			std::uint64_t epoch;
+			cs::CaptureMetadata metadata() const { return {0, through, term, epoch}; }
 			std::size_t read(std::span<char> out) {
 				const auto n = std::min(out.size(), bytes.size() - at);
 				std::copy_n(bytes.data() + at, n, out.data());
@@ -1116,20 +1168,33 @@ private:
 				return n;
 			}
 		};
-		auto bytes = encode(b);
-		const auto cap = bytes.size();
-		// The admission reserves at least the bundle and the log's bound from its replacement
-		// pool: one that cannot hold them would wait forever, so it fails here, before any sync.
-		if (log_bound_ + cap > replacement_pool_) {
-			throw std::length_error("strata::group: a checkpoint cannot fit the admission's replacement pool (size it to the group's limits)");
+		const auto cap = made.bytes.size();
+		// consensus refuses a checkpoint past a Sending flight's bundle (Busy): the publication
+		// waits for the next release and retries the same bundle, its pin kept (D5).
+		cs::CheckpointPublished published{};
+		for (;;) {
+			std::uint64_t seen = 0;
+			{
+				std::lock_guard lock(mu_);
+				seen = releases_;
+			}
+			std::exception_ptr refused;
+			bool busy = false;
+			try {
+				published = co_await loop_->driver().checkpoint(id_, cap, source{made.bytes, 0, b.position, b.term, epoch_.load()}, token);
+			} catch (const cs::rejected& r) {
+				refused = std::current_exception();
+				busy = r.reason == cs::RejectReason::Busy;
+			} catch (...) {
+				refused = std::current_exception();
+			}
+			if (!refused) { break; }
+			if (busy && flight_since(seen)) { co_await release_since(seen); }
+			if (!busy || !flight_since(seen) || fenced_.load() || torn_down()) {
+				release_later();  // an unpublished bundle's pin goes
+				std::rethrow_exception(refused);
+			}
 		}
-		try {
-			co_await on_chore([&] { sync_and_commit(b); });
-		} catch (...) {
-			fence(error_text(std::current_exception()));
-			throw;
-		}
-		auto published = co_await loop_->driver().checkpoint(id_, cap, source{std::move(bytes), 0, b.position, b.term}, std::move(token));
 		published_.store(std::max(published_.load(), published.through));
 		co_await on_chore([&] {
 			if (published.through == b.position) { recovered_ = b; }
@@ -1138,10 +1203,27 @@ private:
 		});
 		co_return published;
 	}
-	// Steps 2 and 3: the named files and the directory synced, then strata committed (P_H >= P_b).
+	// Steps 2 and 3: the named files and the directory synced, then strata committed at P_b
+	// (P_H >= P_b). While a peer awaits an install and strata is at P_b, that commit is the pin
+	// of the bundle (make_pin's checkpoint commits and pins it).
 	void sync_and_commit(const bundle& b) {
 		files_.sync(b.files);
-		ix_->commit();
+		if (!pin_wanted(b)) {
+			ix_->commit();
+			return;
+		}
+		std::shared_ptr<pinned> p;
+		try {
+			p = std::make_shared<pinned>(pinned{make_pin(*ix_, files_.io(), b), {}});
+		} catch (...) {
+			// A segment that fails its footer check: damaged, as make_pinned's; else the commit
+			// failed, and the checkpoint fences.
+			const auto e = std::current_exception();
+			if (damage(e) && become_damaged("strata::group: the checkpoint's pin met damage: " + error_text(e))) { throw replica_damaged(error_text(e)); }
+			throw;
+		}
+		std::lock_guard lock(mu_);
+		made_sources().pins.emplace(b.position, std::move(p));
 	}
 
 	// --- recovery (D16) -------------------------------------------------------------------
@@ -1240,6 +1322,7 @@ private:
 	// nothing, so an idle group carries one pointer for it. Under mu_.
 	struct sources {
 		std::map<cs::NodeId, cs::Token> needed;              // peers below the base, by their flight in progress
+		std::set<cs::NodeId> awaiting;                       // peers awaiting an install, across flights (D5)
 		std::map<cs::Index, std::shared_ptr<pinned>> pins;  // by P_b
 		std::vector<std::uint64_t> stale;                    // generations an earlier process pinned
 	};
@@ -1248,7 +1331,7 @@ private:
 		return *sources_;
 	}
 	void trim_sources() {
-		if (sources_ && sources_->needed.empty() && sources_->pins.empty() && sources_->stale.empty()) { sources_.reset(); }
+		if (sources_ && sources_->needed.empty() && sources_->awaiting.empty() && sources_->pins.empty() && sources_->stale.empty()) { sources_.reset(); }
 	}
 	static std::string read_image(jn::ArtifactReader& r) {
 		std::string bytes(std::size_t(r.descriptor().length), '\0');
@@ -1262,7 +1345,9 @@ private:
 	// On the chore, between entries: the flight's pin of the latest bundle, made once per bundle
 	// and kept until a later one supersedes it. consensus sends the image as the flight starts,
 	// so a learner's fetch can outrun this pin; its validation fails and the next flight finds
-	// the pin. A key at another boundary (a later bundle published) pins nothing.
+	// the pin. A key at another boundary (a later bundle published) pins nothing. A pin holds
+	// strata at the bundle itself (D5): with strata past it, a pinning checkpoint publishes a
+	// new bundle pinned, and the next flight installs that one.
 	void pin_for(cs::NodeId peer, cs::SnapshotKey key) {
 		if (key.boundary.index != recovered_.position || !recovered_.position || damaged_.load()) { return; }
 		std::shared_ptr<pinned> p;
@@ -1272,21 +1357,105 @@ private:
 				if (auto it = sources_->pins.find(key.boundary.index); it != sources_->pins.end()) { p = it->second; }
 			}
 		}
-		if (!p) {
-			try {
-				p = std::make_shared<pinned>(pinned{make_pin(*ix_, files_.io(), recovered_), {}});
-			} catch (...) {
-				// A segment that fails its footer check: this source is damaged, and repairs as a
-				// read that met it would (it hands leadership off first). Else strata is behind its
-				// bundle, or the generation is not retained: no pin.
-				const auto e = std::current_exception();
-				if (damage(e) && !become_damaged("strata::group: the pin met damage: " + error_text(e))) { fence(error_text(e)); }
-				return;
-			}
+		if (!p && ix_->applied().index != recovered_.position) {
+			start_pinning();
+			return;
 		}
+		if (!p && !(p = make_pinned(recovered_))) { return; }
 		std::lock_guard lock(mu_);
 		p->flights.emplace(peer, key.transfer);
 		made_sources().pins.emplace(key.boundary.index, std::move(p));
+	}
+	// The pin of bundle `b`, strata at it; null when strata is elsewhere, its generation is not
+	// retained, or a segment fails its footer check: this source is damaged then, and repairs as
+	// a read that met it would (it hands leadership off first).
+	std::shared_ptr<pinned> make_pinned(const bundle& b) {
+		try {
+			return std::make_shared<pinned>(pinned{make_pin(*ix_, files_.io(), b), {}});
+		} catch (...) {
+			const auto e = std::current_exception();
+			if (damage(e) && !become_damaged("strata::group: the pin met damage: " + error_text(e))) { fence(error_text(e)); }
+			return nullptr;
+		}
+	}
+	// While a peer awaits an install, a checkpoint at strata's own position pins (D5).
+	bool pin_wanted(const bundle& b) const {
+		if (damaged_.load() || ix_->applied().index != b.position) { return false; }
+		std::lock_guard lock(mu_);
+		return sources_ && !sources_->awaiting.empty();
+	}
+	// One pinning checkpoint at a time, on the loop, counted as an install task: the teardown
+	// waits for it, and it starts nothing once the close began.
+	void start_pinning() {
+		{
+			std::lock_guard lock(mu_);
+			if (pinning_ || closed_) { return; }
+			pinning_ = true;
+			++tasks_;
+		}
+		task::spawn(loop_->scheduler(), pinning_checkpoint());
+	}
+	task::task<void> pinning_checkpoint() {
+		const task_scope counted{this};
+		if (task::current() != loop_->scheduler()) { co_await task::schedule_on{loop_->scheduler()}; }
+		if (!closing_.load() && !fenced_.load()) {
+			try {
+				(void)co_await checkpoint();
+			} catch (...) {}  // the next flight's SnapshotNeeded starts another
+		}
+		std::lock_guard lock(mu_);
+		pinning_ = false;
+	}
+	// On the loop, at each checkpoint: a peer awaits only this leader's install while it is a
+	// member; a replica that no longer leads forgets every one (no release names a peer between
+	// two flights).
+	void forget_awaiting() {
+		if (!loop_->scheduler().runs_here() && task::current() != loop_->scheduler()) { return; }
+		const auto s = loop_->driver().state(id_);
+		std::lock_guard lock(mu_);
+		if (!sources_ || sources_->awaiting.empty()) { return; }
+		if (!s || s->role != cs::Role::Leader) {
+			sources_->awaiting.clear();
+		} else if (!s->membership.members.empty()) {
+			std::erase_if(sources_->awaiting, [&](cs::NodeId peer) {
+				return std::none_of(s->membership.members.begin(), s->membership.members.end(), [&](const cs::Member& m) { return m.node == peer || m.incarnation == peer; });
+			});
+		}
+		trim_sources();
+	}
+	// A flight that can explain a Busy refusal: one in progress, or one released since `seen`.
+	bool flight_since(std::uint64_t seen) const {
+		std::lock_guard lock(mu_);
+		return releases_ != seen || (sources_ && !sources_->needed.empty());
+	}
+	// Resumes once a flight was released after `seen`, or the group fenced or tore down.
+	struct release_awaiter {
+		group* self;
+		std::uint64_t seen;
+		bool done() const { return self->releases_ != seen || self->closed_ || self->fenced_.load(); }
+		bool await_ready() const {
+			std::lock_guard lock(self->mu_);
+			return done();
+		}
+		bool await_suspend(std::coroutine_handle<> h) {
+			std::lock_guard lock(self->mu_);
+			if (done()) { return false; }
+			self->publication_ = h;
+			self->publication_home_ = task::current();
+			return true;
+		}
+		void await_resume() const noexcept {}
+	};
+	release_awaiter release_since(std::uint64_t seen) { return release_awaiter{this, seen}; }
+	void wake_publication() {
+		std::coroutine_handle<> h;
+		task::scheduler_ref home;
+		{
+			std::lock_guard lock(mu_);
+			h = std::exchange(publication_, nullptr);
+			home = publication_home_;
+		}
+		if (h) { home.post(h); }
 	}
 	// On the chore: the flight failed (the learner may have refused its bytes), so the pin is read
 	// again; bytes that changed since it was made are this source's damage, and it hands off.
@@ -1512,6 +1681,7 @@ private:
 			dropped = queue_.take(running_);
 		}
 		fail_waiters(std::make_exception_ptr(cs::fenced(reason)));
+		wake_publication();
 		while (!dropped.empty()) { drop(dropped.pop_front(), false); }
 	}
 	// Every `quorum` waiter, linked now or later, resumes with the first such error.
@@ -1592,7 +1762,8 @@ private:
 	task::task<void> reinstall_once() {
 		const task_scope counted{this};
 		try {
-			(void)co_await loop_->driver().reinstall(id_);
+			const auto done = co_await loop_->driver().reinstall(id_);
+			epoch_.store(done.epoch);  // later checkpoints name it: consensus refuses an older epoch's
 		} catch (const cs::rejected& r) {
 			if (r.reason == cs::RejectReason::LeaderMustTransfer) { hand_leadership_away(); }
 		} catch (...) {}
@@ -1709,8 +1880,13 @@ private:
 	bool repairing_ = false;                             // the loop's: a reinstall call in flight
 	std::uint8_t handoffs_ = 0;                          // the loop's: a damaged leader's hand-offs tried
 	unsigned tasks_ = 0;                                  // install tasks in flight, under mu_
+	bool pinning_ = false;                                // a pinning checkpoint started, under mu_
+	std::uint64_t releases_ = 0;                          // flights released, under mu_
+	std::coroutine_handle<> publication_;                 // a Busy publication waiting for a release, under mu_
+	task::scheduler_ref publication_home_;
 	mutable std::atomic<unsigned> serving_{0};            // serves reading the directory
 	std::atomic<std::uint64_t> installs_{0};
+	std::atomic<std::uint64_t> epoch_{0};  // consensus's application epoch: each repair advances it
 	std::atomic<cs::Index> applied_{0}, readable_at_{0}, published_{0}, installed_at_{0};  // published_: the last bundle's P_b
 };
 

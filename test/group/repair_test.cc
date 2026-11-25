@@ -345,9 +345,12 @@ void refusal(std::uint64_t seed) {
 	w.retire(lost);
 	w.isolated.clear();
 	repaired(w, x, base);
+	// Each write is applied at its placement: by x after its install, or, below the install's
+	// boundary (a bundle the source pinned past them, journal-binding.md D5), by the source.
 	for (const auto& c : acked) {
-		auto it = x.log.find(c.at.index);
-		check(it != x.log.end() && it->second.command == c.command, "a write committed while damaged is applied at its placement " + std::to_string(c.at.index));
+		const auto& by = c.at.index <= x.p->g->installed_at() ? y.log : x.log;
+		auto it = by.find(c.at.index);
+		check(it != by.end() && it->second.command == c.command, "a write committed while damaged is applied at its placement " + std::to_string(c.at.index));
 	}
 	x.app.before_write = {};
 	std::printf("repair: refusal, seed %llu: %zu writes committed on a damaged replica's log (the first damaged it), consensus applied %llu over the replica's %llu, every waiter refused; node %llu lost, the writes survive\n",

@@ -45,18 +45,35 @@ MUTANTS = {
         "\t\tio_->remove(path(name));\n\t\t(void)at;\n")],
     # The bundle publishes before the files it names are synced (D16 steps 2 and 4).
     "publish-before-sync": [
-        (GROUP, "\t\tfiles_.sync(b.files);\n\t\tix_->commit();\n", "\t\tix_->commit();\n"),
+        (GROUP, "\t\tfiles_.sync(b.files);\n\t\tif (!pin_wanted(b)) {\n", "\t\tif (!pin_wanted(b)) {\n"),
         (GROUP, "\t\t\tfiles_.unlink_retired(unlink_through(b.position));\n",
                 "\t\t\tfiles_.sync(b.files);\n\t\t\tfiles_.unlink_retired(unlink_through(b.position));\n")],
     # The capture runs inside an entry's apply, between its file effects and its strata write.
     "capture-mid-entry": [
         (GROUP, "\t\t\tphase_ = phase::strata;\n\t\t}\n", "\t\t\tphase_ = phase::strata;\n\t\t\treturn step::more;\n\t\t}\n"),
-        (GROUP, "co_await on_chore_step(capture_work(b));", "co_await on_chore_step(capture_work(b), true);")],
+        (GROUP, "co_await on_chore_step(checkpoint_work(b, made));", "co_await on_chore_step(checkpoint_work(b, made), true);")],
     # File effects run only when strata accepts: replay, where strata skips, loses them (D3).
     "effects-gated": [
         (GROUP, "\t\t\t\tapp_->effects(state_, view, files_);\n", "\t\t\t\t;\n"),
         (GROUP, "\t\tapp_->advance(state_, view);\n",
                 "\t\tif (v.result == verdict::accepted) { app_->effects(state_, view, files_); }\n\t\tapp_->advance(state_, view);\n")],
+    # The leader pins strata at its head, past the bundle (journal-binding.md D5): the learner's
+    # check_stage refuses every flight and it never installs (--target=group_install_bundle_test restart).
+    "pin-at-head": [
+        (GROUP, "\t\tif (!p && ix_->applied().index != recovered_.position) {\n", "\t\tif (false) {\n"),
+        ("include/strata/group/install.hh", "\t\tif (ix.applied().index != b.position) { throw std::logic_error(",
+         "\t\tif (ix.applied().index < b.position) { throw std::logic_error(")],
+    # A publication refused Busy during a flight is not retried (journal-binding.md D5, review
+    # D-1): the pinning checkpoint lands in each failing flight's Sending window and the learner
+    # never installs (--target=group_install_bundle_test busy).
+    "no-busy-retry": [(GROUP,
+        "\t\t\tif (busy && flight_since(seen)) { co_await release_since(seen); }\n\t\t\tif (!busy || !flight_since(seen) || fenced_.load() || torn_down()) {\n",
+        "\t\t\t{\n")],
+    # A repaired replica's checkpoints name the epoch before its repair: consensus refuses each,
+    # and once it leads, its pinning checkpoints never publish (--target=group_sim_test corruption).
+    "repair-epoch-dropped": [(GROUP,
+        "\t\t\tepoch_.store(done.epoch);",
+        "\t\t\t(void)done;")],
     # The application state moves only when strata accepts (D3, N13).
     "appstate-gated": [(GROUP,
         "\t\tapp_->advance(state_, view);\n",
@@ -72,7 +89,7 @@ MUTANTS = {
         "\t\t\tif (false) {\n")],
     # strata commits after the bundle publishes, so a crash between leaves P_b > P_H (D16 step 3).
     "commit-after-publish": [
-        (GROUP, "\t\tfiles_.sync(b.files);\n\t\tix_->commit();\n", "\t\tfiles_.sync(b.files);\n"),
+        (GROUP, "\t\t\tix_->commit();\n\t\t\treturn;\n\t\t}\n", "\t\t\treturn;\n\t\t}\n"),
         (GROUP, "\t\t\tfiles_.unlink_retired(unlink_through(b.position));\n",
                 "\t\t\tix_->commit();\n\t\t\tfiles_.unlink_retired(unlink_through(b.position));\n")],
     # A file effect appends at the file's size: a retry after a partial push writes past it (D3).
@@ -81,8 +98,8 @@ MUTANTS = {
         "\t\tfor (std::size_t done = 0; done < bytes.size();) { done += f->write_at(f->size(), bytes.substr(done)); }\n")],
     # A failed checkpoint sync is retried and the bundle published (D16 step 2's sync-retry).
     "sync-retry": [(GROUP,
-        "\t\tfiles_.sync(b.files);\n\t\tix_->commit();\n",
-        "\t\ttry { files_.sync(b.files); } catch (...) { files_.sync(b.files); }\n\t\tix_->commit();\n")],
+        "\t\tfiles_.sync(b.files);\n\t\tif (!pin_wanted(b)) {\n",
+        "\t\ttry { files_.sync(b.files); } catch (...) { files_.sync(b.files); }\n\t\tif (!pin_wanted(b)) {\n")],
     # Recovery takes a sealed file at its length without its CRC32C: a damaged rotated volume
     # recovers silently (N4; --target=group_file_set_test).
     "sealed-unchecked": [(FILES,
@@ -94,7 +111,7 @@ MUTANTS = {
         "")],
     # A checkpoint that can never get its admission waits for it (hunt: default limits).
     "admission-waits": [(GROUP,
-        "\t\tif (log_bound_ + cap > replacement_pool_) {\n",
+        "\t\t\tif (log_bound_ + out.bytes.size() > replacement_pool_) {\n",
         "\t\tif (false) {\n")],
     # `quorum` answers at ProposalPlaced, before apply (A3).
     "quorum-at-placement": [(GROUP,
@@ -228,8 +245,8 @@ MUTANTS = {
         "\t\t\tout.emplace(fn(*ix_));\n")],
     # The capture runs on the loop, against apply on the chore (A10; TSan).
     "capture-on-loop": [(GROUP,
-        "co_await on_chore_step(capture_work(b));",
-        "while (capture_work(b)() != step::done) {}")],
+        "co_await on_chore_step(checkpoint_work(b, made));",
+        "while (checkpoint_work(b, made)() != step::done) {}")],
     # Checkpoints overlap: consensus refuses the second (Busy), failing a close racing one (A5).
     "checkpoints-overlap": [(GROUP,
         "\t\tauto serial = co_await checkpoints_.lock();\n\t\tco_return co_await checkpoint_held(std::move(token));\n",

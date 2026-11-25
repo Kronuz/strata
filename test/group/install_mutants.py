@@ -66,6 +66,11 @@ MUTANTS = {
     "pin-names-unchecked": ("values", [(INSTALL,
         "\t\t\tif (!install_detail::strata_name(f.name) || !seen.insert(f.name).second) {",
         "\t\t\tif (!seen.insert(f.name).second) {")]),
+    # The learner accepts a stage whose strata head is past its bundle (journal-binding.md D5,
+    # C7): a restart before its log reaches that head finds the index ahead of the journal.
+    "stage-head-unchecked": ("stage-head", [(INSTALL,
+        "\tif (staged.applied_index != p.base.position) {\n",
+        "\tif (false) {\n")]),
     # The source serves past a file's pinned length.
     "serve-past-length": ("values", [(INSTALL,
         "\tif (!offset || !f || *offset >= f->length) { return std::nullopt; }\n",

@@ -333,38 +333,49 @@ inline install_pin decode_pin(std::string_view bytes) {
 
 // --- the source (the leader) ---------------------------------------------------------------
 
-// Pins strata's checkpoint for bundle `b`, at or past it (strata committed before `b` published),
-// and lists every file with its length and CRC32C: the manifest log holding the generation (its
-// prefix now), its segments, and the set's files to the bundle's lengths. On the chore, between
-// entries. The pin keeps the generation's files until release_pin.
+namespace install_detail {
+// The pin of strata's `generation` for bundle `b`, listed as make_pin lists it, unchecked: the
+// manifest log holding the generation (its prefix now), its segments each checked whole, and the
+// set's files to the bundle's lengths.
 template <class Layout>
-install_pin make_pin(basic_index<Layout>& ix, kronuz::journal::IO& dir, const bundle& b) {
+install_pin list_pin(kronuz::journal::IO& dir, const bundle& b, std::uint64_t generation) {
 	install_pin p;
 	p.base = b;
-	p.generation = ix.checkpoint();
+	p.generation = generation;
+	const auto holder = index_detail::log_holding(dir, p.generation);
+	if (!holder) { throw files::generation_not_retained(p.generation); }
+	auto add = [&](std::vector<install_file>& out, std::string name, std::string path, std::optional<std::uint64_t> length, std::optional<std::uint32_t> crc) {
+		auto f = dir.open_existing(path);
+		install_file e{std::move(name), length.value_or(f->size()), 0};
+		e.crc = crc ? *crc : crc_of(*f, e.length);
+		out.push_back(std::move(e));
+	};
+	const auto log = index_detail::manifest_name(*holder);
+	add(p.strata, log, log, std::nullopt, std::nullopt);
+	// A source ships no segment it would refuse to load: each is checked whole as it is read.
+	for (const auto& [id, s] : basic_index<Layout>::read_generation(dir, p.generation).segments) {
+		const auto name = index_detail::segment_name(id);
+		p.strata.push_back({name, s.size, checked_segment<Layout>(*dir.open_existing(name), s.size, s.footer_crc)});
+	}
+	for (const auto& [name, f] : b.files) { add(p.files, name, std::string(bundle_detail::prefix) + name, f.length, f.crc); }
+	return p;
+}
+}  // namespace install_detail
+
+// Pins strata's checkpoint for bundle `b`, strata at it (journal-binding.md D5: the learner's
+// head is then the boundary its log installs), and lists every file with its length and CRC32C
+// (install_detail::list_pin). On the chore, between entries. The pin keeps the generation's
+// files until release_pin.
+template <class Layout>
+install_pin make_pin(basic_index<Layout>& ix, kronuz::journal::IO& dir, const bundle& b) {
+	const auto generation = ix.checkpoint();
 	try {
-		if (ix.applied().index < b.position) { throw std::logic_error("strata::group: strata is behind the bundle it would pin (P_H < P_b)"); }
-		const auto holder = index_detail::log_holding(dir, p.generation);
-		if (!holder) { throw files::generation_not_retained(p.generation); }
-		auto add = [&](std::vector<install_file>& out, std::string name, std::string path, std::optional<std::uint64_t> length, std::optional<std::uint32_t> crc) {
-			auto f = dir.open_existing(path);
-			install_file e{std::move(name), length.value_or(f->size()), 0};
-			e.crc = crc ? *crc : install_detail::crc_of(*f, e.length);
-			out.push_back(std::move(e));
-		};
-		const auto log = index_detail::manifest_name(*holder);
-		add(p.strata, log, log, std::nullopt, std::nullopt);
-		// A source ships no segment it would refuse to load: each is checked whole as it is read.
-		for (const auto& [id, s] : basic_index<Layout>::read_generation(dir, p.generation).segments) {
-			const auto name = index_detail::segment_name(id);
-			p.strata.push_back({name, s.size, install_detail::checked_segment<Layout>(*dir.open_existing(name), s.size, s.footer_crc)});
-		}
-		for (const auto& [name, f] : b.files) { add(p.files, name, std::string(bundle_detail::prefix) + name, f.length, f.crc); }
+		if (ix.applied().index != b.position) { throw std::logic_error("strata::group: strata is not at the bundle it would pin (P_H != P_b)"); }
+		return install_detail::list_pin<Layout>(dir, b, generation);
 	} catch (...) {
-		ix.release(p.generation);
+		ix.release(generation);
 		throw;
 	}
-	return p;
 }
 template <class Layout>
 void release_pin(basic_index<Layout>& ix, const install_pin& p) {
@@ -595,11 +606,16 @@ inline std::optional<install_pin> staged(kronuz::journal::IO& dir) {
 }
 
 // A complete stage checked as strata will install it, before the learner answers validated: the
-// staged checkpoint's generation reads, and each segment is whole. Throws damage.
+// staged checkpoint's generation reads, its head is the bundle's position (a source that pinned
+// past its bundle fails: install_failed), and each segment is whole (damage).
 template <class Layout>
 void check_stage(kronuz::journal::IO& dir, const install_pin& p) {
 	install_detail::prefixed_io staged_io(dir, install_detail::strata_prefix);
-	for (const auto& [id, s] : basic_index<Layout>::read_generation(staged_io, p.generation).segments) {
+	const auto staged = basic_index<Layout>::read_generation(staged_io, p.generation);
+	if (staged.applied_index != p.base.position) {
+		throw install_failed("strata::group: the staged checkpoint's head " + std::to_string(staged.applied_index) + " is not its bundle's position " + std::to_string(p.base.position));
+	}
+	for (const auto& [id, s] : staged.segments) {
 		const auto name = index_detail::segment_name(id);
 		auto f = install_detail::open_if(staged_io, name);
 		if (!f) { throw corrupt_index("strata::group: a staged segment is missing: " + name); }

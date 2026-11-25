@@ -144,6 +144,13 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(group_install_test test/group/install_test.cc)
   target_link_libraries(group_install_test PRIVATE strata::group)
   add_test(NAME group_install COMMAND group_install_test)
+  # An install lands the learner's index on its bundle (docs/design/journal-binding.md D5, C2).
+  add_executable(group_install_bundle_test test/group/install_bundle_test.cc)
+  target_link_libraries(group_install_bundle_test PRIVATE strata::group)
+  foreach(case restart busy)
+    add_test(NAME group_install_bundle_${case} COMMAND group_install_bundle_test ${case})
+    set_tests_properties(group_install_bundle_${case} PROPERTIES TIMEOUT 600)
+  endforeach()
   # What an idle open group holds, on real directories (A6); frames counted, the frame pool off
   # so a freed frame leaves the heap count (the pool's cache is per thread, not per group).
   add_executable(group_footprint_test test/group/footprint_test.cc)

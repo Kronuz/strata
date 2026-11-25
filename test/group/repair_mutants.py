@@ -82,8 +82,8 @@ MUTANTS = {
     # The pin ships a segment by its CRC32C alone: a source whose segment body rotted behind a
     # valid footer keeps leading, and every learner refuses its bytes (F7).
     "pin-unchecked": ("body", [(INSTALL,
-        "\t\t\tp.strata.push_back({name, s.size, install_detail::checked_segment<Layout>(*dir.open_existing(name), s.size, s.footer_crc)});\n",
-        "\t\t\tp.strata.push_back({name, s.size, install_detail::crc_of(*dir.open_existing(name), s.size)});\n")]),
+        "\t\tp.strata.push_back({name, s.size, checked_segment<Layout>(*dir.open_existing(name), s.size, s.footer_crc)});\n",
+        "\t\tp.strata.push_back({name, s.size, crc_of(*dir.open_existing(name), s.size)});\n")]),
     # A refused flight leaves the source's pin unread: bytes that rotted after the pin keep
     # failing every learner's stage, and the source keeps leading (F7).
     "refusal-unchecked": ("rot", [(GROUP,
@@ -122,8 +122,8 @@ MUTANTS = {
     # A flight's end names its peer still unless it installed or caught up: a leader deposed
     # mid-flight names the peer, and keeps its install state, for good.
     "needed-kept": ("deposed", [(GROUP,
-        "\t\t// is a new flight, which names the peer again.\n\t\t{\n",
-        "\t\t// is a new flight, which names the peer again.\n\t\tif (reason == cs::SnapshotReleaseReason::Installed || reason == cs::SnapshotReleaseReason::CaughtUp) {\n")]),
+        "\t\t// until it installed, caught up or left, or this leader's term ended (D5).\n\t\t{\n",
+        "\t\t// until it installed, caught up or left, or this leader's term ended (D5).\n\t\tif (reason == cs::SnapshotReleaseReason::Installed || reason == cs::SnapshotReleaseReason::CaughtUp) {\n")]),
 }
 
 
