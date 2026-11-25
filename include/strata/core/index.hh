@@ -758,7 +758,7 @@ struct basic_index_options {
 	std::uint64_t reclaim_step = 16 << 20;
 	std::uint64_t reclaim_slice = 64 << 20;
 	std::uint64_t reclaim_cap = 64 << 20;
-	merge_policy policy{.max_runs = segment_policy<Layout>::max_runs};  // the layout's run cap
+	merge_policy policy;
 	// Reordering at merge (docs/design/reordering.md D4): `force_merge` reorders the merges
 	// force_merge() runs, as Lucene's BP reorderer does; `merges` also every merge whose
 	// output holds at least `reorder_min_docs` live documents.
