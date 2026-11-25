@@ -160,7 +160,9 @@ Counts: one criterion done (A7, in conflict with what landed), one covered (A6),
    quests 1, 2 and 5, `detent:consensus-quiescence` and `detent:journal-faultfs`; the
    architect's review of each.
 
-### Obsolete criteria, conflicts, and the decisions they need
+### Obsolete criteria, conflicts, and the decisions they need (all resolved 2026-11-25)
+
+Each decision below is decided; "Rulings (2026-11-25)" records the outcomes.
 
 1. **SYS-8 and A3 (owner).** SYS-8 holds both journal backends until T6 decides between
    them, but the drivers already chose the shared turn log and `group-core` builds on it.
@@ -191,6 +193,27 @@ Counts: one criterion done (A7, in conflict with what landed), one covered (A6),
    `SnapshotChannel` and take D18's third-failure stop; and `detent:consensus-transport` is
    dropped pending its re-plan, while `detent:consensus-quiescence`,
    `detent:detent-on-drivers` and `consensus-rpc-lane` still order after its id.
+
+### Rulings (2026-11-25)
+
+1. **SYS-8 (D125, owner): (a).** The shared turn log is the journal backend. T6 (fsyncs per
+   second at 1,000 groups) is a measurement row after the first release, on the gate VM,
+   macOS and FreeBSD, for that backend alone. Removing the per-group backend is Detent's.
+2. **SYS-2 and SYS-3 (D125, owner): (a).** The landed host transport is the design;
+   `peer-transport.md` is superseded by it. Its unbuilt requirements are named items, not
+   blockers to `cluster-gate` unless a T-row needs one: SPKI pins (an additive form after the
+   release) and the N/N-1 wire version range's policy (the hello carries a version range and
+   refuses a peer outside it with `WireVersionRefused`, built in `consensus-rpc-lane`, `consensus:e1f249d`).
+3. **A8's order (D123, lead).** `goal5-audit` (`consensus:ac323fe6e`, `docs/GOAL5-AUDIT.md`)
+   landed before `cluster-gate`, which waits on it.
+4. **R19 (lead).** The 64 KiB unsent-bytes bound is not built and is a named item after the
+   release unless a T-row needs it. The bound the host transport states stands, with T7's
+   control-frame gap as its evidence (`consensus-flow-bench`, `consensus:122564d61`;
+   `docs/gates/track-c-c4.md`, R19 row): every row is at least 16 times under `election_min`
+   (worst 59.0 ms against 1,000 ms); the stated bound itself misses in some rows.
+5. **The quest's text.** A1's `DTC2` clause is the pin move in `detent:detent-on-drivers`;
+   A3 follows the release; A5's D16 points and TLS are built; A6 points at `group-sim`'s
+   `docs/gates/phase-3r.md`.
 
 ## Starting point
 

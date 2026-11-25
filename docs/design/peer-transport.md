@@ -1,4 +1,10 @@
-> Status: PARKED. Revision 2 passed both re-checks with conditions; the landed host transport departs from it, and `track-c.md` "Reconciliation (2026-11-18)" names the owner's decision.
+> Status: SUPERSEDED (D125, 2026-11-25) by the landed host transport: Detent's `async-drivers.md`
+> D10 and `consensus`'s `docs/mechanisms/host-*.md` and `hello.md`. The decisions SYS-2 and SYS-3
+> (a) make the landed bytes the design; this page is kept for its requirements. Unbuilt:
+> 1. SPKI pins (landed: one pinned certificate per node, Detent D97 Q7 (a)); an additive form after the release.
+> 2. The N/N-1 version range as a policy (landed: the hello's version range and `WireVersionRefused`, `consensus:e1f249d`).
+> 3. The 40-byte frame header with 16-byte group ids, the boot identity and D11's window pools (landed: 8-byte ids, a fixed per-group window).
+> 4. The node directory, the admin path and D5's and D18's replica checks: Xapiand's cluster release or Track D, to be filed as quests.
 
 # Peer transport: identity, versions, and flow control
 
