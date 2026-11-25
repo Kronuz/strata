@@ -216,6 +216,43 @@ A3 row decides): dirty after open at `d1000s10`, 1,000 indexes, 6 runs each, mai
 main's `today` over prospect:4430396 (64,086-64,119). It is prospect's change (`fielddict.hh`),
 outside this quest's file set.
 
+### The A3 rows over prospect's transient pool reader
+
+prospect:c99e6be scans the field pool through a reader of its own (`check_fields` caches none), so
+the check keeps nothing after the open, mid-load or not. Both rows, strata:aaf38cd2 (proto) against
+main 49fca948 (base, and its A/A copy), both built over prospect:c99e6be, 1,000 indexes, 5 runs per
+side and arm, strict, macOS x86_64. Judged: proto `eager` (the check at the map, no host loop)
+against base/aa `today` (Xapiand's loop), each measure within the band of the two `today` sides.
+
+| Row | Measure | proto `eager` | base `today` | aa `today` | band of `today` |
+|---|---|---|---|---|---|
+| `d1000s4` (261124-191203-86c495) | open p50 | 891 us | 956 us | 899 us | 552-2,838 |
+| | open CPU | 851 us | 881 us | 850 us | 598-1,588 |
+| | dirty | 30,147 B | 30,167 B | 30,155 B | 30,081-30,441 |
+| | resident | 104,219 B | 104,247 B | 104,235 B | 104,161-104,522 |
+| `d1000s10` (261124-191208-75ce14) | open p50 | 2,225 us | 2,174 us | 2,080 us | 2,017-7,875 |
+| | open CPU | 2,248 us | 2,184 us | 2,095 us | 1,958-3,984 |
+| | dirty | 59,867 B | 59,896 B | 59,892 B | 59,851-59,978 |
+| | resident | 224,051 B | 224,088 B | 224,084 B | 224,047-224,170 |
+
+Honest magnitude: the eager open with the check at the map costs what today's open costs, on both
+rows. Memory is equal to 30 B per index (dirty and resident, inside the A/A), and the open's time
+is inside the noise (the `d1000s10` p50 median is 2-7% over today's two sides, well inside their
+spread, and CPU the same). The check is not free against no check at all: base `eager` (no check) has the same dirty heap
+but 80 KB less resident per index at `d1000s10` (138.8 against 218.8 KB, all file-backed) and
+32 KB less at `d1000s4`: the pool pages the check reads, which `today` pays through Xapiand's loop
+too. With the
+transient reader `today` itself falls 4.2 KB per index at `d1000s10` (64,111 B to 59,896 B dirty,
+against jobs 261124-145139-a2c903 and its base). `lazy` is unchanged by the move (15.7 KB dirty
+after open at `d1000s10`, equal on all three sides). Identity (`d1000s4` hash 1e688dacf0ef51b0,
+`d1000s10` ee3e4c737f1ce5d0) is the same on every arm and side; the corrupt-fixture refusals are
+rerun in 261124-193029-58f381.
+
+Void as evidence: the d1000s4 pass at strata:239d51e4 (261124-145136-a057fa) and the 261124-190110-6a800d
+and 261124-190112-00d680 rows ran binaries built before prospect:c99e6be (the last two without a build
+step: their row.log header names prospect:4430396), and 261124-190127-e6a947 (identity) ran without a build
+step. Only the rows above and 261124-193029-58f381 count.
+
 ## Recommendation
 
 1. Drop lazy segments for Xapiand's open as a memory or latency quest. On the request path the
