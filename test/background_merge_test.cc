@@ -209,6 +209,54 @@ static void carry_over(std::size_t threads) {
 	(void)ix.check();
 }
 
+// Sorted runs (D9): segments whose key ranges overlap no other's stay out of the tiers, so a
+// sequential load merges nothing, before and after a reopen; a segment reaching across the
+// runs makes them merge by size again. The contents are a tiered twin's throughout.
+static void sorted_runs(std::size_t threads) {
+	background bg(threads);
+	fl::filesystem fs, twin_fs;
+	fl::io io(fs), twin_io(twin_fs);
+	auto o = bg.options();
+	o.policy.run_bytes = 1;
+	auto ix = kv_index::create(io, o, uuid);
+	auto twin = kv_index::create(twin_io, bg.options(false), uuid);
+	const auto key = [](int i) {
+		char b[16];
+		std::snprintf(b, sizeof b, "S%06d", i);
+		return std::string(b);
+	};
+	const auto put = [&](int i, const char* body) {
+		for (auto* x : {&ix, &twin}) { CHECK(x->apply(tx({replace(key(i), body)}), {}).result == verdict::accepted); }
+	};
+	const auto settle = [&] {
+		for (auto* x : {&ix, &twin}) {
+			x->refresh();
+			x->maybe_merge();
+			x->wait_merges();
+		}
+		bg.run();
+		ix.wait_merges();
+	};
+	for (int s = 0; s < 6; ++s) {
+		for (int d = 0; d < 4; ++d) { put(s * 10 + d, "body"); }
+		settle();
+	}
+	CHECK(ix.segments().size() == 6);  // six disjoint runs over a budget of two: none merges
+	CHECK(twin.segments().size() < 6);
+	CHECK(contents(ix) == contents(twin));
+	ix.commit();
+	ix.close();
+	ix = kv_index::open(io, o);
+	settle();
+	CHECK(ix.segments().size() == 6);  // reopened, unmapped: still runs
+	put(2, "again");  // a segment reaching across every run: none is settled now
+	put(52, "again");
+	settle();
+	CHECK(ix.segments().size() < 7);
+	CHECK(contents(ix) == contents(twin));
+	(void)ix.check();
+}
+
 // A merge takes its output's id when scheduled; a flush that publishes while it runs takes
 // a higher one. The output goes in id order, so the next commit's manifest lists the
 // segments in increasing id order and reopens.
@@ -773,6 +821,7 @@ int main() {
 		const int before = failures;
 		carry_over(threads);
 		id_order(threads);
+		sorted_runs(threads);
 		for (std::uint64_t seed = 1; seed <= 6; ++seed) { random_schedules(threads, seed); }
 		close_while_merging(threads);
 		rate_limit(threads);

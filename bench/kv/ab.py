@@ -43,6 +43,9 @@ def ab_sets() -> dict[str, list[dict[str, Any]]]:
     s["wbuf"] += [dict(r, mb=kv.two_x_mb(r["value"])) for r in s["wbuf"] if r["w"] in ("fillrandom", "readrandom", "ycsb_a")]
     s["wbufw"] = [r for r in s["wbuf"] if r["mb"] != kv.FITS_MB]  # the rows that flush under memory pressure
     s["wbufrr"] = [r for r in s["wbufw"] if r["w"] == "readrandom"]  # point reads after a pressure-flushed load
+    # Sorted runs (D9): the sequential fills it moves, and a random fill and a point read it must not.
+    s["runs"] = [r for r in s["tenx1"] + s["twox1"] if r["w"] in ("fillseq", "fillrandom") and r["value"] == 100]
+    s["runs"] += [r for r in s["tenx1"] if r["w"] == "readrandom"]
     return s
 
 
@@ -115,9 +118,9 @@ def cmd_report(out: Path) -> None:
         groups.setdefault(kv.key_of(r), {}).setdefault(r["side"], []).append(r)
     mib = 1 << 20
     print(
-        "| set | workload | value | indexes | A ops/s | B ops/s | B/A [95% CI] | direction | p50 µs A/B | p99 µs A/B | CPU µs/op A/B | peak RSS MiB A/B | disk MiB A/B | n |"
+        "| set | workload | value | indexes | A ops/s | B ops/s | B/A [95% CI] | direction | p50 µs A/B | p99 µs A/B | CPU µs/op A/B | peak RSS MiB A/B | disk MiB A/B | write amp A/B | n |"
     )
-    print("|" + "---|" * 14)
+    print("|" + "---|" * 15)
     for k, g in groups.items():
         if "a" not in g or "b" not in g:
             continue
@@ -127,7 +130,7 @@ def cmd_report(out: Path) -> None:
         print(
             f"| {k[0]} | {k[1]} | {k[2]} | {k[7]} | {a['ops']:,.0f} | {b['ops']:,.0f} | {ratio:.3f} [{lo:.3f}, {hi:.3f}] | {d} | "
             f"{a['p50']:.2f}/{b['p50']:.2f} | {a['p99']:.2f}/{b['p99']:.2f} | {a['cpu']:.2f}/{b['cpu']:.2f} | "
-            f"{a['peak'] / mib:.0f}/{b['peak'] / mib:.0f} | {a['disk'] / mib:.1f}/{b['disk'] / mib:.1f} | {a['n']}/{b['n']} |"
+            f"{a['peak'] / mib:.0f}/{b['peak'] / mib:.0f} | {a['disk'] / mib:.1f}/{b['disk'] / mib:.1f} | {a['wamp']:.2f}/{b['wamp']:.2f} | {a['n']}/{b['n']} |"
         )
     print()
     print("Phase times (median seconds per run, A/B):")

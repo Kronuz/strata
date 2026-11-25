@@ -35,6 +35,7 @@ struct merge_policy {
 		// (no keys, or a caller that does not say) are taken to overlap every other.
 		std::string first_key, last_key;
 		bool ranged = false;
+		bool overlapped = false;  // overlaps a segment outside the candidates (one being merged)
 		candidate() = default;
 		candidate(std::uint64_t id_, std::uint64_t bytes_, std::uint64_t docs_, std::uint64_t deleted_) : id(id_), bytes(bytes_), docs(docs_), deleted(deleted_) {}
 		candidate& range(std::string_view first, std::string_view last) {
@@ -194,7 +195,8 @@ struct merge_policy {
 
 private:
 	// Which segments are settled runs: at least run_bytes live, and a key range that
-	// overlaps no other segment's. Any unranged segment overlaps all, so none settles.
+	// overlaps no other segment's, candidate or not. Any unranged segment overlaps all, so
+	// none settles.
 	std::vector<bool> settled(const std::vector<candidate>& segs) const {
 		std::vector<bool> run(segs.size(), false);
 		std::vector<std::size_t> order;
@@ -210,7 +212,7 @@ private:
 			const auto& s = segs[order[k]];
 			const bool clear_before = !reach || *reach < s.first_key;
 			const bool clear_after = k + 1 == order.size() || s.last_key < segs[order[k + 1]].first_key;
-			run[order[k]] = clear_before && clear_after && s.live_bytes() >= double(run_bytes);
+			run[order[k]] = clear_before && clear_after && !s.overlapped && s.live_bytes() >= double(run_bytes);
 			if (!reach || *reach < s.last_key) { reach = &s.last_key; }
 		}
 		return run;

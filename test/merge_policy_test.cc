@@ -377,6 +377,10 @@ int main() {
 			for (auto id : m) { small += id >= 10; CHECK(id >= 10); }
 		}
 		CHECK(small > 0);  // disjoint segments under run_bytes still merge
+		// A run meeting a segment outside the candidates (one being merged) is no run.
+		segs.resize(4);
+		for (auto& s : segs) { s.overlapped = true; }
+		CHECK(!p.find_merges(segs).empty());
 	}
 	std::printf("merge_policy: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
