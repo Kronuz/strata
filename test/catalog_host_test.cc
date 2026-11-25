@@ -860,6 +860,7 @@ void close_meets_no_finished_merge() {
 	w.iopts.background = &w.exec;
 	w.iopts.policy.segments_per_tier = 2;
 	w.iopts.policy.floor_bytes = 1;
+	w.iopts.policy.max_runs = 0;  // ordered keys would make runs: the tiers alone, as these tests count
 	strata::rate_limiter rate(0);
 	w.iopts.rate = &rate;
 	w.make_catalog({});
@@ -892,6 +893,7 @@ void warm_close_after_write(bool eager) {
 	w.iopts.background = &w.exec;
 	w.iopts.policy.segments_per_tier = 2;
 	w.iopts.policy.floor_bytes = 1;
+	w.iopts.policy.max_runs = 0;  // ordered keys would make runs: the tiers alone, as these tests count
 	strata::rate_limiter rate(0);
 	w.iopts.rate = &rate;
 	w.make_catalog({});
@@ -1006,6 +1008,7 @@ void check_in_before_demote() {
 	w.iopts.background = &w.exec;  // merge jobs are posted to the executor and run at its next run()
 	w.iopts.policy.segments_per_tier = 2;
 	w.iopts.policy.floor_bytes = 1;
+	w.iopts.policy.max_runs = 0;  // ordered keys would make runs: the tiers alone, as these tests count
 	strata::rate_limiter rate(0);
 	w.iopts.rate = &rate;
 	w.make_catalog({});

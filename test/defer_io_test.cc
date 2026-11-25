@@ -335,6 +335,7 @@ void merge_publication_owed(bool defer) {
 	o.readers = &reg;
 	o.policy.segments_per_tier = 2;
 	o.policy.floor_bytes = 1;
+	o.policy.max_runs = 0;  // ordered keys would make runs: the tiers alone, as these tests count
 	auto ix = kv_index::create(io, o, uuid_of("merge-owed"));
 	for (int s = 0; s < 4; ++s) {
 		for (int i = 0; i < 8; ++i) { CHECK(accepted(ix.apply(tx({replace(key_of(std::size_t(s * 8 + i)), "v" + std::to_string(s))}), {}))); }
@@ -527,6 +528,7 @@ void chore_waits_on_merge_chore(unsigned threads, unsigned reserve, unsigned wid
 	o.background = &ex;
 	o.policy.segments_per_tier = 2;
 	o.policy.floor_bytes = 1;
+	o.policy.max_runs = 0;  // ordered keys would make runs: the tiers alone, as these tests count
 	auto ix = kv_index::create(io, o, uuid_of("chore-wait"));
 	for (int s = 0; s < 4; ++s) {
 		for (int i = 0; i < 8; ++i) { CHECK(accepted(ix.apply(tx({replace(key_of(std::size_t(s * 8 + i)), "v" + std::to_string(s))}), {}))); }
