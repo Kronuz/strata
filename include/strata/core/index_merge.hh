@@ -57,40 +57,11 @@ void basic_index<Layout>::run_merges(Find find, bool wait, bool forced) {
 	if (wait) { publish_merges(true, false); }
 	for (;;) {
 		std::vector<merge_policy::candidate> c;
-		// Key ranges let the policy settle disjoint runs (D9), so each candidate is a map point,
-		// as in schedule(). Segments outside the candidates (merging, damaged) still hold keys:
-		// a candidate meeting one is no run, and a damaged one's unknown range meets every one.
-		std::vector<std::pair<std::string_view, std::string_view>> busy;
-		bool busy_unknown = false;
 		for (const auto& s : segs_) {
-			const keys_plugin::reader* k = nullptr;
-			if constexpr (segment::template contains<keys_plugin>()) {
-				if (!merging(*s) && !s->damaged) {
-					try {
-						(void)s->seg();
-					} catch (const corrupt_segment&) {
-						s->damaged = true;
-					} catch (const std::system_error& e) {
-						throw map_failure(e.code(), e.what());
-					}
-				}
-				if (s->bodied()) { k = &s->mapped().template get<keys_plugin>(); }
-			}
-			if (merging(*s) || s->damaged) {
-				if (!k) {
-					busy_unknown = true;
-				} else if (k->key_count()) {
-					busy.emplace_back(k->min_key(), k->max_key());
-				}
-				continue;
-			}
+			if (merging(*s) || s->damaged) { continue; }
 			std::uint64_t deleted = 0;
 			for (auto w : s->deleted) { deleted += std::uint64_t(std::popcount(w)); }
 			c.push_back({s->ref.id, s->ref.size, s->ref.doc_count, deleted});
-			if (k && k->key_count()) { c.back().range(k->min_key(), k->max_key()); }
-		}
-		for (auto& x : c) {
-			x.overlapped = busy_unknown || std::any_of(busy.begin(), busy.end(), [&](const auto& b) { return !(x.last_key < b.first || b.second < x.first_key); });
 		}
 		const auto merges = find(std::move(c));
 		if (merges.empty()) { return; }
