@@ -184,6 +184,7 @@ struct fixture {
 		o.readers = &reg;
 		o.auto_merge = merges;
 		o.policy.segments_per_tier = 2;
+		o.policy.max_runs = 0;  // fill()'s ordered keys would make runs: the tiers alone, as the tests count
 		return o;
 	}
 };

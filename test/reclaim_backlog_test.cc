@@ -99,6 +99,7 @@ static kv_index::options small_steps() {
 	o.reclaim_slice = 0;  // a commit reclaims nothing: only the merges' quota does
 	o.policy.segments_per_tier = 2;
 	o.policy.floor_bytes = 1;
+	o.policy.max_runs = 0;  // ordered keys would make runs: the tiers alone, as these tests count
 	return o;
 }
 

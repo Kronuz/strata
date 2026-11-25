@@ -397,6 +397,7 @@ void merge_sources_on_owner() {
 		o.auto_merge = true;
 		o.policy.segments_per_tier = 2;
 		o.policy.floor_bytes = 1;
+		o.policy.max_runs = 0;  // ordered keys would make runs: the tiers alone, as these tests count
 		{
 			auto ix = kv_index::create(io, o, uuid_of("mergesrc"));
 			for (int s = 0; s < 12 && !ix.merges_pending(); ++s) {

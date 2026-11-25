@@ -462,6 +462,7 @@ void checkout_and_check_in() {
 	o.readers = &reg;
 	o.policy.segments_per_tier = 2;
 	o.policy.floor_bytes = 1;
+	o.policy.max_runs = 0;  // ordered keys would make runs: the tiers alone, as these tests count
 	auto ix = kv_index::create(io, o, uuid_of("checkin"));
 	for (int s = 0; s < 4; ++s) {
 		CHECK(ok(ix.apply(tx({replace("k" + std::to_string(s), "v")}), {})));
@@ -507,6 +508,7 @@ void checkin_fences() {
 	o.background = &ex;
 	o.policy.segments_per_tier = 2;
 	o.policy.floor_bytes = 1;
+	o.policy.max_runs = 0;  // ordered keys would make runs: the tiers alone, as these tests count
 	auto ix = kv_index::create(io, o, uuid_of("fences"));
 	for (int s = 0; s < 4; ++s) {
 		CHECK(ok(ix.apply(tx({replace("k" + std::to_string(s), "v")}), {})));
