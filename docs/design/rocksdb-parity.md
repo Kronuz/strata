@@ -662,6 +662,18 @@ holds every record the damage could have taken lost nothing, so:
    comparison is exact. "Covered" never means "the newest record is a checkpoint": the head can be
    past the newest durable checkpoint (I2 stages it after the head's commit), and on the shared log
    a checkpoint covers only through its `covers`.
+3. **The first open's limit** (journal `docs/mechanisms/lost-bound.md`, Limits, at journal
+   `80e58b5`). Damage past the newest epoch's last kept turn (turn-log-damage rule 5) survived only
+   an open that completed: the open wrote its new epoch's open record before `Host::open` stored the
+   bound or the loss, so after a power cut between the two the damaged epoch was an earlier one, the
+   next open reported no damage, and the records the damage took were gone silently (11 of 17 cuts,
+   jobs 261121-141538-9a63b7 and 261121-141627-fe334f). Detent's `journal-bound-first-open` closes
+   it (journal `870382d`, on main through `fc5c59b`): each driver's recovery hands the host its
+   verdict, and the host commits the bounds and losses before that log writes its open record
+   (`TurnLogGroups::settle`); `lost_bound_test first_open` cuts power at every mutation of the first
+   open and reopens to the uncut open's bounds and losses. strata's journal pin (`9c7e31c`) predates
+   it, so strata's opens of a damaged log rely on it only once the pin moves to journal main at or
+   after `fc5c59b`.
 
 Contract: after damage an index opens only if every record it could have lost is in its head;
 otherwise it fails `log_lost`, never a silent loss.
