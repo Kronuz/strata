@@ -53,4 +53,6 @@ query whose own work is small (a rare term, a selective AND) pays it in full, so
 a query dominated by postings work (a common phrase, 36 to 85 ms) hides it, so the p99 of phrases
 ties. Runs share no term range: keys order the runs, not the words, so every run holds postings
 for every common term and no per-run term bound can skip one on text. Past 10% p99 on every
-`TOP_10` row: see the note's "Why 64" for what would bound it.
+`TOP_10` row, so the cap follows the layout (lead's decision, 2026-11-25; strata `60e6cf55`):
+`segment_policy<Layout>::max_runs` is 64 for `document_layout` and 0, the tiers alone, for a layout
+with postings (`docs/mechanisms/sorted-runs.md`, "Why 64").
