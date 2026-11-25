@@ -1836,18 +1836,22 @@ int main() {
 		CHECK(throws([&] { ix.check(); }));
 	}
 	// With auto_merge, a commit merges what its flush adds, so an index driven only by
-	// commits stays within the policy's tiers.
-	{
+	// commits stays within the policy's tiers and its run cap: each one-key segment is a run
+	// (D9), and past max_runs adjacent runs merge.
+	for (const std::size_t cap : {std::size_t(64), std::size_t(8)}) {
 		fl::filesystem fs;
 		fl::io io(fs);
 		auto o = keyed;
 		o.auto_merge = true;
+		o.policy.max_runs = cap;
 		auto ix = kv_index::create(io, o, uuid);
 		for (int i = 0; i < 40; ++i) {
 			CHECK(ix.apply(tx({add("Q" + std::to_string(i), "body")}), {}).result == verdict::accepted);
 			ix.commit();
 		}
-		CHECK(ix.segments().size() < 20 && contents(ix).size() == 40);
+		// Under the cap all 40 one-key segments stay; at 8 the merged runs' spans take later keys
+		// ("Q10" sorts inside "Q0".."Q7"), whose segments then merge in the tiers.
+		CHECK((cap == 64 ? ix.segments().size() == 40 : ix.segments().size() < 20) && contents(ix).size() == 40);
 	}
 	// Reclamation: a segment whose documents are all deleted leaves at the commit without a
 	// merge, and obsolete files leave reclaim_step bytes at a time, about reclaim_slice per

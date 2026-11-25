@@ -28,6 +28,7 @@ struct merge_policy {
 	// A segment whose key range overlaps no other's is a run and never merges for size,
 	// whatever its size. Past this many runs the smallest key-adjacent ones merge: each
 	// segment costs a query its setup and the index a mapping, whatever its size (D9, N13).
+	// 0 keeps no runs: every segment merges by size, the tiers alone.
 	std::size_t max_runs = 64;
 
 	struct candidate {
@@ -80,7 +81,7 @@ struct merge_policy {
 		std::sort(segs.begin(), segs.end(), [](const candidate& a, const candidate& b) { return a.live_bytes() > b.live_bytes(); });
 		// Segments at half the maximum size or more stay out of the tiers, and so do runs.
 		const auto order = by_first_key(segs);
-		const auto run = settled(segs, order);
+		const auto run = max_runs ? settled(segs, order) : std::vector<bool>(segs.size(), false);
 		std::vector<merge> merges;
 		std::vector<bool> used(segs.size(), false);
 		auto index_of = [&](const candidate* c) { return std::size_t(c - segs.data()); };

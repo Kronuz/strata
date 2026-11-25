@@ -218,7 +218,7 @@ static void sorted_runs(std::size_t threads) {
 	fl::io io(fs), twin_io(twin_fs);
 	auto o = bg.options();
 	auto to = bg.options(false);
-	to.policy.max_runs = 0;  // the twin merges its runs as they come
+	to.policy.max_runs = 0;  // the twin keeps no runs: the tiers alone
 	auto ix = kv_index::create(io, o, uuid);
 	auto twin = kv_index::create(twin_io, to, uuid);
 	const auto key = [](int i) {
