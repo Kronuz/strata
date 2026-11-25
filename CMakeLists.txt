@@ -34,7 +34,7 @@ FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.gi
 # Background work's threaded executor: one WorkPool per node, a WorkGroup per index.
 FetchContent_Declare(workpool GIT_REPOSITORY https://github.com/Kronuz/workpool.git GIT_TAG 640c66bfebccae811377670a265b62f4878ede8a)
 # strata::group's replication: consensus's Driver (docs/DRIVER.md, contract consensus:driver).
-FetchContent_Declare(consensus GIT_REPOSITORY https://github.com/Kronuz/consensus.git GIT_TAG 6e1122cc691ddcdd3b5e527a1d4ac037cd7add57)
+FetchContent_Declare(consensus GIT_REPOSITORY https://github.com/Kronuz/consensus.git GIT_TAG 6d710cb70a021dae5d9a4152f7a9f0178d6df433)
 # fst is termdict's; strata pins it so the dictionary's bytes do not drift.
 FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict compressors fusefilter completion workpool journal consensus)
 
@@ -157,6 +157,14 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(group_file_set_test PRIVATE strata::group)
   add_test(NAME group_file_set COMMAND group_file_set_test)
   # Apply off the loop, close and capture against apply (A5, A10); threads under TSan.
+  # An open over a log that ends before the index's durable head refuses (docs/mechanisms/group-open.md).
+  add_executable(group_journal_behind_test test/group/journal_behind_test.cc)
+  target_link_libraries(group_journal_behind_test PRIVATE strata::group)
+  foreach(case clean-stop crash missing sound)
+    add_test(NAME group_journal_behind_${case} COMMAND group_journal_behind_test ${case})
+    set_tests_properties(group_journal_behind_${case} PROPERTIES TIMEOUT 300)
+  endforeach()
+
   add_executable(group_lifetime_test test/group/lifetime_test.cc)
   target_link_libraries(group_lifetime_test PRIVATE strata::group)
   add_test(NAME group_lifetime COMMAND group_lifetime_test)

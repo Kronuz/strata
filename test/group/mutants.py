@@ -61,6 +61,11 @@ MUTANTS = {
     "appstate-gated": [(GROUP,
         "\t\tapp_->advance(state_, view);\n",
         "\t\tif (v.result == verdict::accepted) { app_->advance(state_, view); }\n")],
+    # Recovery adopts a log that ends before strata's durable head (P_H > E): the replay would
+    # skip new entries at or below P_H (strata-journal-behind). group_journal_behind_test fails.
+    "journal-behind-unchecked": [(GROUP,
+        "\t\tif (log_end && ix_->applied().index > *log_end) {\n",
+        "\t\tif (false && log_end && ix_->applied().index > *log_end) {\n")],
     # The capture skips its mark: strata's position may stay below P_b (D16 step 1).
     "no-mark": [(GROUP,
         "\t\t\tif (ix_->applied() < files::position{at, 1}) {\n",

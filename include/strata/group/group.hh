@@ -261,10 +261,12 @@ public:
 			} else {
 				co_await driver.create(id_, opening_->identity);
 			}
+			// E, the log's end once its tail is recovered: recovery refuses an index past it.
+			const cs::Index log_end = driver.state(id_)->last;
 			co_await on_chore(
-				[this, b = std::move(restored)]() mutable {
+				[this, b = std::move(restored), log_end]() mutable {
 					try {
-						recover(std::move(b));
+						recover(std::move(b), log_end);
 					} catch (...) {
 						fence_local(error_text(std::current_exception()));  // before any range applies
 						throw;
@@ -1147,9 +1149,9 @@ private:
 	// strata at its head P_H, the borrowed index's (its durable head once opened, or past it when
 	// an earlier group over it closed); the file set as the bundle names it; the application state
 	// loaded. Core then delivers every committed entry above P_b: file effects re-run, strata
-	// skips at or below P_H.
-	void recover(std::optional<bundle> restored) {
-		adopt(restored.value_or(bundle{}), restored.has_value());
+	// skips at or below P_H. `log_end` is E, the recovered log's last index.
+	void recover(std::optional<bundle> restored, cs::Index log_end) {
+		adopt(restored.value_or(bundle{}), restored.has_value(), log_end);
 		// A pin outlives its process in strata's manifest; no flight does. Its release commits,
 		// so it waits on the chore, where short of space it stalls and never fails the open.
 		auto stale = held_pins(files_.io());
@@ -1165,7 +1167,13 @@ private:
 	// Recovery's, and an install's activation, which so is what a restore after a crash does.
 	// A replica marked damaged, or whose set fails its checks, adopts the bundle's position only,
 	// damaged, and reinstalls (repair.hh); an activation that replaced its bytes ends the damage.
-	void adopt(const bundle& b, bool restored) {
+	// Recovery's `log_end` (E) refuses first, nothing on disk changed, an index past the log's
+	// end: the log lost entries strata applied (docs/mechanisms/group-open.md).
+	void adopt(const bundle& b, bool restored, std::optional<cs::Index> log_end) {
+		if (log_end && ix_->applied().index > *log_end) {
+			throw group_fenced("strata::group: strata's durable head P_H = " + std::to_string(ix_->applied().index) + " is past the recovered log's end E = " +
+				std::to_string(*log_end) + ": the journal is older than the index");
+		}
 		recovered_ = b;
 		try {
 			if (::strata::group::resume(files_.io(), b, *ix_)) {
@@ -1454,7 +1462,7 @@ private:
 		try {
 			co_await on_chore(
 				[this, &b] {
-					adopt(b, true);
+					adopt(b, true, std::nullopt);  // the image replaces the index: no E to check
 					release_later();
 				},
 				false, true);
