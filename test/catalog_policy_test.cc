@@ -2,18 +2,24 @@
 // the closing policy and the frequency bits. The ghost against a list; the catalog in lock-step with the
 // S3-FIFO model, request by request; each named choice of D6 on a scene of its own; every request-pin row of D4's
 // table setting the frequency for a use. inline_executor: single-threaded, deterministic. Mutants of catalog.hh
-// are run by .scratch/mutants6.py (docs/status/cold-tier-step2.md, item 6).
+// are run by .scratch/mutants6.py (docs/status/cold-tier-step2.md, item 6). The policy alone
+// (catalog_detail::s3fifo) has cases of its own, each runnable by name: `catalog_policy_test fifo_order`.
 #include "catalog_world.hh"
 #include "s3fifo_model.hh"
+#include "strata/core/catalog_s3fifo.hh"
 #include "strata/core/ghost_set.hh"
 
 #include <algorithm>
+#include <cctype>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
 #include <list>
 #include <mutex>
 #include <random>
 #include <thread>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -93,6 +99,197 @@ void ghost_oracle() {
 			CHECK(g.size() == m.size());
 		}
 	}
+}
+
+// --- the policy alone: catalog_detail::s3fifo over a table of links (D6) ----------------------------------
+
+// The slots the policy sees: links it writes, a generation and a closing flag the test sets.
+struct fake_slots {
+	struct row {
+		std::uint32_t prev = nope, next = nope;
+		std::uint8_t q = 0;
+		std::uint64_t gen = 0;
+		bool closing = false;
+	};
+	std::vector<row>* rows;
+	std::uint32_t& prev(std::uint32_t i) const { return (*rows)[i].prev; }
+	std::uint32_t& next(std::uint32_t i) const { return (*rows)[i].next; }
+	std::uint8_t& queue(std::uint32_t i) const { return (*rows)[i].q; }
+	std::uint64_t gen(std::uint32_t i) const { return (*rows)[i].gen; }
+	bool queueable(std::uint32_t i, std::uint64_t g) const { return (*rows)[i].gen == g && !(*rows)[i].closing; }
+};
+using fifo = strata::catalog_detail::s3fifo<fake_slots>;
+using strata::catalog_detail::visit;
+using limits_t = strata::catalog_detail::policy_limits;
+using result_t = strata::catalog_detail::policy_result;
+
+struct fifo_scene {
+	std::vector<fake_slots::row> rows;
+	fifo f;
+	fifo_scene(std::size_t n, std::uint64_t soft_open) : rows(n), f(fake_slots{&rows}) { f.cap(soft_open); }
+	// Queue q's slots, head to tail, by the links; each one's back link checked.
+	std::vector<std::uint32_t> order(unsigned q) const {
+		std::vector<std::uint32_t> out;
+		std::uint32_t head = nope;
+		for (std::uint32_t i = 0; i < rows.size(); ++i) {
+			if (rows[i].q == q && rows[i].prev == nope) { head = i; }
+		}
+		for (std::uint32_t i = head, prev = nope; i != nope; prev = i, i = rows[i].next) {
+			CHECK(rows[i].q == q && rows[i].prev == prev);
+			out.push_back(i);
+			if (out.size() > rows.size()) { break; }
+		}
+		return out;
+	}
+	static std::uint64_t hash(std::uint32_t i) { return 0x9e3779b97f4a7c15ull * (i + 1); }
+};
+using ids = std::vector<std::uint32_t>;
+
+// A slot enters the small FIFO's tail; picks take the head first (FIFO order, by value).
+void fifo_order() {
+	fifo_scene s(8, 100);  // small cap 10: never over here, so the small FIFO is picked only while main is empty
+	for (std::uint32_t i : {3, 1, 4, 0, 5}) { CHECK(!s.f.enqueue(i, fifo_scene::hash(i))); }
+	CHECK((s.order(1) == ids{3, 1, 4, 0, 5}));
+	CHECK(s.f.sizes().small == 5 && s.f.sizes().main == 0);
+	CHECK(!s.f.enqueue(4, fifo_scene::hash(4)) && s.f.sizes().small == 5);  // queued already: stays where it is
+	ids picked;
+	std::uint32_t idx;
+	std::uint64_t gen, round;
+	unsigned q;
+	for (std::uint64_t n = 5; s.f.pick(idx, gen, q, round); --n) {
+		CHECK(q == 1 && round == n && s.rows[idx].q == 0);
+		picked.push_back(idx);
+	}
+	CHECK((picked == ids{3, 1, 4, 0, 5}));
+	CHECK(s.f.sizes().small == 0);
+}
+
+// A key whose hash is in the ghost enters the main FIFO, and the ghost gives the hash up.
+void ghost_to_main() {
+	fifo_scene s(8, 100);  // ghost of 50
+	CHECK(s.f.ghost_capacity() == 50 && s.f.small_cap() == 10);
+	s.f.ghost(fifo_scene::hash(7));
+	CHECK(s.f.sizes().ghost == 1);
+	CHECK(s.f.enqueue(7, fifo_scene::hash(7)));
+	CHECK(s.f.queue_of(7) == 2 && s.f.sizes().ghost == 0);
+	CHECK(!s.f.enqueue(6, fifo_scene::hash(6)) && s.f.queue_of(6) == 1);
+	s.f.unlink(7);
+	CHECK(!s.f.enqueue(7, fifo_scene::hash(7)) && s.f.queue_of(7) == 1);  // taken from the ghost once
+}
+
+// The small FIFO's head is taken while the small FIFO is over its cap or the main one is empty, else the main's.
+void pick_queue() {
+	fifo_scene s(8, 20);  // small cap 2
+	for (std::uint32_t i : {0, 1, 2}) { s.f.enqueue(i, fifo_scene::hash(i)); }
+	s.f.ghost(fifo_scene::hash(5));
+	s.f.enqueue(5, fifo_scene::hash(5));
+	ids picked;
+	std::uint32_t idx;
+	std::uint64_t gen, round;
+	unsigned q;
+	while (s.f.pick(idx, gen, q, round)) { picked.push_back(idx); }
+	CHECK((picked == ids{0, 5, 1, 2}));  // 3 > 2: small; 2 = 2 and main has one: main; main empty: small
+}
+
+// evict: a used candidate goes to the main FIFO's tail, whichever FIFO it came from; an unused one closes.
+void evict_order() {
+	fifo_scene s(8, 20);  // small cap 2
+	for (std::uint32_t i = 0; i < 6; ++i) { s.f.enqueue(i, fifo_scene::hash(i)); }
+	std::vector<bool> used{false, true, false, true, false, false};
+	ids closed, came;
+	result_t r;
+	std::uint64_t posts = 0;
+	auto decide = [&](std::uint32_t idx, unsigned q, result_t&, std::uint64_t& p) {
+		came.push_back(q * 10 + idx);
+		if (used[idx]) {
+			used[idx] = false;
+			return visit::used;
+		}
+		closed.push_back(idx), ++p;
+		return visit::closed;
+	};
+	s.f.evict(limits_t::lifted(), r, posts, [&] { return closed.size() < 3; }, decide);
+	// Small {0..5}, over its cap of 2: 0 closes, 1 goes to main, 2 closes, 3 goes to main; small {4, 5} is at
+	// its cap, so main's head 1, its use spent, closes.
+	CHECK((came == ids{10, 11, 12, 13, 21}));
+	CHECK((closed == ids{0, 2, 1}));
+	CHECK((s.order(1) == ids{4, 5}) && (s.order(2) == ids{3}));
+	CHECK(r.visited == 5 && posts == 3);
+}
+
+// evict: a kept candidate goes back to its own FIFO's tail; a full round of kept ones ends the pass.
+void kept_round() {
+	fifo_scene s(8, 100);
+	for (std::uint32_t i = 0; i < 4; ++i) { s.f.enqueue(i, fifo_scene::hash(i)); }
+	result_t r;
+	std::uint64_t posts = 0;
+	ids came;
+	s.f.evict({50, ~std::uint64_t(0)}, r, posts, [] { return true; }, [&](std::uint32_t idx, unsigned, result_t&, std::uint64_t&) {
+		came.push_back(idx);
+		return visit::kept;
+	});
+	CHECK((came == ids{0, 1, 2, 3, 0}));  // the fifth exceeds the round of four
+	CHECK(r.visited == 5 && posts == 0);
+	CHECK((s.order(1) == ids{1, 2, 3, 0}));
+}
+
+// evict: at most `transitions` posts and `visits` candidates, and none while nothing is over.
+void limits() {
+	for (int which = 0; which < 3; ++which) {
+		fifo_scene s(16, 1000);
+		for (std::uint32_t i = 0; i < 10; ++i) { s.f.enqueue(i, fifo_scene::hash(i)); }
+		limits_t lim = limits_t::lifted();
+		(which == 0 ? lim.transitions : lim.visits) = 3;
+		result_t r;
+		std::uint64_t posts = 0;
+		ids closed;
+		s.f.evict(lim, r, posts, [&] { return which != 2; }, [&](std::uint32_t idx, unsigned, result_t&, std::uint64_t& p) {
+			closed.push_back(idx), ++p;
+			return visit::closed;
+		});
+		const ids want = which == 2 ? ids{} : ids{0, 1, 2};
+		CHECK(closed == want);
+		CHECK(r.visited == want.size() && posts == want.size());
+		CHECK(s.f.sizes().small == 10 - want.size());
+	}
+}
+
+// requeue refuses a slot already queued, one whose generation moved on, and one closing (or free).
+void requeue_refused() {
+	fifo_scene s(8, 100);
+	s.f.enqueue(0, fifo_scene::hash(0));
+	s.f.enqueue(1, fifo_scene::hash(1));
+	std::uint32_t idx;
+	std::uint64_t gen, round;
+	unsigned q;
+	s.rows[0].gen = 5;
+	CHECK(s.f.pick(idx, gen, q, round) && idx == 0 && gen == 5);
+	s.f.requeue(1, 0, 2);  // queued already
+	CHECK((s.order(1) == ids{1}) && s.f.sizes().main == 0);
+	s.rows[0].gen = 6;  // closed and reused since the pick
+	s.f.requeue(0, gen, 1);
+	CHECK(s.f.queue_of(0) == 0 && s.f.sizes().small == 1);
+	s.rows[0].gen = 5, s.rows[0].closing = true;
+	s.f.requeue(0, gen, 1);
+	CHECK(s.f.queue_of(0) == 0 && s.f.sizes().small == 1);
+	s.rows[0].closing = false;
+	s.f.requeue(0, gen, 2);
+	CHECK(s.f.queue_of(0) == 2 && (s.order(2) == ids{0}));
+}
+
+// unlink takes a slot out of the head, the middle or the tail and keeps both directions linked.
+void unlink_any() {
+	fifo_scene s(8, 100);
+	for (std::uint32_t i = 0; i < 5; ++i) { s.f.enqueue(i, fifo_scene::hash(i)); }
+	s.f.unlink(2);
+	CHECK((s.order(1) == ids{0, 1, 3, 4}));
+	s.f.unlink(4);
+	s.f.unlink(0);
+	CHECK((s.order(1) == ids{1, 3}));
+	CHECK(s.rows[4].q == 0 && s.rows[4].prev == nope && s.rows[4].next == nope);
+	s.f.enqueue(6, fifo_scene::hash(6));
+	s.f.unlink(2);  // in no queue: nothing
+	CHECK((s.order(1) == ids{1, 3, 6}) && s.f.sizes().small == 3);
 }
 
 // --- lock-step with the model (S8.1's behavior at a small scale; S8.7) ------------------------------------
@@ -352,7 +549,7 @@ void reopened_behind_the_pass() {
 
 // CR1: a pass holding a slot it picked requeues it while another closer's close ends (after its unlink, before the word's
 // compare-exchange): the slot is freed and must not be left in a queue. Two threads, two hooks: the pass P stops in
-// `clear_freq` ("policy.clear", after its pick), the close chore C stops at "close.end" (after `policy_unlink`).
+// `clear_freq` ("policy.clear", after its pick), the close chore C stops at "close.end" (after `policy_.unlink`).
 struct latch {
 	std::mutex m;
 	std::condition_variable cv;
@@ -740,7 +937,23 @@ void pass_between_a_closes_counts() {
 }  // namespace
 
 int main(int argc, char** argv) {
+	// A case name runs that case of the policy alone (each one a mutant's named test); a number, the requests.
+	const std::pair<const char*, void (*)()> unit[] = {{"fifo_order", fifo_order}, {"ghost_to_main", ghost_to_main}, {"pick_queue", pick_queue},
+		{"evict_order", evict_order}, {"kept_round", kept_round}, {"limits", limits}, {"requeue_refused", requeue_refused}, {"unlink_any", unlink_any}};
+	if (argc > 1 && !std::isdigit(static_cast<unsigned char>(argv[1][0]))) {
+		bool known = false;
+		for (const auto& [name, fn] : unit) {
+			if (std::strcmp(argv[1], name) == 0) { known = true, fn(); }
+		}
+		if (!known) {
+			std::fprintf(stderr, "catalog_policy: no case %s\n", argv[1]);
+			return 2;
+		}
+		std::printf("catalog_policy %s: %s\n", argv[1], failures ? "FAILED" : "ok");
+		return failures ? 1 : 0;
+	}
 	const std::size_t requests = argc > 1 ? std::strtoull(argv[1], nullptr, 10) : 60000;
+	for (const auto& [name, fn] : unit) { fn(); }
 	ghost_oracle();
 	ghost_half();
 	ghost_bytes();

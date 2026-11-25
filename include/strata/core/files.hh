@@ -55,16 +55,19 @@ struct position {
 // An attribute (F20, F13-R43, F13-R51): a segment's state readable without opening it, such
 // as its retention slot's [min, max], or the index's per-replica state. A tag's low bit says
 // what a binary that lacks it does: 1, refuse the index (unsupported_index); 0, a cache it
-// drops at its next commit (PNG's critical and ancillary chunks). No tag is defined yet.
+// drops at its next commit (PNG's critical and ancillary chunks).
 struct attribute {
 	std::uint64_t tag = 0;
 	std::string bytes;
 	bool operator==(const attribute&) const = default;
 };
-// The attribute tags this binary reads, per segment and per index; none yet. A required tag
+// The index's turn-log group (standalone-turn-log D7), required: its host's 16-byte identity,
+// then the group id, 8 bytes big-endian. A build without it never writes a logged index.
+inline constexpr std::uint64_t turn_group_tag = 1;
+// The attribute tags this binary reads, per segment (none yet) and per index. A required tag
 // outside them refuses.
 inline constexpr bool known_attribute(std::uint64_t) noexcept { return false; }
-inline constexpr bool known_index_attribute(std::uint64_t) noexcept { return false; }
+inline constexpr bool known_index_attribute(std::uint64_t tag) noexcept { return tag == turn_group_tag; }
 
 struct segment_ref {
 	std::uint64_t id = 0;  // the local number: its file's name

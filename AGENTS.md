@@ -17,12 +17,14 @@ as history for their results and reasoning; new results go to `docs/perf/`, `doc
 ```
 include/strata/core/ strata::core (header-only): the lifecycle (index, segments, manifests,
                   merges, budgets, files), the keys and stored plugins, the document layout,
-                  executors, faultfs. The only target; prospect links it.
+                  executors. The only target; prospect links it.
 test/             ctest suites: core_kv (the document layout as a key-value store), files,
-                  faultfs, merge_policy, and the boundary checks (core_boundary,
+                  merge_policy, and the boundary checks (core_boundary,
                   core_includes, each with its negative).
 fuzz/             libFuzzer target for the files layer and its corpus.
 bench/            kv/ (the key-value driver against RocksDB, engines/rocksdb-11.11).
+                  Tests and benches run on faultlab's faultfs (`faultlab/faultfs.h`, fetched in
+                  CMakeLists.txt); it is not part of strata.
 tools/            vm/ (the Linux gate VM and the FreeBSD VM).
 cmake/            check_core_includes.cmake (core includes only core and its libraries).
 docs/             PLAN, ARCHITECTURE, REPLICATION, DISTRIBUTION, TESTING, BENCHMARKS;
@@ -58,8 +60,11 @@ in-flight search branches onto prospect.
 
 ## Verify a change
 
+Development builds use CMake and Ninja: every configure in our docs and scripts passes `-G Ninja`, so
+build trees and the ccache stay consistent. CMake itself accepts any generator, for CI and for users.
+
 ```sh
-cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build && ctest --test-dir build
+cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build && ctest --test-dir build
 ```
 
 A core change is not done until prospect's suite passes on it too: configure prospect with

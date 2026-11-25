@@ -1,6 +1,7 @@
 # strata
 
 Part of [Kronuz C++ Libraries](https://github.com/Kronuz/cpp-libraries), a collection of small, reusable C++ libraries.
+Read how strata and prospect fit together in [Store, Then Search](https://kronuz.github.io/blog/strata-prospect/).
 
 [![CI](https://github.com/Kronuz/strata/actions/workflows/ci.yml/badge.svg)](https://github.com/Kronuz/strata/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -20,7 +21,7 @@ and its successor, Elysian.
 ## ✨ Highlights
 
 - **Immutable segments** with crash-safe commits, verified against power loss,
-  disk-full, and media faults (`faultfs`).
+  disk-full, and media faults (faultlab's `faultfs`).
 - **Layouts of plugins.** The core folds over a layout's plugins and never names a
   search type: `keys` (a sorted key dictionary and a fuse filter) and `stored`
   (records in LZ4 or zstd blocks) are the core's own, and prospect adds the
@@ -137,7 +138,7 @@ Not for:
 ## 🛠️ Building and testing
 
 ```sh
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build
 ```

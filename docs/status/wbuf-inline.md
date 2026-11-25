@@ -1,4 +1,4 @@
-> Status: CURRENT (2026-11-04) workstream perf/wbuf-inline, developer; chunk growth (ruling (c)) applied, ready for the lead to land.
+> Status: HISTORY (2026-11-18): landed on main (strata:8f53b6f0, strata:f682a46e, strata:42fd3ba0, strata:e06a5ee2); the branch perf/wbuf-inline is dropped.
 
 # wbuf-inline: the write buffer's records hold their key and stored bytes inline, for every layout
 

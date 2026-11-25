@@ -410,6 +410,9 @@ struct stored_plugin {
 	static void refuse(const part& p, bool configured) { refuse(p.stored, configured); }
 	static std::uint64_t bytes(const part& p) { return p.stored.size(); }
 	static std::uint64_t disk_estimate(const part& p) { return p.stored.size() + p.stored.size() / 16; }
+	// The command codec's hook (standalone-turn-log D3): the record as its length and bytes.
+	static void encode_part(std::string& out, const part& p) { files::detail::put_bytes(out, p.stored); }
+	static void decode_part(files::detail::reader& in, part& p) { p.stored = std::string(in.sized()); }
 	static constexpr format::owner owner = format::owner::stored;
 	static constexpr format::structure_bits structure = format::bit::stored;
 	static constexpr format::structure_bits structures = format::bit::stored;
@@ -773,6 +776,14 @@ public:
 	// the first one that differs.
 	void verify_all() const {
 		(..., verify_all_of<Entries>());
+	}
+	// Every field id a plugin's reader holds lies in a table of `size` fields and none is the key
+	// field (fields-and-keys D7); throws corrupt_segment at the first that does not. A plugin with
+	// no field ids has no check_fields, and costs nothing here.
+	void check_fields(std::uint64_t size, std::optional<std::uint32_t> key) const {
+		(..., [&] {
+			if constexpr (requires { get<Entries>().check_fields(size, key); }) { get<Entries>().check_fields(size, key); }
+		}());
 	}
 	// The plugins' length statistics (L9, the manifest's): the segment's total and a document's;
 	// 0 for a layout whose plugins keep none.

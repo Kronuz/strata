@@ -1,0 +1,18 @@
+{
+ "system": "qdrant",
+ "tenants": 1000,
+ "bar": 0.95,
+ "queries": 200,
+ "tried": [
+  {
+   "knob": {
+    "hnsw_ef": 128
+   },
+   "recall10": 1.0
+  }
+ ],
+ "knob": {
+  "hnsw_ef": 128
+ },
+ "met": true
+}

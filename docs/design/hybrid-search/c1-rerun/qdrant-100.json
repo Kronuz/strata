@@ -1,0 +1,63 @@
+{
+ "system": "qdrant",
+ "tenants": 100,
+ "per_tenant": 1000,
+ "dim": 768,
+ "queries": 1000,
+ "host": "dg-linux",
+ "os": "Linux 6.8.0-149-generic",
+ "cpus": 8,
+ "env": "linux-vm",
+ "in_process": false,
+ "knob": {
+  "hnsw_ef": 128
+ },
+ "disk": {
+  "mb": 368,
+  "files": 107
+ },
+ "start_s": 1.02,
+ "version": "1.20.0",
+ "idle_start": {
+  "rss_mb": 427.836,
+  "anon_mb": 45.902,
+  "cache_mb": 396.922,
+  "cpu_s": 1.115716,
+  "idle_s": 30.0,
+  "idle_cpu_s": 0.1021
+ },
+ "cache_dropped": true,
+ "cold": {
+  "p50": 2.619,
+  "p99": 4.015,
+  "max": 32.242,
+  "n": 1000,
+  "recall10": 1.0,
+  "short": 0
+ },
+ "warm1": {
+  "p50": 2.75,
+  "p99": 5.802,
+  "max": 6.781,
+  "n": 1000,
+  "recall10": 1.0,
+  "short": 0
+ },
+ "warm2": {
+  "p50": 2.587,
+  "p99": 3.919,
+  "max": 4.755,
+  "n": 1000,
+  "recall10": 1.0,
+  "short": 0
+ },
+ "idle_after": {
+  "rss_mb": 433.254,
+  "anon_mb": 47.062,
+  "cache_mb": 389.016,
+  "cpu_s": 6.266416,
+  "idle_s": 30.0,
+  "idle_cpu_s": 0.0606
+ },
+ "resets": 0
+}

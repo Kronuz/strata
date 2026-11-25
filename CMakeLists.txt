@@ -8,11 +8,11 @@ include(FetchContent)
 set(TASK_ASIO OFF CACHE BOOL "" FORCE)
 # Each building block is pinned to the commit its Phase 1 gate numbers were measured at.
 FetchContent_Declare(fst GIT_REPOSITORY https://github.com/Kronuz/fst.git GIT_TAG 7338f564f7c1c6c67e9f0cc8040d68e466592fb3)
-FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG bdafa5f1ca96a2d34b1c5eb0bbb04e4b3ddb88c0)
+FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG 95798a02f68c86f070401329a05c78d326ac2579)
 FetchContent_Declare(hashes GIT_REPOSITORY https://github.com/Kronuz/hashes.git GIT_TAG e3bf5b6167775f26dd14f89f210f687b0253241b)
 FetchContent_Declare(crc32c GIT_REPOSITORY https://github.com/Kronuz/crc32c.git GIT_TAG 0d5460d277170e92f33ffc148746f1a7c03eabe1)
 FetchContent_Declare(termdict GIT_REPOSITORY https://github.com/Kronuz/termdict.git GIT_TAG d7f5954ae84177c1587cc69a16a18d7911ee0501)
-FetchContent_Declare(varint GIT_REPOSITORY https://github.com/Kronuz/varint.git GIT_TAG ac6003e1ca12a2e52f6cf086d8a328d17672a558)
+FetchContent_Declare(varint GIT_REPOSITORY https://github.com/Kronuz/varint.git GIT_TAG efed272ffb834d97e5d7424bb8f2fba5779938d4)
 FetchContent_Declare(residency GIT_REPOSITORY https://github.com/Kronuz/residency.git GIT_TAG a0f7af930a30927cd1fe9c56bde254c29c3ba862)
 # Stored blocks are LZ4 or zstd (format-14-kv D1d), through compressors' one-shot block codecs.
 set(COMPRESSORS_DEFLATE OFF CACHE BOOL "" FORCE)
@@ -23,14 +23,20 @@ FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compre
 set(COMPRESSORS_ZSTD_PINNED ON CACHE BOOL "" FORCE)
 set(COMPRESSORS_LZ4_PINNED ON CACHE BOOL "" FORCE)
 FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG 0665ee0ea6aa8727f7f9bbc2bdbeb6dd2e180435)
-# Index I/O goes through kronuz::journal::IO, from the completion library.
-FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG e49f288fb1438a96d9a21b59cf0eeaa770fc690d)
-# The manifest log's block framing (manifest-log D2): journal/framing.h, shared with the turn log.
-FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.git GIT_TAG 5bbeedc017fcf18f8df9aae0b04d47a26f7165aa)
+# Index I/O goes through kronuz::journal::IO, from the completion library; completion::task, its
+# coroutine seam, is what journal's turn driver runs on (no Asio).
+set(COMPLETION_TASK ON CACHE BOOL "" FORCE)
+set(COMPLETION_ASIO OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG d8b538c6778f0a1b969e42c8428995d1d29d4731)
+# The manifest log's block framing (manifest-log D2), and the turn log, its driver and host that a
+# logged index writes through (standalone-turn-log D1); strata::group runs on the drivers.
+FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.git GIT_TAG 9c7e31cd1c69312b93eb45f3f349d39a81b2e3cb)
 # Background work's threaded executor: one WorkPool per node, a WorkGroup per index.
 FetchContent_Declare(workpool GIT_REPOSITORY https://github.com/Kronuz/workpool.git GIT_TAG 640c66bfebccae811377670a265b62f4878ede8a)
+# strata::group's replication: consensus's Driver (docs/DRIVER.md, contract consensus:driver).
+FetchContent_Declare(consensus GIT_REPOSITORY https://github.com/Kronuz/consensus.git GIT_TAG 6e1122cc691ddcdd3b5e527a1d4ac037cd7add57)
 # fst is termdict's; strata pins it so the dictionary's bytes do not drift.
-FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict compressors fusefilter completion workpool journal)
+FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict compressors fusefilter completion workpool journal consensus)
 
 # strata::core: the lifecycle (index, segments, manifests, merges, checkpoints, budgets, files),
 # the keys and stored sections, and the document layout. Search is prospect
@@ -40,6 +46,18 @@ target_include_directories(strata_core INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/in
 target_compile_features(strata_core INTERFACE cxx_std_20)
 target_link_libraries(strata_core INTERFACE hashes::hashes crc32c::crc32c residency::residency varint::varint termdict::termdict fusefilter::fusefilter compressors::compressors completion::completion journal::journal task::task workpool::workpool)
 add_library(strata::core ALIAS strata_core)
+
+# strata::group (header-only): one replication group per shard on consensus's Driver, with its
+# checkpoint bundle and file set (docs/mechanisms/replication-group.md).
+add_library(strata_group INTERFACE)
+target_link_libraries(strata_group INTERFACE strata::core consensus::consensus)
+add_library(strata::group ALIAS strata_group)
+
+# strata::placement (header-only): the root authority's records, placement and application on
+# strata::group (docs/mechanisms/placement-root.md).
+add_library(strata_placement INTERFACE)
+target_link_libraries(strata_placement INTERFACE strata::group)
+add_library(strata::placement ALIAS strata_placement)
 
 # Core links none of prospect's libraries, directly or through the libraries it links (fst reaches it
 # through termdict; docset, bitpack, analysis, unicode, snowball are search's alone).
@@ -81,9 +99,18 @@ strata_check_links(strata_core "docset;bitpack;analysis;unicode;snowball")
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   enable_testing()
+  # faultlab's faultfs, the crash model the tests and benches run on (faultlab/faultfs.h); it
+  # reuses the completion target declared above. Every target here links it.
+  FetchContent_Declare(faultlab GIT_REPOSITORY https://github.com/Kronuz/faultlab.git GIT_TAG e3fcfe3ca197d40e53371dffee1497708fc438b5)
+  FetchContent_MakeAvailable(faultlab)
+  link_libraries(faultlab::faultlab)
   add_executable(fields_test test/fields_test.cc)
   target_link_libraries(fields_test PRIVATE strata::core)
   add_test(NAME fields COMMAND fields_test)
+  # A segment's field ids checked at each map (docs/mechanisms/field-check.md).
+  add_executable(field_check_map_test test/field_check_map_test.cc)
+  target_link_libraries(field_check_map_test PRIVATE strata::core)
+  add_test(NAME field_check_map COMMAND field_check_map_test)
   add_executable(manifest_log_test test/manifest_log_test.cc)
   target_link_libraries(manifest_log_test PRIVATE strata::core)
   target_compile_definitions(manifest_log_test PRIVATE STRATA_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
@@ -91,9 +118,61 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(merge_policy_test test/merge_policy_test.cc)
   target_link_libraries(merge_policy_test PRIVATE strata::core)
   add_test(NAME merge_policy COMMAND merge_policy_test)
-  add_executable(faultfs_test test/faultfs_test.cc)
-  target_link_libraries(faultfs_test PRIVATE strata::core)
-  add_test(NAME faultfs COMMAND faultfs_test)
+  # strata::group's lone voter crashed at every point (quest group-core A1).
+  add_executable(group_lone_voter_test test/group/lone_voter_test.cc)
+  target_link_libraries(group_lone_voter_test PRIVATE strata::group)
+  add_test(NAME group_crash_lone_voter COMMAND group_lone_voter_test)
+  set_tests_properties(group_crash_lone_voter PROPERTIES TIMEOUT 1500)
+  # Three and five voters in process: one crash per schedule, space short on two replicas (A2).
+  add_executable(group_voters_test test/group/voters_test.cc)
+  target_link_libraries(group_voters_test PRIVATE strata::group)
+  add_test(NAME group_voters COMMAND group_voters_test)
+  set_tests_properties(group_voters PROPERTIES TIMEOUT 1500)
+  # Two data voters and a witness: any one member lost, the log carried by the witness (group-heal A4).
+  add_executable(group_witness_test test/group/witness_test.cc)
+  target_link_libraries(group_witness_test PRIVATE strata::group)
+  add_test(NAME group_witness COMMAND group_witness_test)
+  # A damaged segment, manifest or set file fences its replica, which reinstalls (group-heal A3).
+  add_executable(group_repair_test test/group/repair_test.cc)
+  target_link_libraries(group_repair_test PRIVATE strata::group)
+  add_test(NAME group_repair COMMAND group_repair_test)
+  set_tests_properties(group_repair PROPERTIES TIMEOUT 1500)
+  # A damaged segment found at open: eager_segments maps every segment there.
+  add_test(NAME group_repair_eager COMMAND group_repair_test segment)
+  set_tests_properties(group_repair_eager PROPERTIES TIMEOUT 300 ENVIRONMENT STRATA_EAGER_SEGMENTS=1)
+  # A learner installs a pinned pack and file set through the Driver's install surface (group-heal A1).
+  add_executable(group_install_test test/group/install_test.cc)
+  target_link_libraries(group_install_test PRIVATE strata::group)
+  add_test(NAME group_install COMMAND group_install_test)
+  # What an idle open group holds, on real directories (A6); frames counted, the frame pool off
+  # so a freed frame leaves the heap count (the pool's cache is per thread, not per group).
+  add_executable(group_footprint_test test/group/footprint_test.cc)
+  find_package(Backtrace)  # libexecinfo on FreeBSD, libc elsewhere
+  target_link_libraries(group_footprint_test PRIVATE strata::group ${Backtrace_LIBRARIES})
+  target_compile_definitions(group_footprint_test PRIVATE TASK_COUNT_FRAMES=1 TASK_FRAME_POOL=0)
+  add_test(NAME group_footprint COMMAND group_footprint_test)
+  set_tests_properties(group_footprint PROPERTIES SKIP_RETURN_CODE 77)  # a sanitizer owns operator new
+  # The file set beside strata in one directory, each leaving the other's names alone (A6, D111).
+  add_executable(group_file_set_test test/group/file_set_test.cc)
+  target_link_libraries(group_file_set_test PRIVATE strata::group)
+  add_test(NAME group_file_set COMMAND group_file_set_test)
+  # Apply off the loop, close and capture against apply (A5, A10); threads under TSan.
+  add_executable(group_lifetime_test test/group/lifetime_test.cc)
+  target_link_libraries(group_lifetime_test PRIVATE strata::group)
+  add_test(NAME group_lifetime COMMAND group_lifetime_test)
+  set_tests_properties(group_lifetime PROPERTIES TIMEOUT 1500)
+  add_test(NAME group_lifetime_reopen_turn COMMAND group_lifetime_test reopen-turn)
+  # A group on its catalog slot's index: the borrow, close_payload outside the lease, and each
+  # close and failed open through the catalog (D169), one test per case.
+  add_executable(group_catalog_test test/group/group_catalog_test.cc)
+  target_link_libraries(group_catalog_test PRIVATE strata::group)
+  add_test(NAME group_catalog COMMAND group_catalog_test borrow)
+  set_tests_properties(group_catalog PROPERTIES TIMEOUT 300)
+  foreach(case failed-open attach sweep bound replace bare-commit-crash pin-check)
+    string(REPLACE "-" "_" name "${case}")
+    add_test(NAME group_catalog_${name} COMMAND group_catalog_test ${case})
+    set_tests_properties(group_catalog_${name} PROPERTIES TIMEOUT 300)
+  endforeach()
   add_executable(core_kv_test test/core_kv_test.cc)
   target_link_libraries(core_kv_test PRIVATE strata::core)
   add_test(NAME core_kv COMMAND core_kv_test)
@@ -127,7 +206,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(scan_test PRIVATE strata::core)
   add_test(NAME scan COMMAND scan_test)
   add_test(NAME scan_mapped COMMAND scan_test)
-  set_tests_properties(scan_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  set_tests_properties(scan_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1")
   # Format 14's step 1 (docs/design/format-14-kv.md): fixtures, index_sort, key order, blocks,
   # codecs, and key-ordered merges; and gets that allocate nothing (an allocation-counting build).
   add_executable(key_index_test test/key_index_test.cc)
@@ -144,7 +223,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(get_alloc_test PRIVATE strata::core)
   add_test(NAME get_alloc COMMAND get_alloc_test)
   add_test(NAME get_alloc_mapped COMMAND get_alloc_test)
-  set_tests_properties(get_alloc_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  set_tests_properties(get_alloc_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1")
   # The lifecycle on the document layout, as prospect's suites run it on the search layout
   # (docs/status/core-lifecycle-tests.md): media faults, reclamation, the directory, crash and
   # power loss, background merges, and the index's operations. Core headers only.
@@ -159,7 +238,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(reclaim_backlog_test PRIVATE strata::core)
   add_test(NAME reclaim_backlog COMMAND reclaim_backlog_test)
   add_test(NAME reclaim_backlog_mapped COMMAND reclaim_backlog_test)
-  set_tests_properties(reclaim_backlog_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  set_tests_properties(reclaim_backlog_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1")
   # A view held across refresh(): faultfs aborts if its file is truncated (shared-reader D7).
   add_test(NAME reclaim_backlog_view COMMAND reclaim_backlog_test view)
   # Reclaim's deletes on the host's executor: posted, failed, drained, closed, crashed.
@@ -167,8 +246,45 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(reclaim_bg_test PRIVATE strata::core)
   add_test(NAME reclaim_bg COMMAND reclaim_bg_test)
   add_test(NAME reclaim_bg_mapped COMMAND reclaim_bg_test)
-  set_tests_properties(reclaim_bg_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  set_tests_properties(reclaim_bg_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1")
   # apply() leaves no partial state when a stage-1 segment read throws (CT-R5).
+  # Standalone durability through the turn log (docs/design/standalone-turn-log.md): the command
+  # codec's fixtures, the open record and its seal, V at the barrier, and crash cases.
+  add_executable(standalone_turn_log_test test/standalone_turn_log_test.cc)
+  target_link_libraries(standalone_turn_log_test PRIVATE strata::core)
+  target_compile_definitions(standalone_turn_log_test PRIVATE STRATA_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
+  add_test(NAME standalone_turn_log COMMAND standalone_turn_log_test)
+  # Group commit: a closed loop of writers rides one barrier each (rocksdb-parity D5).
+  add_executable(test_barrier_cohort test/test_barrier_cohort.cc)
+  target_link_libraries(test_barrier_cohort PRIVATE strata::core)
+  add_test(NAME barrier_cohort COMMAND test_barrier_cohort)
+  # kv_strata's sync batch: one transaction, one record and one barrier (bench/kv/kv_strata.hh).
+  add_executable(kv_strata_batch_test test/kv_strata_batch_test.cc)
+  target_include_directories(kv_strata_batch_test PRIVATE bench/kv)
+  target_link_libraries(kv_strata_batch_test PRIVATE strata::core)
+  add_test(NAME kv_strata_batch COMMAND kv_strata_batch_test)
+  # Logged indexes reopened at L = 1, 3, 2 with power cuts (docs/design/rocksdb-parity.md D10 item 2).
+  add_executable(test_reopen_loops test/test_reopen_loops.cc)
+  target_include_directories(test_reopen_loops PRIVATE bench/kv)
+  target_link_libraries(test_reopen_loops PRIVATE strata::core)
+  add_test(NAME reopen_loops COMMAND test_reopen_loops)
+  # The tolerant open: a damaged block loses only the indexes whose head misses its bound (A2).
+  add_executable(test_reopen_damaged test/test_reopen_damaged.cc)
+  target_link_libraries(test_reopen_damaged PRIVATE strata::core)
+  add_test(NAME reopen_damaged COMMAND test_reopen_damaged)
+  # An idle index's checkpoint moves forward while another writes 10 x retain_segments segments;
+  # the log keeps at most retain + spare + 1 segment files (rocksdb-parity D2's test).
+  add_executable(test_checkpoint_window test/test_checkpoint_window.cc)
+  target_link_libraries(test_checkpoint_window PRIVATE strata::core)
+  add_test(NAME checkpoint_window COMMAND test_checkpoint_window)
+  # Read-your-writes under ack=none: the owner reads at applied, views at V (rocksdb-parity A1).
+  add_executable(test_ryw test/test_ryw.cc)
+  target_link_libraries(test_ryw PRIVATE strata::core)
+  add_test(NAME ryw COMMAND test_ryw)
+  # Transactions past command_bytes stream as chunk records, all or nothing (rocksdb-parity A3).
+  add_executable(test_large_tx test/test_large_tx.cc)
+  target_link_libraries(test_large_tx PRIVATE strata::core)
+  add_test(NAME large_tx COMMAND test_large_tx)
   add_executable(apply_atomic_test test/apply_atomic_test.cc)
   target_link_libraries(apply_atomic_test PRIVATE strata::core)
   add_test(NAME apply_atomic COMMAND apply_atomic_test)
@@ -176,7 +292,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(retention_test PRIVATE strata::core)
   add_test(NAME retention COMMAND retention_test)
   add_test(NAME retention_mapped COMMAND retention_test)
-  set_tests_properties(retention_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  set_tests_properties(retention_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1")
   add_executable(lifecycle_test test/lifecycle_test.cc)
   target_link_libraries(lifecycle_test PRIVATE strata::core)
   add_test(NAME lifecycle COMMAND lifecycle_test)
@@ -192,7 +308,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(defer_io_test PRIVATE strata::core)
   add_test(NAME defer_io COMMAND defer_io_test)
   add_test(NAME defer_io_mapped COMMAND defer_io_test)
-  set_tests_properties(defer_io_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  set_tests_properties(defer_io_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1")
   add_executable(work_pool_executor_test test/work_pool_executor_test.cc)
   target_link_libraries(work_pool_executor_test PRIVATE strata::core)
   add_test(NAME work_pool_executor COMMAND work_pool_executor_test)
@@ -204,12 +320,12 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   # sanitizer jobs' hour.
   foreach(t index reclaim lifecycle background_merge flush_memory)
     add_test(NAME ${t}_mapped COMMAND ${t}_test)
-    set_tests_properties(${t}_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+    set_tests_properties(${t}_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1")
   endforeach()
   add_test(NAME reclaim_bg_crash_mapped COMMAND reclaim_test bg)
-  set_tests_properties(reclaim_bg_crash_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1;STRATA_CRASH_POINTS=150")
-  set_tests_properties(reclaim_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1;STRATA_CRASH_POINTS=150")
-  set_tests_properties(lifecycle_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1;STRATA_CRASH_POINTS=1000;STRATA_BG_CRASH_POINTS=200")
+  set_tests_properties(reclaim_bg_crash_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1;STRATA_CRASH_POINTS=150")
+  set_tests_properties(reclaim_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1;STRATA_CRASH_POINTS=150")
+  set_tests_properties(lifecycle_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1;STRATA_CRASH_POINTS=1000;STRATA_BG_CRASH_POINTS=200")
   # The shared reader's core (docs/design/shared-reader.md step 1): the hazard registry, its
   # ordering litmus (native; it must also catch a weakened order on x86_64, so it runs alone),
   # the copy-on-write live bits, merge sources, and snapshot reads; then the views, their
@@ -254,6 +370,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(catalog_policy_test test/catalog_policy_test.cc)
   target_link_libraries(catalog_policy_test PRIVATE strata::core)
   add_test(NAME catalog_policy COMMAND catalog_policy_test)
+  # The policy alone (catalog_detail::s3fifo), one test per case.
+  foreach(case fifo_order ghost_to_main pick_queue evict_order kept_round limits requeue_refused unlink_any)
+    add_test(NAME catalog_policy_${case} COMMAND catalog_policy_test ${case})
+  endforeach()
   add_executable(catalog_s8_test test/catalog_s8_test.cc)
   target_link_libraries(catalog_s8_test PRIVATE strata::core)
   add_test(NAME catalog_s8_smoke COMMAND catalog_s8_test t099 t12s)
@@ -278,28 +398,32 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(catalog_teardown_test test/catalog_teardown_test.cc)
   target_link_libraries(catalog_teardown_test PRIVATE strata::core)
   add_test(NAME catalog_teardown COMMAND catalog_teardown_test)
+  # A delivery never touches a scheduler torn down after its waiter's frame was destroyed.
+  add_executable(catalog_post_lifetime_test test/catalog_post_lifetime_test.cc)
+  target_link_libraries(catalog_post_lifetime_test PRIVATE strata::core)
+  add_test(NAME catalog_post_lifetime COMMAND catalog_post_lifetime_test)
   add_executable(shared_read_test test/shared_read_test.cc)
   target_link_libraries(shared_read_test PRIVATE strata::core)
   add_test(NAME shared_read COMMAND shared_read_test)
   add_test(NAME shared_read_mapped COMMAND shared_read_test)
-  set_tests_properties(shared_read_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  set_tests_properties(shared_read_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1")
   add_executable(shared_view_test test/shared_view_test.cc)
   target_link_libraries(shared_view_test PRIVATE strata::core)
   add_test(NAME shared_view COMMAND shared_view_test)
   add_test(NAME shared_view_mapped COMMAND shared_view_test 2)
-  set_tests_properties(shared_view_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  set_tests_properties(shared_view_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1")
   # install() maps only files the target owns: a live source's reclaim leaves it readable.
   add_executable(install_own_test test/install_own_test.cc)
   target_link_libraries(install_own_test PRIVATE strata::core)
   add_test(NAME install_own COMMAND install_own_test)
   add_test(NAME install_own_mapped COMMAND install_own_test)
-  set_tests_properties(install_own_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  set_tests_properties(install_own_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1")
   # install()'s reopen: a host error neither fences nor counts as media; write damage surfaces at read.
   add_executable(install_errors_test test/install_errors_test.cc)
   target_link_libraries(install_errors_test PRIVATE strata::core)
   add_test(NAME install_errors COMMAND install_errors_test)
   add_test(NAME install_errors_mapped COMMAND install_errors_test)
-  set_tests_properties(install_errors_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  set_tests_properties(install_errors_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1")
   add_executable(directory_test test/directory_test.cc)
   target_link_libraries(directory_test PRIVATE strata::core)
   target_compile_definitions(directory_test PRIVATE STRATA_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
@@ -312,7 +436,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   # Fuzz targets: each target's checked-in corpus replays as a test in every build; with
   # STRATA_FUZZ (Clang) the libFuzzer binaries build too.
   option(STRATA_FUZZ "Build the libFuzzer targets (Clang)" OFF)
-  foreach(target stored manifest_log manifest_log_file)
+  foreach(target stored manifest_log manifest_log_file command)
     add_executable(fuzz_${target}_replay fuzz/fuzz_${target}.cc fuzz/replay.cc)
     target_link_libraries(fuzz_${target}_replay PRIVATE strata::core)
     add_test(NAME fuzz_${target}_replay COMMAND fuzz_${target}_replay "${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/${target}")
@@ -322,6 +446,16 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
       target_compile_options(fuzz_${target} PRIVATE -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all)
       target_link_options(fuzz_${target} PRIVATE -fsanitize=fuzzer,address,undefined)
     endif()
+  endforeach()
+  # basic_index's subobjects' tests: one CMake file per subobject (test/index/*.cmake).
+  file(GLOB index_tests CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test/index/*.cmake")
+  foreach(index_test ${index_tests})
+    include("${index_test}")
+  endforeach()
+  # strata::placement's tests: one CMake file per part (test/placement/*.cmake).
+  file(GLOB placement_tests CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test/placement/*.cmake")
+  foreach(placement_test ${placement_tests})
+    include("${placement_test}")
   endforeach()
   # The boundary (docs/design/core-split.md): every core header compiled alone, in a translation
   # unit of its own, with only strata::core's include root and libraries. core_boundary builds
@@ -381,10 +515,25 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   endif()
   add_executable(kv_strata bench/kv/kv_strata.cc)
   target_link_libraries(kv_strata PRIVATE strata::core)
+  # rocksdb-parity D2 item 2's floor: checkpoints and bytes written at 10k logged indexes.
+  add_executable(checkpoint_floor bench/kv/probes/rocksdb-parity/checkpoint-floor.cc)
+  target_link_libraries(checkpoint_floor PRIVATE strata::core)
   # format-14-kv's micro-prototypes (bench/kv/proto): block layouts and codecs, the decoded-block
   # cache, the buffer's sorted view, and the current buffer's bytes per record. Off by default, so
   # no other build fetches what they use; LZ4 is the pinned one strata links.
   option(STRATA_KV_PROTO "Build format-14-kv's micro-prototypes (bench/kv/proto)" OFF)
+  # The deterministic simulator (docs/mechanisms/simulator.md): its own project under sim/.
+  set(SIMULATION_TESTS ON)
+  add_subdirectory(sim)
+  # strata::group's whole suite in one build (test/group/suite.sh): every group_*_test here and
+  # the simulator's group_sim_test.
+  get_property(group_test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+  list(FILTER group_test_targets INCLUDE REGEX "^group_.*_test$")
+  add_custom_target(group_tests)
+  add_dependencies(group_tests ${group_test_targets})
+  if(TARGET group_sim_test)
+    add_dependencies(group_tests group_sim_test)
+  endif()
 endif()
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND STRATA_KV_PROTO)
   add_executable(kv_proto_blocks EXCLUDE_FROM_ALL bench/kv/proto/blocks.cc)

@@ -102,8 +102,8 @@ void bits_alone() {
 // Item 4: a snapshot of segments() reads what the index reads, at every publishable point (a
 // refresh with nothing applied after it), and the index reads what the model holds throughout.
 void snapshot_differential(std::uint64_t seed) {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	kv_index::options o;
 	o.keyed = true;
 	auto ix = kv_index::create(io, o, uuid_of("snapdiff"));
@@ -185,8 +185,8 @@ void snapshot_differential(std::uint64_t seed) {
 // clone's bit), flush, merge, and commit. The frozen state never changes, and readers see the
 // model as of the freeze.
 void bits_under_readers(std::uint64_t seed, int readers) {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	kv_index::options o;
 	o.keyed = true;
 	auto ix = kv_index::create(io, o, uuid_of("cowread"));
@@ -381,8 +381,8 @@ private:
 // finished job until after the owner let it go.
 void merge_sources_on_owner() {
 	const std::uint64_t before = detail::off_owner_changes().load();
-	faultfs::filesystem sfs;
-	faultfs::io sio(sfs);
+	fl::filesystem sfs;
+	fl::io sio(sfs);
 	kv_index::options plain;
 	plain.keyed = true;
 	auto source = kv_index::create(sio, plain, uuid_of("mergesrc"));
@@ -390,8 +390,8 @@ void merge_sources_on_owner() {
 	const std::uint64_t generation = source.checkpoint();
 	for (int path = 0; path < 5; ++path) {
 		holding_executor ex;
-		faultfs::filesystem fs, fs2;
-		faultfs::io io(fs), io2(fs2);
+		fl::filesystem fs, fs2;
+		fl::io io(fs), io2(fs2);
 		kv_index::options o = plain;
 		o.background = &ex;
 		o.auto_merge = true;

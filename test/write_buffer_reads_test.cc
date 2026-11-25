@@ -153,8 +153,8 @@ std::uint8_t flags_of(const access::record& x) { return std::uint8_t(flags_byte(
 
 void record_layout() {
 	reader_registry reg(32);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, with(reg), uuid_of("layout"));
 	CHECK(ok(ix.apply(tx({replace("k1", "a1"), replace("k2", "a2"), replace("k4", "a4")}), {})));  // docids 1, 2, 3
 	ix.refresh();
@@ -248,8 +248,8 @@ void rejection_beside_readers() {
 	const std::string K = "kaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", X = "kxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
 	const std::string good(100, 'v'), bad(100, 'w');
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		kv_index::options o;
 		o.keyed = true;
 		auto ix = kv_index::create(io, o, uuid_of("rej0"));
@@ -260,8 +260,8 @@ void rejection_beside_readers() {
 		CHECK(access::buffered_bytes(ix) == before && access::lane_tell(ix) == tell);  // no reader: the rejected record is cut
 	}
 	reader_registry reg(16);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	byte_budget memory(1 << 30);
 	auto o = with(reg);
 	o.budget = &memory;
@@ -302,8 +302,8 @@ void rejection_beside_readers() {
 	// so the peak is the share plus the chunk taken past it (at most a 32nd of the lane).
 	CHECK(peak < (256 << 10) + (64 << 10));
 	// A buffer that only ever held rejected records is dropped at the next flush, not kept.
-	faultfs::filesystem fs2;
-	faultfs::io io2(fs2);
+	fl::filesystem fs2;
+	fl::io io2(fs2);
 	auto small = with(reg);
 	small.buffer_share = 64 << 10;
 	auto only = kv_index::create(io2, small, uuid_of("rejonly"));
@@ -327,8 +327,8 @@ void tail_select() {
 		for (const std::size_t n : {1, 5, 31, 32, 33, 40, 64, 65, 100000}) {
 			for (int dup = 0; dup < 2; ++dup) {
 				reader_registry reg(8);
-				faultfs::filesystem fs;
-				faultfs::io io(fs);
+				fl::filesystem fs;
+				fl::io io(fs);
 				auto ix = kv_index::create(io, with(reg), uuid_of("tailsel"));
 				const auto h = ix.reader();
 				std::mt19937 rng(unsigned(T * 1000 + n * 10 + dup));
@@ -356,8 +356,8 @@ void tail_select() {
 // across a merge install carrying a pending delete, and after the freeze.
 void d6_schedule() {
 	reader_registry reg(32);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, with(reg), uuid_of("d6"));
 	CHECK(ok(ix.apply(tx({replace("k1", "a1"), replace("k2", "a2"), replace("k3", "a3")}), {})));  // docids 1-3
 	ix.refresh();
@@ -427,8 +427,8 @@ void d6_schedule() {
 // rejection; a reader below it skips the check, though the docid walk would find a record.
 void first_docid_only() {
 	reader_registry reg(8);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, with(reg), uuid_of("fdo"));
 	CHECK(ok(ix.apply(tx({replace("k1", "a1"), replace("k2", "a2")}), {})));  // docids 1, 2
 	ix.refresh();
@@ -512,8 +512,8 @@ void check_held(Held& held, const std::vector<state>& snaps, const std::vector<s
 
 void model_check(unsigned seed, std::size_t steps, unsigned readers, totals& sum) {
 	reader_registry reg(64);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, with(reg), uuid_of("model"));
 	const auto h = ix.reader();
 	std::vector<std::string> keys;
@@ -608,8 +608,8 @@ void model_check(unsigned seed, std::size_t steps, unsigned readers, totals& sum
 // the readers' views and are freed after them.
 void growth_under_readers() {
 	reader_registry reg(16);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, with(reg), uuid_of("growth"));
 	CHECK(ok(ix.apply(tx({replace("k0", "s0"), replace("k1", "s1")}), {})));  // docids 1, 2
 	ix.refresh();
@@ -649,8 +649,8 @@ void growth_under_readers() {
 // WB-23 (I4-13): has_docid() const builds no docid map; it walks a buffer without one.
 void has_docid_builds_nothing() {
 	reader_registry reg(4);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, with(reg), uuid_of("hasdocid"));
 	CHECK(ok(ix.apply(tx({replace("k1", "a"), replace("k2", "b")}), {})));  // docids 1, 2
 	CHECK(ok(ix.apply(tx({erase("k2")}), {})));
@@ -666,8 +666,8 @@ void has_docid_builds_nothing() {
 // erase, with no flush of its own.
 void find_docid_reads_buffers() {
 	reader_registry reg(4);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, with(reg), uuid_of("finddocid"));
 	CHECK(!ix.find_docid(1));
 	CHECK(ok(ix.apply(tx({replace("k1", "a"), replace("k2", "b")}), {})));  // docids 1, 2 at version 1
@@ -686,8 +686,8 @@ void find_docid_reads_buffers() {
 // it before the growth keeps a live table; the scan after the release frees it.
 void tables_wait_for_views() {
 	reader_registry reg(8);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, with(reg), uuid_of("tables"));
 	const auto h = ix.reader();
 	CHECK(ok(ix.apply(tx({replace("k0", "a")}), {})));
@@ -743,8 +743,8 @@ std::vector<std::string> scan_keys(std::size_t n) {
 // compaction. A view held across replacements reads its set; the replaced sets wait (D10).
 void runs_by_counter() {
 	reader_registry reg(8);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, with(reg), uuid_of("runs"));
 	index_test_access::set_run_cap(ix, 128);
 	const auto h = ix.reader();
@@ -824,8 +824,8 @@ void scan_schedule(unsigned seed, std::size_t steps, unsigned readers, scan_tota
 	WorkPool pool(po);
 	work_pool_executor ex(pool);
 	reader_registry reg(64);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto o = with(reg);
 	o.background = &ex;
 	auto ix = kv_index::create(io, o, uuid_of("scansched"));
@@ -947,8 +947,8 @@ void lane_charged() {
 	using record = access::record;
 	const kv_index::document empty;
 	for (const std::uint8_t f : {std::uint8_t(0), std::uint8_t(record::widest_flags), record::tombstone_flag}) { CHECK(record::whole_stride(f) <= access::doc_bytes(empty)); }
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	byte_budget memory(1 << 30);
 	kv_index::options o;
 	o.keyed = true;

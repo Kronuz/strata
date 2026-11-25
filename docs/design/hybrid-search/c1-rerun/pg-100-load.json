@@ -1,0 +1,19 @@
+{
+ "system": "pg",
+ "tenants": 100,
+ "per_tenant": 1000,
+ "dim": 768,
+ "host": "dg-linux",
+ "os": "Linux 6.8.0-149-generic",
+ "cpus": 8,
+ "env": "linux-vm",
+ "free_gb_before": 46.3,
+ "start_s": 3.3,
+ "version": "PostgreSQL 17.12 (Debian 17.12-1.pgdg12+1) on x86_64-pc-linux-gnu pgvector 0.8.7",
+ "load_s": 8.4,
+ "resets": 0,
+ "disk": {
+  "mb": 761,
+  "files": 999
+ }
+}

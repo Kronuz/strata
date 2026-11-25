@@ -1,6 +1,6 @@
 // install() leaves the target mapping only files it owns. The target's segments were mapped from
 // the source's files; a live source that merges, releases the checkpoint and reclaims truncates
-// them (the mapped run, STRATA_FAULTFS_MAP=1, aborts on a truncation below a live mapping).
+// them (the mapped run, FAULTLAB_MAP=1, aborts on a truncation below a live mapping).
 //   1. Reads of the installed content, deletes included, survive the source's reclaim, and so do
 //      a view taken after the install and a guard held across it.
 //   2. The target reopens to the same content once the source is gone.
@@ -30,8 +30,8 @@ kv_index::options base() {
 }  // namespace
 
 int main() {
-	faultfs::filesystem fss, fst;
-	faultfs::io ios(fss), iot(fst);
+	fl::filesystem fss, fst;
+	fl::io ios(fss), iot(fst);
 	auto so = base();
 	auto S = kv_index::create(ios, so, uuid_of("S"));
 	std::string big(600, ' ');

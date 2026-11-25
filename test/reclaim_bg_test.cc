@@ -81,20 +81,20 @@ private:
 namespace strata {
 // Reads the accounting a public call does not show.
 struct index_test_access {
-	static std::uint64_t on_disk(const kv_index& ix) { return ix.on_disk_; }
-	static std::uint64_t inflight(const kv_index& ix) { return ix.inflight_; }
+	static std::uint64_t on_disk(const kv_index& ix) { return ix.ledger_.on_disk(); }
+	static std::uint64_t inflight(const kv_index& ix) { return ix.ledger_.in_flight(); }
 	static std::uint64_t sum_files(const kv_index& ix) {
 		std::uint64_t n = 0;
-		for (const auto& [name, size] : ix.files_) { n += size; }
+		for (const auto& [name, size] : ix.ledger_.files()) { n += size; }
 		return n;
 	}
 	static std::uint64_t sum_posted(const kv_index& ix) {
 		std::uint64_t n = 0;
-		for (const auto& [name, size] : ix.posted_) { n += size; }
+		for (const auto& [name, size] : ix.ledger_.posted()) { n += size; }
 		return n;
 	}
 	static bool drain(kv_index& ix) { return ix.drain(); }
-	static std::uint64_t unlinked(const kv_index& ix) { return ix.unlinked_; }
+	static std::uint64_t unlinked(const kv_index& ix) { return ix.ledger_.unlinked(); }
 };
 }  // namespace strata
 using peek = strata::index_test_access;
@@ -104,7 +104,7 @@ struct on_disk {
 	std::uint64_t bytes = 0;  // every strata file
 };
 
-static on_disk survey(const faultfs::filesystem& fs) {
+static on_disk survey(const fl::filesystem& fs) {
 	on_disk r;
 	for (const auto& n : fs.list()) {
 		auto p = index_detail::parse_name(n);
@@ -151,7 +151,7 @@ static void merge_round(kv_index& ix, int r) {
 
 // The accounting holds the files exactly: the sum of the files on record is on_disk_, and with
 // nothing posted the bytes on disk are on_disk_.
-static void balanced(const kv_index& ix, const faultfs::filesystem& fs, const char* where) {
+static void balanced(const kv_index& ix, const fl::filesystem& fs, const char* where) {
 	if (peek::sum_files(ix) != peek::on_disk(ix)) {
 		std::fprintf(stderr, "%s: files on record %llu, on_disk %llu\n", where, (unsigned long long)peek::sum_files(ix), (unsigned long long)peek::on_disk(ix));
 		CHECK(false);
@@ -166,8 +166,8 @@ static void balanced(const kv_index& ix, const faultfs::filesystem& fs, const ch
 // 1.
 static void posted() {
 	manual_executor ex;
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	byte_budget storage(1ull << 40);
 	auto ix = kv_index::create(io, opts(&ex, &storage), uuid);
 	std::size_t posted_seen = 0, kept_dead = 0;
@@ -209,10 +209,10 @@ static void posted() {
 }
 
 // 2.
-static void failed(faultfs::op kind, const char* what) {
+static void failed(fl::op kind, const char* what) {
 	manual_executor ex;
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	byte_budget storage(1ull << 40);
 	auto ix = kv_index::create(io, opts(&ex, &storage), uuid);
 	for (int r = 0; r < 6; ++r) { merge_round(ix, r); }
@@ -241,8 +241,8 @@ static void failed(faultfs::op kind, const char* what) {
 // admission's drain frees it durably, waiting for the posted deletes, so the record is accepted.
 static void drain_waits() {
 	manual_executor ex;
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	byte_budget storage(1ull << 40);
 	kv_index::options o = opts(&ex, &storage);
 	o.auto_merge = false;
@@ -292,8 +292,8 @@ static void drain_waits() {
 static void close_waits() {
 	for (int how = 0; how < 2; ++how) {
 		manual_executor ex;
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		std::size_t live = 0;
 		{
 			auto ix = kv_index::create(io, opts(&ex), uuid);
@@ -317,8 +317,8 @@ static void crash_mid_delete() {
 	std::size_t orphans = 0, points = 0;
 	for (std::uint64_t at = 1; at <= 900; at += 9, ++points) {
 		manual_executor ex;
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		fl::filesystem fs;
+		fl::io io(fs);
 		{
 			auto ix = kv_index::create(io, opts(&ex), uuid);
 			for (int r = 0; r < 8; ++r) { merge_round(ix, r); }
@@ -357,8 +357,8 @@ static void crash_mid_delete() {
 // 6.
 static void dropped() {
 	manual_executor ex;
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	byte_budget storage(1ull << 40);
 	auto ix = kv_index::create(io, opts(&ex, &storage), uuid);
 	for (int r = 0; r < 6; ++r) { merge_round(ix, r); }
@@ -382,8 +382,8 @@ static void dropped() {
 // is posted by later commits.
 static void quota() {
 	manual_executor ex;
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto o = opts(&ex);
 	o.auto_merge = false;
 	o.reclaim_cap = 2048;
@@ -424,12 +424,12 @@ static void threaded() {
 	po.name_format = "del{:02}";
 	WorkPool pool(po);
 	work_pool_executor ex(pool);
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	byte_budget storage(1ull << 40);
 	std::mt19937_64 rng(7);
 	auto ix = kv_index::create(io, opts(&ex, &storage), uuid);
-	const faultfs::op kinds[] = {faultfs::op::truncate, faultfs::op::sync, faultfs::op::remove};
+	const fl::op kinds[] = {fl::op::truncate, fl::op::sync, fl::op::remove};
 	for (int i = 0; i < 400; ++i) { fs.add_fault({kinds[rng() % 3], 1 + rng() % 4000, rng() % 2 ? EIO : ENOSPC, bool(rng() % 2)}); }
 	for (int r = 0; r < 800; ++r) {
 		try {
@@ -488,8 +488,8 @@ static void threaded() {
 // for them instead of answering "nothing to free".
 static void drain_posted() {
 	manual_executor ex;
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	byte_budget storage(1ull << 40);
 	kv_index::options o = opts(&ex, &storage);
 	o.auto_merge = false;
@@ -527,8 +527,8 @@ static void drain_posted() {
 // retry for ever.
 static void enoent_is_done() {
 	manual_executor ex;
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	fl::filesystem fs;
+	fl::io io(fs);
 	auto ix = kv_index::create(io, opts(&ex), uuid);
 	for (int r = 0; r < 6; ++r) { merge_round(ix, r); }
 	CHECK(ix.deletes_pending() >= 2);
@@ -558,9 +558,9 @@ static void enoent_is_done() {
 
 int main() {
 	posted();
-	failed(faultfs::op::truncate, "truncate");
-	failed(faultfs::op::sync, "sync");
-	failed(faultfs::op::remove, "remove");
+	failed(fl::op::truncate, "truncate");
+	failed(fl::op::sync, "sync");
+	failed(fl::op::remove, "remove");
 	drain_waits();
 	close_waits();
 	crash_mid_delete();

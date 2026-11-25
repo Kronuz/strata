@@ -64,26 +64,28 @@ A waiting pin's frame can be destroyed before the pin arrives: task's teardown (
 D8 phase 3 in the task library) destroys every root suspended anywhere, while the catalog's chores may still run
 on a pool. The catalog keeps every primitive's teardown rule there: the frame dies, the catalog stays consistent.
 
-The precondition is task's phase 2: **a frame dies only after its scheduler is closed**, or while no delivery can
-run. A delivery exchanges `delivered` and then posts the resume; a destructor between the two releases the pin
-correctly, but the post comes after the frame is gone, and only a closed scheduler drops it. A frame with no
-scheduler is resumed inline by its delivery, so its destruction must not race a delivery at all.
+A frame may die while a delivery to it is posting the resume: the waiter is `posting` until the post returns,
+and the frame's teardown waits through it, so no post reaches a scheduler after the teardown returned and the
+owner may destroy the scheduler then. The waiter states, who may touch what in each, and the teardown's
+preconditions (the scheduler closed before its frames die; a frame with no scheduler never destroyed while a
+delivery may run; a post never destroys the frame it is given) are in `catalog-delivery.md`.
 
 - **The waiter lives on the heap**, in the shape of task's `lock_waiter`: a pin that will wait makes it before
   the compare-exchange that counts it (a failed allocation changes nothing), and its list and its awaiter each
   hold a reference. A delivery writes into the waiter, never into the frame, and drops the list's reference
   last, so a frame that dies mid-delivery never meets a write.
-- **`st` is decided by one exchange each side**: `registered`, `suspended` (await_suspend's compare-exchange),
-  `delivered` (the delivery's exchange), `abandoned` (the awaiter's destructor's exchange). Whichever comes
-  second sees the other's value.
+- **`st` has five states**: `registered`, `suspended` (await_suspend's compare-exchange), `posting` (the
+  delivery's, while it posts the resume), `delivered` and `abandoned` (the awaiter's destructor's exchange). The
+  transitions are in `catalog-delivery.md`.
 - **The destructor** (`abandon`) takes the list's mutex (the shard's, or shutdown's) and checks `linked`:
   1. Linked: no transition has taken it, so it unlinks it (the list is doubly linked) and subtracts its pin
      from the word in the same section. A waiter's pin is never a holder's, so the subtraction is a plain
      `fetch_sub`: no drain unpin, no kick (a transition is still running and will end on its own; a slot whose
      pins all left ends `{0, open}`, `free` after a close, or `{0, failed}`).
-  2. Taken (`take()` clears `linked` under the mutex as it detaches the list): it exchanges `abandoned`. If the
-     delivery came first (`delivered`) with a pin, the destructor releases it with an ordinary `unpin`; otherwise
-     the delivery sees `abandoned`, resumes nothing, and releases the pin itself.
+  2. Taken (`take()` clears `linked` under the mutex as it detaches the list): it exchanges `abandoned`. On
+     `posting` it waits until the post returns, then acts as on `delivered`: with a pin and no error, it releases
+     the pin with an ordinary `unpin`. On `suspended` the delivery sees `abandoned`, resumes nothing, and
+     releases the pin itself.
 - **A delivery that is posted and never run** (task's phase 2 drops the post) is the `delivered` case: the frame
   dies with the pin handed over and released by the destructor.
 - **The same holds for `shutdown()`'s waiters**, on shutdown's own list under `shut_mu_`; they carry no pin.
@@ -225,7 +227,7 @@ over `soft_hot`, idle slots and the bound close stay the pass's own (the sweep, 
 
 - **Queues.** A slot enters the small FIFO (a tenth of `soft_open`) when its open ends, or the main
   FIFO when the 64-bit hash of its key is in the ghost. The links live in the slot, under one
-  `policy_mu_` held for O(1) steps, taken on a miss and by the pass, never on a hit. The ghost
+  mutex of the policy subobject (`catalog_detail::s3fifo`, catalog_s3fifo.hh) held for O(1) steps, taken on a miss and by the pass, never on a hit. The ghost
   (`ghost_set.hh`) holds the hashes of the keys closed last, half as many as `soft_open` (limits.md has the size's reason and its bytes).
 - **Frequency.** The word's 2 bits, set by a use in the compare-exchange it already makes, in every
   state it meets (a hit costs no extra store). A `try_pin` that makes a compare-exchange
@@ -243,7 +245,7 @@ over `soft_hot`, idle slots and the bound close stay the pass's own (the sweep, 
   ghost when the pass took it from the small FIFO with its frequency clear (`to_ghost`, carried by a demotion's
   booking too); the idle and bound closes are not ghosted. A close the index refuses (`close_refused`, every
   exit that ends at the prior state) clears the mark, then puts the slot back in the main FIFO. A slot is
-  queued only while its state is neither `closing` nor `free`, read under `policy_mu_`, so a pass's put-back
+  queued only while its state is neither `closing` nor `free`, read under that mutex, so a pass's put-back
   cannot land between a close's unlink and its end.
   `close_refused` reads `gen` while the slot is still `closing` (ours), before `end_at`: a close another thread ends
   and a reopen of the slot for another key after that move `gen` on, so the put-back is refused and the open's own

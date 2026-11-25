@@ -73,7 +73,7 @@ static std::vector<step> workload(std::uint64_t seed, std::size_t steps) {
 
 // What recover --to g checks, read-only: every segment generation g names, against its entry,
 // read from the log holding it (manifest-log D8).
-static std::string intact(faultfs::io& io, faultfs::filesystem& fs, std::optional<std::uint64_t> g) {
+static std::string intact(fl::io& io, fl::filesystem& fs, std::optional<std::uint64_t> g) {
 	try {
 		const auto m = index_detail::read_state(io, g);
 		for (const auto& [id, r] : m.segments) {
@@ -136,8 +136,8 @@ int main(int argc, char** argv) {
 		std::uint64_t total;
 		{
 			inline_executor ex;
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			fl::filesystem fs;
+			fl::io io(fs);
 			byte_budget storage(1ull << 40);
 			auto ix = kv_index::create(io, options(&storage, bg ? &ex : nullptr), uuid_a);
 			const auto base = fs.mutations();
@@ -148,8 +148,8 @@ int main(int argc, char** argv) {
 		const std::uint64_t stride = total / max_points + 1;
 		for (std::uint64_t at = 0; at <= total; at += stride, ++points) {
 			inline_executor ex;
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			fl::filesystem fs;
+			fl::io io(fs);
 			byte_budget storage(1ull << 40);
 			{
 				auto ix = kv_index::create(io, options(&storage, bg ? &ex : nullptr), uuid_a);
