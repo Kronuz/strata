@@ -208,19 +208,24 @@ auto basic_index<Layout>::lookup_key(std::string_view key) const -> copy {
 }
 
 template <class Layout>
-void basic_index<Layout>::index_ranges() {
+void basic_index<Layout>::index_ranges() noexcept {
 	ranges_.start(segs_.size());
 	if constexpr (segment::template contains<keys_plugin>()) {
-		for (std::size_t i = 0; i < segs_.size(); ++i) {
-			const auto& s = *segs_[i];
-			if (!s.bodied()) {
-				ranges_.add_unknown(i);
-				continue;
+		// A failed allocation leaves the ranges unfinished, so lookups probe every segment: the
+		// change to segs_ it follows has happened and must not throw after it.
+		try {
+			for (std::size_t i = 0; i < segs_.size(); ++i) {
+				const auto& s = *segs_[i];
+				if (!s.bodied()) {
+					ranges_.add_unknown(i);
+					continue;
+				}
+				const auto& k = s.mapped().template get<keys_plugin>();
+				if (k.key_count()) { ranges_.add(i, k.min_key(), k.max_key()); }  // a keyless segment answers no lookup
 			}
-			const auto& k = s.mapped().template get<keys_plugin>();
-			if (k.key_count()) { ranges_.add(i, k.min_key(), k.max_key()); }  // a keyless segment answers no lookup
+			ranges_.finish();
+		} catch (const std::bad_alloc&) {
 		}
-		ranges_.finish();
 	}
 }
 

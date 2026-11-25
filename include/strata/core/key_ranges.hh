@@ -35,7 +35,7 @@ public:
 
 	// Rebuilds for a list of `segments` positions: add each known range or unknown position,
 	// then finish(). Until finish(), and after a throw in between, find() probes everything.
-	void start(std::size_t segments) {
+	void start(std::size_t segments) noexcept {
 		valid_ = false;
 		runs_.clear();
 		rest_.clear();

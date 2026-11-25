@@ -2592,7 +2592,7 @@ private:
 	// A key's live copy: the buffers' key maps newest first, then segments newest first.
 	copy lookup_key(std::string_view key) const;
 	// Rebuilds ranges_ from segs_; called right after every change to segs_ or its records.
-	void index_ranges();
+	void index_ranges() noexcept;
 	// The segments a key's lookup probes, as owned_segments lists them (get_segments' Segs).
 	struct probed_segments {
 		const std::vector<std::shared_ptr<open_segment>>& segs;
