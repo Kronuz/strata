@@ -26,7 +26,12 @@ decoded segment in `open_body_of` (`index_open.hh`), the one function every map 
 | A merge's input | `schedule` (`seg()`): a refused input is marked damaged and left out | as above |
 | A wake (`promote`) and a read after `demote` | the twin's `seg()` | the original record's |
 | A heal's reread | `heal` | the durable head's |
-| A checkpoint install | `install` | the installed manifest's |
+| A checkpoint install | `install`: the source's segments through `load_files` (whole) | the installed manifest's |
+
+The install's own copies (the lazy record and the eager remap, `index_checkpoint.hh`) carry the same
+claim for later maps; the bytes are the ones `load_files` just checked, so the claim there is
+observable only against a payload forged past the stored checksum, and the install test rests on
+the `load_files` check.
 
 A segment this process wrote (a flush, a merge's output) keeps the default vouch, which bounds no
 field (`fields` all ones): its ids passed stage 1, and the table in memory may be ahead of any
@@ -36,9 +41,9 @@ again until `heal()`.
 The claim is kept on the record, one per segment of every open index, at no memory cost: the
 vouch is 32 bytes (16 on main), and the record's small members (`version` and three flags) share
 the one word each used to pad alone, so `open_segment` stays 200 bytes, as on main. Strata's
-part of the check keeps nothing; prospect's dictionary caches its pool reader (400 B per segment,
-as Xapiand's loop did on main), and opened in the middle of the load its placement costs ~160 B
-of fragmentation per index (`docs/perf/eager-open.md`, "The record's size").
+part of the check keeps nothing, and prospect's dictionary scans its pool through a reader it
+drops (prospect:c99e6be), so the check leaves no heap behind (`docs/perf/eager-open.md`, "The
+record's size").
 
 ## The plugin's part
 
