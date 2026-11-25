@@ -2,7 +2,7 @@
 
 Status: design (quest strata-journal-behind, after its durability review's F1 and F2), revised
 after its design review (CHANGES: D-1 to D-8). The lead approved the binding (D1 to D4, D3's gate)
-and Q1 to Q3 (a) on 2026-11-25; D6's split by refusal is the owner's default, pending the owner.
+and Q1 to Q3 (a) on 2026-11-25; the owner confirmed D6's split by refusal and Q1 to Q3 (PLAN D183).
 The group's part builds once `consensus:recover-gate` and `strata:applied-term` exist (Contracts);
 D5 needs neither and builds first. Line references: strata:31821753, consensus:6d710cb (strata's
 pin), journal:9c7e31c.
@@ -159,7 +159,7 @@ Lost:
 - Keep every published bundle pinned (review D-1 (b)): no failed flight, at a full segment read
   per checkpoint in every group.
 
-## D6. Which refusals repair in place (owner default)
+## D6. Which refusals repair in place
 
 The refusal is one rule (D2); its remedy depends on what was lost. Pending the owner, this design
 takes the default the lead set (2026-11-25):
