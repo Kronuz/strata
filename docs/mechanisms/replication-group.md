@@ -112,7 +112,9 @@ one is pending, so a close racing a checkpoint would fail.
    `no_space` like an entry.
 2. **Sync** each named file (an immutable one once) and the directory. A failure fences the
    replica; it reopens through recovery, since a retried sync can succeed with the bytes lost.
-3. **Commit strata**, so its durable head P_H is at or past P_b.
+3. **Commit strata**, so its durable head P_H is at or past P_b. Capture, sync and commit are one
+   chore item, so the commit's generation is at P_b; while a peer awaits an install it is also
+   the bundle's pin (the pin is at the bundle, journal-binding.md D5).
 4. **Publish** the bundle through `Driver::checkpoint`; consensus may compact at or below P_b.
    A bundle plus the log's bound (`maximum_size(limits)`) larger than the admission's replacement
    pool would wait forever for its reservation, so the checkpoint fails with `length_error`

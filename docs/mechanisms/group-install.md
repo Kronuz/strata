@@ -6,14 +6,14 @@
 # Install
 
 A replica behind the leader's checkpoint cannot catch up from the log: consensus compacted it.
-It installs instead: the leader's bundle, a strata checkpoint at or past it, and each file of the
+It installs instead: the leader's bundle, the strata checkpoint at it, and each file of the
 application's file set to the bundle's length, in one transfer. Then consensus delivers every
 entry above the bundle, as after a recovery. `include/strata/group/install.hh` holds it.
 
 ```
  leader                                   learner
  bundle P_b ──consensus image──────────▶  image = bundle
- make_pin: strata checkpoint G ≥ P_b       fetch_pin ◀── "P_b/pin"
+ make_pin: strata checkpoint G at P_b      fetch_pin ◀── "P_b/pin"
            files, lengths, CRC32C          stage: is.* ia.* ◀── "P_b/s|a/offset/name" (≤ 64 KiB)
  serve ◀──────── fetch lane ────────────   marker ip (stage complete)
                                            consensus persists the bundle (its install)
@@ -24,10 +24,11 @@ entry above the bundle, as after a recovery. `include/strata/group/install.hh` h
 ## The pin
 
 `make_pin`, on the leader's chore between two entries, pins strata's checkpoint generation G
-(`index::checkpoint()`), which strata keeps with its files until `release_pin`. strata committed at
-or past the bundle's P_b before it published, so G's applied position is at or past P_b: the
-learner's strata replays nothing at or below it, and the file set replays from P_b, as in
-recovery (D16). The pin lists each file with its length and the CRC32C of its bytes to that
+(`index::checkpoint()`), which strata keeps with its files until `release_pin`. The pin is at the
+bundle: G's applied position is P_b itself (docs/design/journal-binding.md D5), and `make_pin`
+refuses a bundle strata is not at. So after activation the learner's strata head is the boundary
+its log installed, and the file set replays from P_b, as in recovery (D16). The learner's
+`check_stage` refuses a staged head past its bundle. The pin lists each file with its length and the CRC32C of its bytes to that
 length:
 
 - strata's manifest log that holds G, to its length now, and G's segments;
@@ -106,8 +107,10 @@ answered by the leader's `group::serve`).
 ```
 
 - **The leader** pins at `SnapshotNeeded`, on the chore between entries, the bundle at the key's
-  boundary when it is its latest one (restored, installed or published); another boundary pins
-  nothing. One pin per bundle, kept until a later bundle supersedes it and no flight holds it:
+  boundary when it is its latest one (restored, installed or published) and strata is at it;
+  another boundary pins nothing. With strata past the bundle it starts a pinning checkpoint
+  instead: while a peer awaits an install, a checkpoint's commit is also its pin, and a
+  publication consensus refuses `Busy` during a flight retries after the flight's release (D5). One pin per bundle, kept until a later bundle supersedes it and no flight holds it:
   consensus sends the image as the flight starts, so the learner's pin fetch can outrun the
   chore, find none and fail validation, and the leader's next flight then finds the pin. A pin
   released at its flight's end would lose that race every time. A publish or an activation
