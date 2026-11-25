@@ -16,10 +16,39 @@ strata's keys section and filter are per segment, so a run needs no rewrite.
 Past `max_runs` runs (64), the smallest key-adjacent runs merge: a window of up to the merge
 factor of runs with no other segment between them in key order, the one writing the fewest bytes
 per segment it removes, repeated down to the cap. The output spans only its runs' keys, so it is a
-run again. `max_runs = 0` keeps no runs: the tiers alone, as before D9. The cap bounds what every segment costs whatever its size: a query's per-segment setup
-(query-gap H20), a mapping and its record. 64 is twice what the tiers hold at their largest (8 a
-tier over four tiers up to the 2.5 GiB half-maximum), and RocksDB holds every flushed SST with no
-cap (103 files after `tenx1` fillseq).
+run again. `max_runs = 0` keeps no runs: the tiers alone, as before D9.
+
+### Why 64
+
+The cap bounds what every segment costs whatever its size. Per run:
+
+1. Search fan-out, the binding cost. A postings query visits every segment: a dictionary walk per
+   term, a scorer tree, the per-segment setup of query-gap H20. Keys order the runs, not the words,
+   so on text every run holds postings for every common term and no term bound skips one. Measured
+   (`docs/perf/search-runs.md`, light probe): a sequentially keyed text index at 62 runs against
+   the tiers' 4 segments costs a `TOP_10` term query 7.5x at p50 and 2.5x at p99 (about 6.6 µs a
+   run), an AND 6.4x and 1.5x, a phrase 3.7x and 1.17x.
+2. Maps and vnodes. An open index holds two descriptors whatever its segments (the directory and
+   its manifest, `docs/perf/fd-budget.md`), but each mapped segment holds one map and one vnode
+   that `resource_budget` counts (`docs/design/limits.md`, cold-tier rows). With many indexes a
+   host, 64 runs an index is 4 to 16 times the maps of the tiers' 4 to 16 segments: fewer hot
+   indexes under the same budget.
+3. Gets and the range index: none that matters. `key_ranges` finds the run in log2(64) = 6
+   comparisons and rebuilds by sorting at most 64 ranges after a segment list change; a merge
+   decision maps and sorts the same candidates.
+
+64 is twice what the tiers hold at their largest (8 a tier over four tiers up to the 2.5 GiB
+half-maximum). For a keys-and-stored layout (`document_layout`, the KV store) only items 2 and 3
+apply, so 64 costs nothing a get sees and saves every rewrite of a sequential load. For a layout
+with postings, item 1 makes any run count above the tiers' a search cost on every query.
+
+RocksDB caps no non-overlapping files: each level from L1 is one sorted run of any number of SSTs
+(103 after `tenx1` fillseq), a get binary-searches a level's files and an iterator opens them as
+it reaches them; only L0's overlapping files are counted (compaction at 4, writes slowed at 20,
+stopped at 36). It never fans a lookup out over a level's files, which is why it needs no cap.
+Lucene's `TieredMergePolicy` caps no segment count either (8 a tier by size) and searches every
+segment, but has no key ranges, so a sequential load merges by size there: the runs' fan-out is
+the cost of taking RocksDB's layout into a Lucene-style query path.
 
 ## Where the ranges come from
 
@@ -74,4 +103,7 @@ After a fillseq, readall returns the same get digest on A and B (eb2a3ad93b05aaf
   amplification over 200 flushes in `merge_policy_test`'s simulation, against none at the cap's
   value), where RocksDB writes each SST once and keeps every one.
 - The cap trades search cost for bytes written: an index of text documents keyed in order holds up
-  to 64 segments where the tiers alone held about a quarter of that.
+  to 64 segments where the tiers alone held 4 to 16, and every postings query pays each one (above:
+  2.5x the p99 of a `TOP_10` term query at 62 runs against 4 segments). Bounding it needs a lower
+  cap for layouts with postings (the tiers' own count), merging adjacent runs when the index is
+  idle, or both; a per-run skip by term bounds helps only fields whose values follow the key.
