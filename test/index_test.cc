@@ -1853,6 +1853,45 @@ int main() {
 		// ("Q10" sorts inside "Q0".."Q7"), whose segments then merge in the tiers.
 		CHECK((cap == 64 ? ix.segments().size() == 40 : ix.segments().size() < 20) && contents(ix).size() == 40);
 	}
+	// The run cap is the layout's: run_cap for the document layout, whose gets probe one run; none
+	// for a layout on the default segment policy (the search layout's, whose queries visit every
+	// segment); an explicit max_runs overrides either.
+	{
+		using narrow_index = basic_index<layout<keys_plugin>>;
+		static_assert(segment_policy<document_layout>::max_runs == merge_policy::run_cap && segment_policy<layout<keys_plugin>>::max_runs == 0);
+		CHECK(kv_index::options{}.policy.max_runs == 64 && narrow_index::options{}.policy.max_runs == 0);
+		// Loaded in key order, one key a commit: the document layout keeps 40 runs, the other
+		// merges by the tiers.
+		const auto load = [&](auto ix) {
+			using index_t = decltype(ix);
+			for (int i = 0; i < 40; ++i) {
+				typename index_t::transaction t;
+				t.ops.emplace_back();
+				t.ops.back().type = index_t::operation::add;
+				char k[8];
+				std::snprintf(k, sizeof k, "Q%02d", i);
+				t.ops.back().doc.key = k;
+				CHECK(ix.apply(t, {}).result == verdict::accepted);
+				ix.commit();
+			}
+			return ix.segments().size();
+		};
+		fl::filesystem fs;
+		fl::io io(fs);
+		auto o = keyed;
+		o.auto_merge = true;
+		CHECK(load(kv_index::create(io, o, uuid)) == 40);
+		fl::filesystem nfs;
+		fl::io nio(nfs);
+		narrow_index::options n;
+		n.keyed = true;
+		n.auto_merge = true;
+		CHECK(load(narrow_index::create(nio, n, uuid)) < 20);
+		n.policy.max_runs = 64;
+		fl::filesystem rfs;
+		fl::io rio(rfs);
+		CHECK(load(narrow_index::create(rio, n, uuid)) == 40);
+	}
 	// Reclamation: a segment whose documents are all deleted leaves at the commit without a
 	// merge, and obsolete files leave reclaim_step bytes at a time, about reclaim_slice per
 	// commit; power lost at any point of it leaves the commit's content and no file that

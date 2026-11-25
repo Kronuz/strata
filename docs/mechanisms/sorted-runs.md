@@ -13,10 +13,15 @@ candidate for a size merge; it still joins a merge that reclaims deletes past th
 fraction. RocksDB's trivial move does the same for an SST that overlaps nothing in the next level;
 strata's keys section and filter are per segment, so a run needs no rewrite.
 
-Past `max_runs` runs (64), the smallest key-adjacent runs merge: a window of up to the merge
+Past `max_runs` runs, the smallest key-adjacent runs merge: a window of up to the merge
 factor of runs with no other segment between them in key order, the one writing the fewest bytes
 per segment it removes, repeated down to the cap. The output spans only its runs' keys, so it is a
 run again. `max_runs = 0` keeps no runs: the tiers alone, as before D9.
+
+The cap is the layout's, by its read shape: `segment_policy<Layout>::max_runs` is the default of
+its index's `merge_policy::max_runs`, `merge_policy::run_cap` (64) for `document_layout`, whose
+gets probe one run, and 0 for a layout on the default segment policy, the search layout's, whose
+queries visit every segment. An explicit `max_runs` in the options overrides it.
 
 ### Why 64
 
@@ -40,7 +45,10 @@ The cap bounds what every segment costs whatever its size. Per run:
 64 is twice what the tiers hold at their largest (8 a tier over four tiers up to the 2.5 GiB
 half-maximum). For a keys-and-stored layout (`document_layout`, the KV store) only items 2 and 3
 apply, so 64 costs nothing a get sees and saves every rewrite of a sequential load. For a layout
-with postings, item 1 makes any run count above the tiers' a search cost on every query.
+with postings, item 1 makes any run count above the tiers' a search cost on every query, so its
+cap is 0. A run-aware query path is the follow-up that could lift that: one that treats the runs
+as one sorted level (a term dictionary and postings cursor that step from run to run, as a
+RocksDB level iterator steps from file to file) instead of a segment each.
 
 RocksDB caps no non-overlapping files: each level from L1 is one sorted run of any number of SSTs
 (103 after `tenx1` fillseq), a get binary-searches a level's files and an iterator opens them as
@@ -104,6 +112,6 @@ After a fillseq, readall returns the same get digest on A and B (eb2a3ad93b05aaf
   value), where RocksDB writes each SST once and keeps every one.
 - The cap trades search cost for bytes written: an index of text documents keyed in order holds up
   to 64 segments where the tiers alone held 4 to 16, and every postings query pays each one (above:
-  2.5x the p99 of a `TOP_10` term query at 62 runs against 4 segments). Bounding it needs a lower
-  cap for layouts with postings (the tiers' own count), merging adjacent runs when the index is
-  idle, or both; a per-run skip by term bounds helps only fields whose values follow the key.
+  2.5x the p99 of a `TOP_10` term query at 62 runs against 4 segments), so layouts with postings
+  keep no runs and write a sequential load as the tiers do. A per-run skip by term bounds would
+  help only fields whose values follow the key; a run-aware query path is what could lift it.

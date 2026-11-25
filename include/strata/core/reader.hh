@@ -37,6 +37,7 @@
 #include "strata/core/fields.hh"
 #include "strata/core/format.hh"
 #include "strata/core/keys.hh"
+#include "strata/core/merge_policy.hh"
 #include "strata/core/section_io.hh"
 #include "termdict.hh"
 
@@ -603,20 +604,25 @@ struct stored_plugin {
 using document_layout = layout<keys_plugin, stored_plugin>;
 
 // How a layout's writers order a segment's ordinals and pack its stored records
-// (format-14-kv D1, D5): by default docid order in 64 KiB zstd blocks, the search layout's.
+// (format-14-kv D1, D5): by default docid order in 64 KiB zstd blocks, the search layout's. Its
+// run cap is the index's default `merge_policy::max_runs` (D9): by default none, the tiers alone,
+// since a postings query visits every segment.
 template <class Layout>
 struct segment_policy {
 	static constexpr bool key_order = false;
 	static constexpr std::size_t stored_block = format::max_stored_block;
 	static constexpr format::stored_codec stored_codec = format::zstd_codec(3);
+	static constexpr std::size_t max_runs = 0;
 };
 // The document layout's ordinals are its keys' ranks, in 4 KiB LZ4 blocks: a get decodes one
-// small block, and a scan reads blocks in key order (D1a, D1c, D1d).
+// small block, and a scan reads blocks in key order (D1a, D1c, D1d). A get probes the one run
+// holding its key, so sequential loads keep their runs up to the cap.
 template <>
 struct segment_policy<document_layout> {
 	static constexpr bool key_order = true;
 	static constexpr std::size_t stored_block = 4 << 10;
 	static constexpr format::stored_codec stored_codec = format::lz4_codec;
+	static constexpr std::size_t max_runs = merge_policy::run_cap;
 };
 
 // --- documents (L10) --------------------------------------------------------------------

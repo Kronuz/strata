@@ -28,8 +28,11 @@ struct merge_policy {
 	// A segment whose key range overlaps no other's is a run and never merges for size,
 	// whatever its size. Past this many runs the smallest key-adjacent ones merge: each
 	// segment costs a query its setup and the index a mapping, whatever its size (D9, N13).
-	// 0 keeps no runs: every segment merges by size, the tiers alone.
-	std::size_t max_runs = 64;
+	// 0 keeps no runs: every segment merges by size, the tiers alone. An index takes its layout's
+	// cap (segment_policy::max_runs): run_cap where a get finds its run, 0 where queries visit
+	// every segment (docs/mechanisms/sorted-runs.md, "Why 64").
+	static constexpr std::size_t run_cap = 64;
+	std::size_t max_runs = run_cap;
 
 	struct candidate {
 		std::uint64_t id = 0, bytes = 0, docs = 0, deleted = 0;
