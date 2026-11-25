@@ -4,9 +4,8 @@
 // the next starts after rpc_timeout: a peer always awaits an install, and a flight is Sending
 // between its image and its failed pin fetch. The leader checkpoints every `every` writes. Each
 // write's wall time runs from propose to its quorum answer and includes the chore work the step
-// pumped meanwhile (apply,
-// the checkpoint's capture, syncs, commit and, under D5, its pin's read of every segment). The
-// device is memory: this measures the chore's CPU, not fsync.
+// pumped meanwhile (apply, the checkpoint's capture, syncs, commit and, under D5, its pin's read
+// of every segment). The device is memory: this measures the chore's CPU, not fsync.
 // `group_checkpoint_latency [writes] [every] [seed]`: prints p50 and p99 in microseconds.
 #include "../../test/group/world.hh"
 
