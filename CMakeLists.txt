@@ -151,6 +151,17 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     add_test(NAME group_install_bundle_${case} COMMAND group_install_bundle_test ${case})
     set_tests_properties(group_install_bundle_${case} PROPERTIES TIMEOUT 600)
   endforeach()
+  # C5: quorum write latency under periodic checkpoints with an install in flight
+  # (bench/group/ab.sh); STRATA_GROUP_BENCH_BASE names a directory of strata/group headers to
+  # build the same bench against as group_checkpoint_latency_base.
+  add_executable(group_checkpoint_latency bench/group/checkpoint_latency.cc)
+  target_link_libraries(group_checkpoint_latency PRIVATE strata::group)
+  set(STRATA_GROUP_BENCH_BASE "" CACHE PATH "strata/group headers for the bench's base build")
+  if(STRATA_GROUP_BENCH_BASE)
+    add_executable(group_checkpoint_latency_base bench/group/checkpoint_latency.cc)
+    target_include_directories(group_checkpoint_latency_base BEFORE PRIVATE ${STRATA_GROUP_BENCH_BASE})
+    target_link_libraries(group_checkpoint_latency_base PRIVATE strata::group)
+  endif()
   # What an idle open group holds, on real directories (A6); frames counted, the frame pool off
   # so a freed frame leaves the heap count (the pool's cache is per thread, not per group).
   add_executable(group_footprint_test test/group/footprint_test.cc)
