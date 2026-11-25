@@ -1,18 +1,25 @@
 # Sorted runs
 
 How the merge policy keeps a segment that overlaps no other segment out of the tiers, so a
-sequential load is written once by its flush and never rewritten by size (rocksdb-parity D9). The
-code is `merge_policy::settled` and `find_merges` in `include/strata/core/merge_policy.hh`, and
-`basic_index::run_merges` in `include/strata/core/index_merge.hh`.
+sequential load is written once by its flush and never rewritten by size (rocksdb-parity D9), and
+how a lookup finds the one run that can hold a key. The code is `merge_policy::settled`,
+`cap_runs` and `find_merges` in `include/strata/core/merge_policy.hh`, `basic_index::run_merges`
+in `include/strata/core/index_merge.hh`, and `key_ranges` in `include/strata/core/key_ranges.hh`.
 
 ## The rule
 
-A segment is a settled run when its live bytes are at least `run_bytes` (4 MiB) and its key range
-overlaps no other segment's. A settled run is no candidate for a size merge; it still joins a merge
-that reclaims deletes past the allowed fraction. Segments under `run_bytes` merge by size as
-before, so a run of flushes smaller than that merges once into a segment that settles. RocksDB's
-trivial move does the same for an SST that overlaps nothing in the next level; strata's keys
-section and filter are per segment, so a settled run needs no rewrite.
+A segment is a run when its key range overlaps no other segment's, whatever its size. A run is no
+candidate for a size merge; it still joins a merge that reclaims deletes past the allowed
+fraction. RocksDB's trivial move does the same for an SST that overlaps nothing in the next level;
+strata's keys section and filter are per segment, so a run needs no rewrite.
+
+Past `max_runs` runs (64), the smallest key-adjacent runs merge: a window of up to the merge
+factor of runs with no other segment between them in key order, the one writing the fewest bytes
+per segment it removes, repeated down to the cap. The output spans only its runs' keys, so it is a
+run again. The cap bounds what every segment costs whatever its size: a query's per-segment setup
+(query-gap H20), a mapping and its record. 64 is twice what the tiers hold at their largest (8 a
+tier over four tiers up to the 2.5 GiB half-maximum), and RocksDB holds every flushed SST with no
+cap (103 files after `tenx1` fillseq).
 
 ## Where the ranges come from
 
@@ -26,6 +33,17 @@ every other, so nothing settles.
 
 The policy recomputes the runs at every decision: a segment that a later flush overlaps stops
 being a run and merges by size with what overlaps it.
+
+## Lookups
+
+`key_ranges` holds the mapped segments' ranges: the runs sorted by first key, and the rest (ranges
+that overlap, and unmapped segments, whose range is unknown) by position. A key inside a run's
+range is in no other mapped segment's, so `lookup_key` (every upsert's read) and `get` probe that
+run, found by binary search, and the rest, newest first, instead of every segment. The index
+rebuilds it right after each change to its segment list (flush, merge publication, checkpoint
+install, open, close, warm twins, heal) and after a merge decision maps segments; a list of another
+length than the one it was built for, or a rebuild that threw, probes every segment. Snapshots and
+shared readers' views walk their segments as before.
 
 ## Measured
 
@@ -47,8 +65,13 @@ After a fillseq, readall returns the same get digest on A and B (eb2a3ad93b05aaf
 
 ## Limits
 
-- A get walks the segments newest first and skips each by its key range; with many settled runs
-  the walk is linear in their count, where RocksDB binary-searches a level's files. The runs'
-  range index and the cap on the run count (D9, N13) are the next steps of task 7.
-- Segments under `run_bytes` still merge once before they settle, so a sequential load writes its
-  bytes about twice where RocksDB's writes them once.
+- A scan still opens every segment whose range reaches past its start, runs included: a short scan
+  over many runs seeks in each, where it needs only the run holding its start and the next ones.
+- Snapshots and shared readers' views walk every segment for a get.
+- A reopened index finds no run until a merge decision or a change to its segment list maps the
+  segments; until then a lookup probes every segment, as before D9.
+- A sequential load past 64 runs rewrites its bytes in key-adjacent merges (1.8x write
+  amplification over 200 flushes in `merge_policy_test`'s simulation, against none at the cap's
+  value), where RocksDB writes each SST once and keeps every one.
+- The cap trades search cost for bytes written: an index of text documents keyed in order holds up
+  to 64 segments where the tiers alone held about a quarter of that.
